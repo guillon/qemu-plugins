@@ -79,27 +79,40 @@ static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t value, uin
 	memref.address    = pc;
 	memref.accesstype = D4XINSTRN;
 	memref.size       = (unsigned short) info.size;
-        cost = d4ref(instr_cache, memref);
+	if ((pc % info.size) != 0)
+	  cost = 0; /* Ignore misaligned accesses for now. */
+	else
+	  cost = d4ref(instr_cache, memref);
         break;
 
     case 'r':
 	memref.address    = address;
 	memref.accesstype = D4XREAD;
 	memref.size       = (unsigned short) info.size;
-        cost = d4ref(data_cache, memref);
+	if ((address % info.size) != 0)
+	  cost = 0; /* Ignore misaligned accesses for now. */
+	else
+	  cost = d4ref(data_cache, memref);
+	if (cost > 2)
+	  fprintf(output, "!!! cost: %d, addr: %llx, size: %d\n", cost, (unsigned long long)address, info.size);
         break;
 
     case 'w':
 	memref.address    = address;
 	memref.accesstype = D4XWRITE;
 	memref.size       = (unsigned short) info.size;
-        cost = d4ref(data_cache, memref);
+	if ((address % info.size) != 0)
+	  cost = 0; /* Ignore misaligned accesses for now. */
+	else
+	  cost = d4ref(data_cache, memref);
         break;
 
     default:
         assert(0);
     }
     assert(cost >= 0);
+
+    if (cost > 2) cost = 2;
 
     /* Allocate cost slots on demand.  */
     index = type2index(info.type);
@@ -242,11 +255,11 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
     memref.size = 0;
     d4ref(data_cache, memref);
 
-    stdout = output;
-    dostats();
-    stdout = saved_stdout;
+    /* stdout = output; */
+    /* dostats(); */
+    /* stdout = saved_stdout; */
 
-    fprintf(output, "---Execution complete.\n");
+    /* fprintf(output, "---Execution complete.\n"); */
 
     fprintf(output, "\nSummary:\n");
     for (i = 0; i < 3; i++) {
@@ -305,10 +318,10 @@ void tpi_init(TCGPluginInterface *tpi)
     if (data_cache == NULL)
         data_cache = instr_cache;
 
-    fprintf(output, "---Dinero IV cache simulator, version %s\n", D4VERSION);
-    fprintf(output, "---Written by Jan Edler and Mark D. Hill\n");
-    fprintf(output, "---Copyright (C) 1997 NEC Research Institute, Inc. and Mark D. Hill.\n");
-    fprintf(output, "---All rights reserved.\n");
-    fprintf(output, "---Copyright (C) 1985, 1989 Mark D. Hill.  All rights reserved.\n");
-    fprintf(output, "---See -copyright option for details\n");
+    /* fprintf(output, "---Dinero IV cache simulator, version %s\n", D4VERSION); */
+    /* fprintf(output, "---Written by Jan Edler and Mark D. Hill\n"); */
+    /* fprintf(output, "---Copyright (C) 1997 NEC Research Institute, Inc. and Mark D. Hill.\n"); */
+    /* fprintf(output, "---All rights reserved.\n"); */
+    /* fprintf(output, "---Copyright (C) 1985, 1989 Mark D. Hill.  All rights reserved.\n"); */
+    /* fprintf(output, "---See -copyright option for details\n"); */
 }
