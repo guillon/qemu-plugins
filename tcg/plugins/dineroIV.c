@@ -32,6 +32,9 @@
 #include "exec/def-helper.h"
 #include "tcg-plugin.h"
 
+#define MAX_MEM_LEVEL 3
+int mem_level_latencies[MAX_MEM_LEVEL];
+
 #define D4ADDR uint64_t
 #include "d4-7/d4.h"
 #include "d4-7/cmdd4.h"
@@ -40,20 +43,28 @@
 static FILE *output;
 static d4cache *instr_cache, *data_cache;
 
+static TCGArg *icount_total_args;
+static uint64_t icount_total;
+
+#define TYPE_IFETCH 0
+#define TYPE_DREAD 1
+#define TYPE_DWRITE 2
+#define TYPE_NUM 3
+
 static inline size_t type2index(char type) {
     switch (type) {
-    case 'i': return 0;
-    case 'r': return 1;
-    case 'w': return 2;
+    case 'i': return TYPE_IFETCH;
+    case 'r': return TYPE_DREAD;
+    case 'w': return TYPE_DWRITE;
     }
     assert(0);
 }
 
 static inline const char *index2type(size_t index) {
     switch (index) {
-    case 0: return "instruction fetch";
-    case 1: return "data read";
-    case 2: return "data write";
+    case TYPE_IFETCH: return "instruction fetch";
+    case TYPE_DREAD: return "data read";
+    case TYPE_DWRITE: return "data write";
     }
     assert(0);
 }
@@ -61,7 +72,7 @@ static inline const char *index2type(size_t index) {
 static struct {
     uint64_t *counts;
     size_t size;
-} cost_summary[3];
+} cost_summary[TYPE_NUM];
 
 static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t value, uint64_t pc)
 {
@@ -79,10 +90,7 @@ static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t value, uin
 	memref.address    = pc;
 	memref.accesstype = D4XINSTRN;
 	memref.size       = (unsigned short) info.size;
-	if ((pc % info.size) != 0)
-	  cost = 0; /* Ignore misaligned accesses for now. */
-	else
-	  cost = d4ref(instr_cache, memref);
+        cost = d4ref(instr_cache, memref);
         break;
 
     case 'r':
@@ -93,8 +101,6 @@ static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t value, uin
 	  cost = 0; /* Ignore misaligned accesses for now. */
 	else
 	  cost = d4ref(data_cache, memref);
-	if (cost > 2)
-	  fprintf(output, "!!! cost: %d, addr: %llx, size: %d\n", cost, (unsigned long long)address, info.size);
         break;
 
     case 'w':
@@ -112,7 +118,7 @@ static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t value, uin
     }
     assert(cost >= 0);
 
-    if (cost > 2) cost = 2;
+    if (cost >= MAX_MEM_LEVEL) cost = MAX_MEM_LEVEL-1;
 
     /* Allocate cost slots on demand.  */
     index = type2index(info.type);
@@ -245,9 +251,9 @@ extern void doargs (int, char **);
 
 static void cpus_stopped(const TCGPluginInterface *tpi)
 {
-    FILE *saved_stdout = stdout;
     d4memref memref;
     int i, j;
+    uint64_t cycles_total = icount_total;
 
     /* Flush the data cache.  */
     memref.accesstype = D4XCOPYB;
@@ -255,21 +261,90 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
     memref.size = 0;
     d4ref(data_cache, memref);
 
-    /* stdout = output; */
-    /* dostats(); */
-    /* stdout = saved_stdout; */
-
-    /* fprintf(output, "---Execution complete.\n"); */
-
-    fprintf(output, "\nSummary:\n");
-    for (i = 0; i < 3; i++) {
+    fprintf(output, "\n%s (%d): cache summary:\n",
+            tcg_plugin_get_filename(), getpid());
+    for (i = 0; i < TYPE_NUM; i++) {
         for (j = 0; j < cost_summary[i].size; j++) {
-            fprintf(output, "\t%s: %"PRIu64" access in ", index2type(i), cost_summary[i].counts[j]);
+            fprintf(output, "\t%s: %"PRIu64" access in ", index2type(i),
+                    cost_summary[i].counts[j]);
             if (j != cost_summary[i].size - 1)
                 fprintf(output, "cache level %d\n", j + 1);
             else
                 fprintf(output, "RAM\n");
+            /* Treat only data reads for cycles estimate for now. */
+            if (i == TYPE_DREAD)
+                cycles_total +=
+                    cost_summary[i].counts[j] * mem_level_latencies[j];
         }
+    }
+    fprintf(output,
+            "\tfetched instructions: %"PRIu64 "\n",
+            icount_total);
+
+    fprintf(tpi->output,
+            "%s (%d): number of estimated cycles = %" PRIu64 "\n",
+            tcg_plugin_get_filename(), getpid(), cycles_total);
+
+}
+
+/* This function generates code which is *not* thread-safe!  */
+static void before_gen_tb(const TCGPluginInterface *tpi)
+{
+    TCGv_ptr icount_ptr;
+    TCGv_i64 icount_tmp;
+    TCGv_i32 tb_icount32;
+    TCGv_i64 tb_icount64;
+
+    /* icount_ptr = &icount */
+    icount_ptr = tcg_const_ptr((tcg_target_long)&icount_total);
+
+    /* icount_tmp = *icount_ptr */
+    icount_tmp = tcg_temp_new_i64();
+    tcg_gen_ld_i64(icount_tmp, icount_ptr, 0);
+
+    /* icount_args = &tb_icount32 */
+    /* tb_icount32 = fixup(tb->icount) */
+    icount_total_args = gen_opparam_ptr + 1;
+    tb_icount32 = tcg_const_i32(0);
+
+    /* tb_icount64 = (int64_t)tb_icount32 */
+    tb_icount64 = tcg_temp_new_i64();
+    tcg_gen_extu_i32_i64(tb_icount64, tb_icount32);
+
+    /* icount_tmp += tb_icount64 */
+    tcg_gen_add_i64(icount_tmp, icount_tmp, tb_icount64);
+
+    /* *icount_ptr = icount_tmp */
+    tcg_gen_st_i64(icount_tmp, icount_ptr, 0);
+
+    tcg_temp_free_i64(tb_icount64);
+    tcg_temp_free_i32(tb_icount32);
+    tcg_temp_free_i64(icount_tmp);
+    tcg_temp_free_ptr(icount_ptr);
+}
+
+static void after_gen_tb(const TCGPluginInterface *tpi)
+{
+    /* Patch parameter value.  */
+    *icount_total_args = tpi->tb->icount;
+}
+
+static void parse_latencies(const char *latencies)
+{
+    int level = 0;
+    const char *ptr = latencies;
+
+    while (*ptr != '\0' && level < MAX_MEM_LEVEL) {
+        mem_level_latencies[level] = atoi(ptr);
+        if (mem_level_latencies[level] <= 0)
+            fprintf(output, "# WARNING: %d latency for memory level %d, "
+                    "while parsing DINERO_LATENCIES: %s\n",
+                    mem_level_latencies[level], level, latencies);
+        while(*ptr != '\0' && *ptr != ',')
+            ptr++;
+        if (*ptr == ',')
+            ptr++;
+        level += 1;
     }
 }
 
@@ -278,6 +353,7 @@ void tpi_init(TCGPluginInterface *tpi)
     int i, argc;
     char **argv;
     char *cmdline;
+    char *latencies;
 
     TPI_INIT_VERSION(*tpi);
     output = tpi->output;
@@ -285,10 +361,21 @@ void tpi_init(TCGPluginInterface *tpi)
     tpi->after_gen_opc = after_gen_opc;
     tpi->decode_instr  = decode_instr;
     tpi->cpus_stopped  = cpus_stopped;
+    tpi->before_gen_tb = before_gen_tb;
+    tpi->after_gen_tb  = after_gen_tb;
 
 #if !defined(TARGET_SH4) && !defined(TARGET_ARM)
-    fprintf(output, "# WARNING: instruction cache simulation NYI");
+    fprintf(output, "# WARNING: instruction cache simulation NYI\n");
 #endif
+
+    latencies = getenv("DINEROIV_LATENCIES");
+    if (latencies == NULL) {
+        latencies = g_strdup("2,40");
+        fprintf(output, "# WARNING: using default latencies "
+                "for memory hierarchy: %s\n", latencies);
+        fprintf(output, "# INFO: use the DINEROIV_LATENCIES envvar "
+                "to specify memory hierarchy latencies\n");
+    }
 
     cmdline = getenv("DINEROIV_CMDLINE");
     if (cmdline == NULL) {
@@ -296,6 +383,9 @@ void tpi_init(TCGPluginInterface *tpi)
         fprintf(output, "# WARNING: using default DineroIV command-line: %s\n", cmdline);
         fprintf(output, "# INFO: use the DINEROIV_CMDLINE environment variable to specify a command-line\n");
     }
+
+    /* Parse mem hierarchy latencies values. */
+    parse_latencies(latencies);
 
     /* Create a valid argv[] for Dineroiv.  */
     argv = g_malloc0(2 * sizeof(char *));
