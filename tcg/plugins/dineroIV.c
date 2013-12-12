@@ -97,7 +97,7 @@ static inline int index2dinero(size_t index) {
     assert(0);
 }
 
-static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t value, uint64_t pc)
+static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t pc)
 {
     TPIHelperInfo info = *(TPIHelperInfo *)&info_;
     d4memref memref;
@@ -105,7 +105,6 @@ static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t value, uin
     switch (info.type) {
     case 'i':
         address = pc;
-        value = 0;
 
 	memref.address    = pc;
 	memref.accesstype = D4XINSTRN;
@@ -135,7 +134,7 @@ static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t value, uin
 
     if (output_flags & OUTPUT_TRACE) {
         fprintf(output, "%c 0x%016" PRIx64 " 0x%08" PRIx32 " (0x%016" PRIx64 ") CPU #%" PRIu32 " 0x%016" PRIx64 "\n",
-                info.type, address, info.size, value, info.cpu_index, pc);
+                info.type, address, info.size, (uint64_t)0, info.cpu_index, pc);
     }
 }
 
@@ -204,24 +203,37 @@ static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_op
 static void gen_helper(const TCGPluginInterface *tpi, TCGArg *opargs, uint64_t pc, TPIHelperInfo info)
 {
     int sizemask = 0;
-    TCGArg args[4];
+    TCGArg args[3];
 
+    TCGArg addr_arg;
     TCGv_i64 tcgv_info = tcg_const_i64(*(uint64_t *)&info);
     TCGv_i64 tcgv_pc   = tcg_const_i64(pc);
+    TCGv_i64 tcgv_addr = tcg_temp_new_i64();
 
     args[0] = GET_TCGV_I64(tcgv_info);
-    args[1] = opargs ? opargs[1] : 0;
-    args[2] = opargs ? opargs[0] : 0;
-    args[3] = GET_TCGV_I64(tcgv_pc);
+    if (opargs) {
+      addr_arg = opargs[1];
+#if TCG_TARGET_REG_BITS == 32
+      if (info.size == 8) {
+	addr_arg = opargs[2];
+      }
+#endif
+      tcg_gen_extu_tl_i64(tcgv_addr, addr_arg);
+      args[1] = GET_TCGV_I64(tcgv_addr);
+    } else {
+      tcg_gen_movi_i64(tcgv_addr, 0);
+      args[1] = GET_TCGV_I64(tcgv_addr);
+    }
+    args[2] = GET_TCGV_I64(tcgv_pc);
 
     dh_sizemask(void, 0);
     dh_sizemask(i64, 1);
     dh_sizemask(i64, 2);
     dh_sizemask(i64, 3);
-    dh_sizemask(i64, 4);
 
-    tcg_gen_helperN(after_exec_opc, 0, sizemask, TCG_CALL_DUMMY_ARG, 4, args);
+    tcg_gen_helperN(after_exec_opc, 0, sizemask, TCG_CALL_DUMMY_ARG, 3, args);
 
+    tcg_temp_free_i64(tcgv_addr);
     tcg_temp_free_i64(tcgv_pc);
     tcg_temp_free_i64(tcgv_info);
 }
