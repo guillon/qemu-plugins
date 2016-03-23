@@ -32,9 +32,6 @@
 #include "exec/def-helper.h"
 #include "tcg-plugin.h"
 
-#define MAX_MEM_LEVEL 3
-int mem_level_latencies[MAX_MEM_LEVEL];
-
 #define D4ADDR uint64_t
 #include "d4-7/d4.h"
 #include "d4-7/cmdd4.h"
@@ -45,6 +42,11 @@ static d4cache *instr_cache, *data_cache;
 
 static TCGArg *icount_total_args;
 static uint64_t icount_total;
+
+#define DINEROIV_DEFAULT_LATENCIES "2,40"
+#define DINEROIV_DEFAULT_CMDLINE "-l1-isize 16k -l1-dsize 8192 -l1-ibsize 32 -l1-dbsize 16"
+static int *mem_level_latencies;
+static int mem_levels;
 
 #define TYPE_IFETCH 0
 #define TYPE_DREAD 1
@@ -118,7 +120,7 @@ static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t value, uin
     }
     assert(cost >= 0);
 
-    if (cost >= MAX_MEM_LEVEL) cost = MAX_MEM_LEVEL-1;
+    if (cost >= mem_levels) cost = mem_levels - 1;
 
     /* Allocate cost slots on demand.  */
     index = type2index(info.type);
@@ -136,7 +138,7 @@ static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t value, uin
         cost_summary[index].size = new_size;
     }
 
-    cost_summary[index].counts[cost]++;
+    if (cost >= 0) cost_summary[index].counts[cost]++;
 
 #if 0
     fprintf(output, "%c 0x%016" PRIx64 " 0x%08" PRIx32 " (0x%016" PRIx64 ") CPU #%" PRIu32 " 0x%016" PRIx64 "\n",
@@ -252,7 +254,7 @@ extern void doargs (int, char **);
 static void cpus_stopped(const TCGPluginInterface *tpi)
 {
     d4memref memref;
-    int i, j;
+    int type, level;
     uint64_t cycles_total = icount_total;
 
     /* Flush the data cache.  */
@@ -263,18 +265,20 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
 
     fprintf(output, "\n%s (%d): cache summary:\n",
             tcg_plugin_get_filename(), getpid());
-    for (i = 0; i < TYPE_NUM; i++) {
-        for (j = 0; j < cost_summary[i].size; j++) {
-            fprintf(output, "\t%s: %"PRIu64" access in ", index2type(i),
-                    cost_summary[i].counts[j]);
-            if (j != cost_summary[i].size - 1)
-                fprintf(output, "cache level %d\n", j + 1);
+    for (type = 0; type < TYPE_NUM; type++) {
+        for (level = 0; level < mem_levels; level++) {
+            uint64_t accesses = level < cost_summary[type].size ?
+                cost_summary[type].counts[level]: 0;
+            fprintf(output, "\t%s: %"PRIu64" access in ", index2type(type),
+                    accesses);
+            if (level != mem_levels - 1)
+                fprintf(output, "cache level %d\n", level + 1);
             else
                 fprintf(output, "RAM\n");
             /* Treat only data reads for cycles estimate for now. */
-            if (i == TYPE_DREAD)
+            if (type == TYPE_DREAD)
                 cycles_total +=
-                    cost_summary[i].counts[j] * mem_level_latencies[j];
+                    cost_summary[type].counts[level] * mem_level_latencies[level];
         }
     }
     fprintf(output,
@@ -331,20 +335,26 @@ static void after_gen_tb(const TCGPluginInterface *tpi)
 
 static void parse_latencies(const char *latencies)
 {
-    int level = 0;
     const char *ptr = latencies;
 
-    while (*ptr != '\0' && level < MAX_MEM_LEVEL) {
-        mem_level_latencies[level] = atoi(ptr);
-        if (mem_level_latencies[level] <= 0)
+    mem_level_latencies = NULL;
+    mem_levels = 0;
+    while (*ptr != '\0') {
+        int latency = atoi(ptr);
+        if (latency <= 0) {
             fprintf(output, "# WARNING: %d latency for memory level %d, "
                     "while parsing DINERO_LATENCIES: %s\n",
-                    mem_level_latencies[level], level, latencies);
+                    latency, mem_levels, latencies);
+            latency = 0;
+        }
+        mem_level_latencies = g_realloc(mem_level_latencies,
+                                        (mem_levels + 1) * sizeof(*mem_level_latencies));
+        mem_level_latencies[mem_levels] = latency;
         while(*ptr != '\0' && *ptr != ',')
             ptr++;
         if (*ptr == ',')
             ptr++;
-        level += 1;
+        mem_levels += 1;
     }
 }
 
@@ -370,18 +380,20 @@ void tpi_init(TCGPluginInterface *tpi)
 
     latencies = getenv("DINEROIV_LATENCIES");
     if (latencies == NULL) {
-        latencies = g_strdup("2,40");
+        latencies = g_strdup(DINEROIV_DEFAULT_LATENCIES);
         fprintf(output, "# WARNING: using default latencies "
                 "for memory hierarchy: %s\n", latencies);
-        fprintf(output, "# INFO: use the DINEROIV_LATENCIES envvar "
-                "to specify memory hierarchy latencies\n");
+        fprintf(output, "# INFO: use the DINEROIV_LATENCIES environment variable "
+                "to specify the memory hierarchy latencies\n");
     }
 
     cmdline = getenv("DINEROIV_CMDLINE");
     if (cmdline == NULL) {
-        cmdline = g_strdup("-l1-isize 16k -l1-dsize 8192 -l1-ibsize 32 -l1-dbsize 16");
-        fprintf(output, "# WARNING: using default DineroIV command-line: %s\n", cmdline);
-        fprintf(output, "# INFO: use the DINEROIV_CMDLINE environment variable to specify a command-line\n");
+        cmdline = g_strdup(DINEROIV_DEFAULT_CMDLINE);
+        fprintf(output, "# WARNING: using default DineroIV cache hierarchy "
+                "command-line: %s\n", cmdline);
+        fprintf(output, "# INFO: use the DINEROIV_CMDLINE environment variable "
+                "to specify the cache hierarchy command-line\n");
     }
 
     /* Parse mem hierarchy latencies values. */
