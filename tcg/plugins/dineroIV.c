@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <math.h>
 
 #include "tcg-op.h"
 #include "exec/def-helper.h"
@@ -39,19 +40,35 @@
 
 static FILE *output;
 static d4cache *instr_cache, *data_cache;
+static d4cache **caches_list;
+static int caches_num;
 
 static TCGArg *icount_total_args;
 static uint64_t icount_total;
+static uint64_t load_total;
+static uint64_t store_total;
+static uint64_t cycles_total;
+
+static uint32_t output_flags;
+#define DINEROIV_DEFAULT_OUTPUTS "default"
+#define OUTPUT_HELP      (1U<<0)
+#define OUTPUT_COPYRIGHT (1U<<1)
+#define OUTPUT_CYCLES    (1U<<2)
+#define OUTPUT_STATS     (1U<<3)
+#define OUTPUT_TRACE     (1U<<4)
+#define OUTPUT_DINERO    (1U<<5)
+#define OUTPUTS_LEGACY_1 (OUTPUT_COPYRIGHT|OUTPUT_TRACE)
+#define OUTPUTS_DEFAULT  (OUTPUT_STATS|OUTPUT_CYCLES)
 
 #define DINEROIV_DEFAULT_LATENCIES "2,40"
 #define DINEROIV_DEFAULT_CMDLINE "-l1-isize 16k -l1-dsize 8192 -l1-ibsize 32 -l1-dbsize 16"
-static int *mem_level_latencies;
-static int mem_levels;
+static int *caches_latencies;
+static int latencies_num;
 
 #define TYPE_IFETCH 0
-#define TYPE_DREAD 1
+#define TYPE_DREAD  1
 #define TYPE_DWRITE 2
-#define TYPE_NUM 3
+#define TYPE_NUM    3
 
 static inline size_t type2index(char type) {
     switch (type) {
@@ -64,25 +81,26 @@ static inline size_t type2index(char type) {
 
 static inline const char *index2type(size_t index) {
     switch (index) {
-    case TYPE_IFETCH: return "instruction fetch";
-    case TYPE_DREAD: return "data read";
+    case TYPE_IFETCH: return "inst fetch";
+    case TYPE_DREAD:  return "data fetch";
     case TYPE_DWRITE: return "data write";
     }
     assert(0);
 }
 
-static struct {
-    uint64_t *counts;
-    size_t size;
-} cost_summary[TYPE_NUM];
+static inline int index2dinero(size_t index) {
+    switch (index) {
+    case TYPE_IFETCH: return D4XINSTRN;
+    case TYPE_DREAD: return D4XREAD;
+    case TYPE_DWRITE: return D4XWRITE;
+    }
+    assert(0);
+}
 
 static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t value, uint64_t pc)
 {
     TPIHelperInfo info = *(TPIHelperInfo *)&info_;
     d4memref memref;
-    int cost = -1;
-    size_t index;
-    int i;
 
     switch (info.type) {
     case 'i':
@@ -92,58 +110,33 @@ static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t value, uin
 	memref.address    = pc;
 	memref.accesstype = D4XINSTRN;
 	memref.size       = (unsigned short) info.size;
-        cost = d4ref(instr_cache, memref);
+        d4ref(instr_cache, memref);
         break;
 
     case 'r':
+        load_total++;
 	memref.address    = address;
 	memref.accesstype = D4XREAD;
 	memref.size       = (unsigned short) info.size;
-	if ((address % info.size) != 0)
-	  cost = 0; /* Ignore misaligned accesses for now. */
-	else
-	  cost = d4ref(data_cache, memref);
+        d4ref(data_cache, memref);
         break;
 
     case 'w':
+        store_total++;
 	memref.address    = address;
 	memref.accesstype = D4XWRITE;
 	memref.size       = (unsigned short) info.size;
-	if ((address % info.size) != 0)
-	  cost = 0; /* Ignore misaligned accesses for now. */
-	else
-	  cost = d4ref(data_cache, memref);
+        d4ref(data_cache, memref);
         break;
 
     default:
         assert(0);
     }
-    assert(cost >= 0);
 
-    if (cost >= mem_levels) cost = mem_levels - 1;
-
-    /* Allocate cost slots on demand.  */
-    index = type2index(info.type);
-    if (cost >= cost_summary[index].size) {
-        size_t old_size = cost_summary[index].size;
-        size_t new_size = cost + 1;
-
-        cost_summary[index].counts = g_realloc(cost_summary[index].counts,
-                                               new_size * sizeof(uint64_t));
-
-        /* Initialize new slots.  */
-        for (i = old_size; i < new_size; i++)
-            cost_summary[index].counts[i] = 0;
-
-        cost_summary[index].size = new_size;
+    if (output_flags & OUTPUT_TRACE) {
+        fprintf(output, "%c 0x%016" PRIx64 " 0x%08" PRIx32 " (0x%016" PRIx64 ") CPU #%" PRIu32 " 0x%016" PRIx64 "\n",
+                info.type, address, info.size, value, info.cpu_index, pc);
     }
-
-    if (cost >= 0) cost_summary[index].counts[cost]++;
-
-#if 0
-    fprintf(output, "%c 0x%016" PRIx64 " 0x%08" PRIx32 " (0x%016" PRIx64 ") CPU #%" PRIu32 " 0x%016" PRIx64 "\n",
-            info.type, address, info.size, value, info.cpu_index, pc);
-#endif
 }
 
 static void gen_helper(const TCGPluginInterface *tpi, TCGArg *opargs, uint64_t pc, TPIHelperInfo info);
@@ -242,7 +235,7 @@ static void decode_instr(const TCGPluginInterface *tpi, uint64_t pc)
 #elif defined(TARGET_ARM)
     MEMACCESS('i', ARM_TBFLAG_THUMB(tpi->tb->flags) ? 2 : 4);
 #else
-    MEMACCESS('i', 0);
+    MEMACCESS('i', 4); /* Assume 4 bytes, even for variable length encoding. */
 #endif
 
     gen_helper(tpi, NULL, pc, info);
@@ -251,11 +244,119 @@ static void decode_instr(const TCGPluginInterface *tpi, uint64_t pc)
 extern void dostats (void);
 extern void doargs (int, char **);
 
+static char *bigint_to_string(uint64_t bigint)
+{
+    /* Will print with comma separators as in 1,234,567. */
+    uint64_t order_of_magnitude = bigint == 0 ? 1 :
+        (uint64_t)pow(10, ((int)floor(log10(bigint)) / 3) * 3);
+    uint64_t n = bigint;
+    /* 1e20-1 > 2^64 > 1e19, hence 20 chars max for a uint64_t in base 10. */
+    static char buffer[20+20/3+1]; /* Including commas and ending null byte. */
+    char *ptr = buffer;
+    size_t size = sizeof(buffer);
+
+    while(order_of_magnitude > 0) {
+        int c;
+        if (n == bigint)
+            c = snprintf(ptr, size, "%"PRIu64, n / order_of_magnitude) ;
+        else
+            c = snprintf(ptr, size, ",%03"PRIu64, n / order_of_magnitude) ;
+        ptr += c;
+        size -= c;
+        n %= order_of_magnitude;
+        order_of_magnitude /= 1000;
+    }
+    return buffer;
+}
+
+static void setup_caches_list(d4cache *instr_cache, d4cache *data_cache)
+{
+    d4cache *cache_ptr;
+
+    caches_num = 0;
+    caches_list = NULL;
+
+    /* Fill caches list, instr caches first. */
+    for (cache_ptr = instr_cache;
+         cache_ptr != NULL;
+         cache_ptr = cache_ptr->downstream, caches_num++) {
+        d4cache *cache_ptr_uni;
+        for (cache_ptr_uni = data_cache;
+             cache_ptr_uni != NULL && cache_ptr_uni != cache_ptr;
+             cache_ptr_uni = cache_ptr_uni->downstream)
+            ;
+        if (cache_ptr_uni == cache_ptr) {
+            /* Found first unified level, stop there. */
+            break;
+        }
+        caches_list = g_realloc(caches_list, (caches_num + 1) * sizeof(d4cache *));
+        caches_list[caches_num] = cache_ptr;
+    }
+    for (cache_ptr = data_cache;
+         cache_ptr != NULL;
+         cache_ptr = cache_ptr->downstream, caches_num++) {
+        caches_list = g_realloc(caches_list, (caches_num + 1) * sizeof(d4cache *));
+        caches_list[caches_num] = cache_ptr;
+    }
+}
+
+static void dineroiv_sumup(FILE *output)
+{
+    int cache_idx;
+    int type_idx;
+
+    cycles_total = icount_total;
+
+    /* Compute and dump stats per access type. */
+    if (output_flags & OUTPUT_STATS) {
+        fprintf(output, "\n");
+        fprintf(output, "%s (%d): cache summary:\n",
+                tcg_plugin_get_filename(), getpid());
+    }
+    for (type_idx = 0; type_idx < TYPE_NUM; type_idx++) {
+        for (cache_idx = 0; cache_idx < caches_num; cache_idx++) {
+            double fetches = caches_list[cache_idx]->fetch[index2dinero(type_idx)];
+            double misses = caches_list[cache_idx]->miss[index2dinero(type_idx)];
+            if (fetches > 0) {
+                if (output_flags & OUTPUT_STATS) {
+                    const char *type = index2type(type_idx);
+                    const char *name = caches_list[cache_idx]->name;
+                    fprintf(output, "%8s%12s in %9s: %26s", "", type, name,
+                            bigint_to_string((uint64_t)fetches));
+                    fprintf(output, "%8smisses: %26s", "",
+                            bigint_to_string((uint64_t)misses));
+                    fprintf(output, "%8smiss ratio: %10.6f %%", "",
+                            trunc(misses/fetches * 100.0e6)/1.0e6);
+                    fprintf(output, "\n");
+                }
+                /* Treat only data/inst reads for cycles estimate.
+                   Assume that data stores are bypassed. */
+                if (cache_idx < latencies_num) {
+                    if (type_idx == TYPE_DREAD || type_idx == TYPE_IFETCH)
+                        cycles_total += (uint64_t)fetches *
+                            caches_latencies[cache_idx];
+                }
+            }
+        }
+    }
+
+    if (output_flags & OUTPUT_STATS) {
+        fprintf(output, "\n");
+        fprintf(output, "%s (%d): instructions summary:\n",
+                tcg_plugin_get_filename(), getpid());
+        fprintf(output, "%8sinstrs: %26s\n", "",
+                bigint_to_string(icount_total));
+        fprintf(output, "%8s loads: %26s\n", "",
+                bigint_to_string(load_total));
+        fprintf(output, "%8sstores: %26s\n", "",
+                bigint_to_string(store_total));
+    }
+}
+
+
 static void cpus_stopped(const TCGPluginInterface *tpi)
 {
     d4memref memref;
-    int type, level;
-    uint64_t cycles_total = icount_total;
 
     /* Flush the data cache.  */
     memref.accesstype = D4XCOPYB;
@@ -263,32 +364,22 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
     memref.size = 0;
     d4ref(data_cache, memref);
 
-    fprintf(output, "\n%s (%d): cache summary:\n",
-            tcg_plugin_get_filename(), getpid());
-    for (type = 0; type < TYPE_NUM; type++) {
-        for (level = 0; level < mem_levels; level++) {
-            uint64_t accesses = level < cost_summary[type].size ?
-                cost_summary[type].counts[level]: 0;
-            fprintf(output, "\t%s: %"PRIu64" access in ", index2type(type),
-                    accesses);
-            if (level != mem_levels - 1)
-                fprintf(output, "cache level %d\n", level + 1);
-            else
-                fprintf(output, "RAM\n");
-            /* Treat only data reads for cycles estimate for now. */
-            if (type == TYPE_DREAD)
-                cycles_total +=
-                    cost_summary[type].counts[level] * mem_level_latencies[level];
-        }
+    if (output_flags & (OUTPUT_CYCLES|OUTPUT_STATS)) {
+        dineroiv_sumup(tpi->output);
     }
-    fprintf(output,
-            "\tfetched instructions: %"PRIu64 "\n",
-            icount_total);
 
-    fprintf(tpi->output,
-            "%s (%d): number of estimated cycles = %" PRIu64 "\n",
-            tcg_plugin_get_filename(), getpid(), cycles_total);
+    if (output_flags & OUTPUT_DINERO) {
+        FILE *old_stdout = stdout;
+        stdout = tpi->output;
+        dostats();
+        stdout = old_stdout;
+    }
 
+    if (output_flags & OUTPUT_CYCLES) {
+        fprintf(tpi->output,
+                "%s (%d): number of estimated cycles = %" PRIu64 "\n",
+                tcg_plugin_get_filename(), getpid(), cycles_total);
+    }
 }
 
 /* This function generates code which is *not* thread-safe!  */
@@ -337,24 +428,58 @@ static void parse_latencies(const char *latencies)
 {
     const char *ptr = latencies;
 
-    mem_level_latencies = NULL;
-    mem_levels = 0;
+    caches_latencies = NULL;
+    latencies_num = 0;
     while (*ptr != '\0') {
-        int latency = atoi(ptr);
-        if (latency <= 0) {
-            fprintf(output, "# WARNING: %d latency for memory level %d, "
+        char *endptr;
+        int latency = strtol(ptr, &endptr, 10);
+        if (latency < 0 || (latency == 0 && endptr == ptr)) {
+            fprintf(output, "# WARNING: %d latency invalid for cache idx %d, "
                     "while parsing DINERO_LATENCIES: %s\n",
-                    latency, mem_levels, latencies);
+                    latency, latencies_num, latencies);
             latency = 0;
         }
-        mem_level_latencies = g_realloc(mem_level_latencies,
-                                        (mem_levels + 1) * sizeof(*mem_level_latencies));
-        mem_level_latencies[mem_levels] = latency;
+        caches_latencies = g_realloc(caches_latencies,
+                                     (latencies_num + 1) * sizeof(*caches_latencies));
+        caches_latencies[latencies_num] = latency;
         while(*ptr != '\0' && *ptr != ',')
             ptr++;
         if (*ptr == ',')
             ptr++;
-        mem_levels += 1;
+        latencies_num += 1;
+    }
+}
+
+static void parse_output_flags(const char *outputs)
+{
+    const char *ptr = outputs;
+    int i;
+    struct {
+        const char *str;
+        uint32_t flags;
+    } matches[] = {
+        { "help", OUTPUT_HELP },
+        { "copyright", OUTPUT_COPYRIGHT },
+        { "cycles", OUTPUT_CYCLES },
+        { "stats", OUTPUT_STATS },
+        { "trace", OUTPUT_TRACE },
+        { "dinero", OUTPUT_DINERO },
+        { "default", OUTPUTS_DEFAULT },
+        { "legacy-1", OUTPUTS_LEGACY_1 }
+    };
+
+    output_flags = 0;
+    while (*ptr != '\0') {
+        for (i = 0; i < sizeof(matches)/sizeof(*matches); i++) {
+            int len = strlen(matches[i].str);
+            if (strncmp(ptr, matches[i].str, len) == 0 &&
+                (ptr[len] == '\0' || ptr[len] == ',')) {
+                output_flags |= matches[i].flags;
+                ptr += len;
+            }
+        }
+        while(*ptr != '\0' && *ptr != ',') ptr++;
+        if (*ptr == ',') ptr++;
     }
 }
 
@@ -363,7 +488,8 @@ void tpi_init(TCGPluginInterface *tpi)
     int i, argc;
     char **argv;
     char *cmdline;
-    char *latencies;
+    const char *latencies;
+    const char *output_flags_str;
 
     TPI_INIT_VERSION(*tpi);
     output = tpi->output;
@@ -374,17 +500,16 @@ void tpi_init(TCGPluginInterface *tpi)
     tpi->before_gen_tb = before_gen_tb;
     tpi->after_gen_tb  = after_gen_tb;
 
-#if !defined(TARGET_SH4) && !defined(TARGET_ARM)
-    fprintf(output, "# WARNING: instruction cache simulation NYI\n");
-#endif
+    output_flags_str = getenv("DINEROIV_OUTPUTS");
+    if (output_flags_str == NULL) output_flags_str = DINEROIV_DEFAULT_OUTPUTS;
 
     latencies = getenv("DINEROIV_LATENCIES");
     if (latencies == NULL) {
-        latencies = g_strdup(DINEROIV_DEFAULT_LATENCIES);
+        latencies = DINEROIV_DEFAULT_LATENCIES;
         fprintf(output, "# WARNING: using default latencies "
-                "for memory hierarchy: %s\n", latencies);
+                "for cache hierarchy: %s\n", latencies);
         fprintf(output, "# INFO: use the DINEROIV_LATENCIES environment variable "
-                "to specify the memory hierarchy latencies\n");
+                "to specify the cache hierarchy latencies\n");
     }
 
     cmdline = getenv("DINEROIV_CMDLINE");
@@ -395,6 +520,9 @@ void tpi_init(TCGPluginInterface *tpi)
         fprintf(output, "# INFO: use the DINEROIV_CMDLINE environment variable "
                 "to specify the cache hierarchy command-line\n");
     }
+
+    /* Parse output flags. */
+    parse_output_flags(output_flags_str);
 
     /* Parse mem hierarchy latencies values. */
     parse_latencies(latencies);
@@ -417,13 +545,25 @@ void tpi_init(TCGPluginInterface *tpi)
     verify_options();
     initialize_caches(&instr_cache, &data_cache);
 
-    if (data_cache == NULL)
-        data_cache = instr_cache;
+    if (data_cache == NULL) data_cache = instr_cache;
 
-    /* fprintf(output, "---Dinero IV cache simulator, version %s\n", D4VERSION); */
-    /* fprintf(output, "---Written by Jan Edler and Mark D. Hill\n"); */
-    /* fprintf(output, "---Copyright (C) 1997 NEC Research Institute, Inc. and Mark D. Hill.\n"); */
-    /* fprintf(output, "---All rights reserved.\n"); */
-    /* fprintf(output, "---Copyright (C) 1985, 1989 Mark D. Hill.  All rights reserved.\n"); */
-    /* fprintf(output, "---See -copyright option for details\n"); */
+    setup_caches_list(instr_cache, data_cache);
+
+    if (latencies_num < caches_num) {
+        fprintf(output, "# WARNING: provided latencies (%s) list does not match "
+                "the actual number of caches (%d)\n", latencies, caches_num);
+    }
+
+    if (output_flags & OUTPUT_HELP) {
+        fprintf(output, "# WARNING: help no yet implemented, sorry\n");
+    }
+
+    if (output_flags & OUTPUT_COPYRIGHT) {
+        fprintf(output, "---Dinero IV cache simulator, version %s\n", D4VERSION);
+        fprintf(output, "---Written by Jan Edler and Mark D. Hill\n");
+        fprintf(output, "---Copyright (C) 1997 NEC Research Institute, Inc. and Mark D. Hill.\n");
+        fprintf(output, "---All rights reserved.\n");
+        fprintf(output, "---Copyright (C) 1985, 1989 Mark D. Hill.  All rights reserved.\n");
+        fprintf(output, "---See -copyright option for details\n");
+    }
 }
