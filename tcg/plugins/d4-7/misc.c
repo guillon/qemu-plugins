@@ -638,10 +638,10 @@ d4_dopending (d4cache *c, d4pendstack *newm)
 	do {
 		c->pending = newm->next;
 		if ((newm->m.accesstype & D4PREFETCH) != 0)
-			c->ref (c, newm->m);
+			result += c->ref (c, newm->m);
 		else if ((newm->m.accesstype & D4_MULTIBLOCK) != 0) {
 			newm->m.accesstype &= ~D4_MULTIBLOCK;
-			c->ref (c, newm->m);
+			result += c->ref (c, newm->m);
 		}
 		else {
 			switch (D4BASIC_ATYPE(newm->m.accesstype)) {
