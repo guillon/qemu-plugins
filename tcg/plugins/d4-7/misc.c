@@ -630,18 +630,16 @@ d4put_mref (d4pendstack *m)
  * Make recursive calls for pending references
  * to own cache or towards memory
  */
-int
+void
 d4_dopending (d4cache *c, d4pendstack *newm)
 {
-	int result = 0;
-
 	do {
 		c->pending = newm->next;
 		if ((newm->m.accesstype & D4PREFETCH) != 0)
-			result += c->ref (c, newm->m);
+			c->ref (c, newm->m);
 		else if ((newm->m.accesstype & D4_MULTIBLOCK) != 0) {
 			newm->m.accesstype &= ~D4_MULTIBLOCK;
-			result += c->ref (c, newm->m);
+			c->ref (c, newm->m);
 		}
 		else {
 			switch (D4BASIC_ATYPE(newm->m.accesstype)) {
@@ -658,12 +656,10 @@ d4_dopending (d4cache *c, d4pendstack *newm)
 			case D4XINVAL:	/* don't count these */
 					break;
 			}
-			result += c->downstream->ref (c->downstream, newm->m);
+			c->downstream->ref (c->downstream, newm->m);
 		}
 		d4put_mref(newm);
 	} while ((newm = c->pending) != NULL);
-
-        return result;
 }
 
 
