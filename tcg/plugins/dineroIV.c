@@ -43,8 +43,7 @@ static d4cache *instr_cache, *data_cache;
 static d4cache **caches_list;
 static int caches_num;
 
-static TCGArg *icount_total_args;
-static uint64_t icount_total;
+static uint64_t instr_total;
 static uint64_t load_total;
 static uint64_t store_total;
 static uint64_t cycles_total;
@@ -105,6 +104,7 @@ static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t pc)
     switch (info.type) {
     case 'i':
         address = pc;
+        instr_total += 1;
 
 	memref.address    = pc;
 	memref.accesstype = D4XINSTRN;
@@ -317,7 +317,7 @@ static void dineroiv_sumup(FILE *output)
     int cache_idx;
     int type_idx;
 
-    cycles_total = icount_total;
+    cycles_total = instr_total;
 
     /* Compute and dump stats per access type. */
     if (output_flags & OUTPUT_STATS) {
@@ -357,7 +357,7 @@ static void dineroiv_sumup(FILE *output)
         fprintf(output, "%s (%d): instructions summary:\n",
                 tcg_plugin_get_filename(), getpid());
         fprintf(output, "%8sinstrs: %26s\n", "",
-                bigint_to_string(icount_total));
+                bigint_to_string(instr_total));
         fprintf(output, "%8s loads: %26s\n", "",
                 bigint_to_string(load_total));
         fprintf(output, "%8sstores: %26s\n", "",
@@ -392,48 +392,6 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
                 "%s (%d): number of estimated cycles = %" PRIu64 "\n",
                 tcg_plugin_get_filename(), getpid(), cycles_total);
     }
-}
-
-/* This function generates code which is *not* thread-safe!  */
-static void before_gen_tb(const TCGPluginInterface *tpi)
-{
-    TCGv_ptr icount_ptr;
-    TCGv_i64 icount_tmp;
-    TCGv_i32 tb_icount32;
-    TCGv_i64 tb_icount64;
-
-    /* icount_ptr = &icount */
-    icount_ptr = tcg_const_ptr((tcg_target_long)&icount_total);
-
-    /* icount_tmp = *icount_ptr */
-    icount_tmp = tcg_temp_new_i64();
-    tcg_gen_ld_i64(icount_tmp, icount_ptr, 0);
-
-    /* icount_args = &tb_icount32 */
-    /* tb_icount32 = fixup(tb->icount) */
-    icount_total_args = tcg_ctx.gen_opparam_ptr + 1;
-    tb_icount32 = tcg_const_i32(0);
-
-    /* tb_icount64 = (int64_t)tb_icount32 */
-    tb_icount64 = tcg_temp_new_i64();
-    tcg_gen_extu_i32_i64(tb_icount64, tb_icount32);
-
-    /* icount_tmp += tb_icount64 */
-    tcg_gen_add_i64(icount_tmp, icount_tmp, tb_icount64);
-
-    /* *icount_ptr = icount_tmp */
-    tcg_gen_st_i64(icount_tmp, icount_ptr, 0);
-
-    tcg_temp_free_i64(tb_icount64);
-    tcg_temp_free_i32(tb_icount32);
-    tcg_temp_free_i64(icount_tmp);
-    tcg_temp_free_ptr(icount_ptr);
-}
-
-static void after_gen_tb(const TCGPluginInterface *tpi)
-{
-    /* Patch parameter value.  */
-    *icount_total_args = tpi->tb->icount;
 }
 
 static void parse_latencies(const char *latencies)
@@ -509,8 +467,6 @@ void tpi_init(TCGPluginInterface *tpi)
     tpi->after_gen_opc = after_gen_opc;
     tpi->decode_instr  = decode_instr;
     tpi->cpus_stopped  = cpus_stopped;
-    tpi->before_gen_tb = before_gen_tb;
-    tpi->after_gen_tb  = after_gen_tb;
 
     output_flags_str = getenv("DINEROIV_OUTPUTS");
     if (output_flags_str == NULL) output_flags_str = DINEROIV_DEFAULT_OUTPUTS;
