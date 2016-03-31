@@ -60,7 +60,7 @@ static uint32_t output_flags;
 #define OUTPUTS_LEGACY_1 (OUTPUT_COPYRIGHT|OUTPUT_TRACE)
 #define OUTPUTS_DEFAULT  (OUTPUT_STATS|OUTPUT_CYCLES)
 
-#define DINEROIV_DEFAULT_LATENCIES "2,40"
+#define DINEROIV_DEFAULT_LATENCIES "0,2,40"
 #define DINEROIV_DEFAULT_CMDLINE "-l1-isize 16k -l1-dsize 8192 -l1-ibsize 32 -l1-dbsize 16"
 static int *caches_latencies;
 static int latencies_num;
