@@ -142,14 +142,20 @@ endif # CONFIG_SOFTMMU
 
 ifdef CONFIG_TCG_PLUGIN
 
+ifdef CONFIG_USER_ONLY
+EMULATION_MODE=user
+else
+EMULATION_MODE=system
+endif
+
 TCG_PLUGINS := $(patsubst $(SRC_PATH)/tcg/plugins/%.c,tcg-plugin-%.so,$(wildcard $(SRC_PATH)/tcg/plugins/*.c))
 all: $(TCG_PLUGINS)
 
 .SECONDARY: $(TCG_PLUGINS:.so=.o)
 
-tcg/tcg-plugin.o: QEMU_CFLAGS += -DEMULATION_MODE=\"$(TARGET_TYPE)\"
+tcg/tcg-plugin.o: QEMU_CFLAGS += -DEMULATION_MODE=\"$(EMULATION_MODE)\"
 
-tcg-plugin-%.o: QEMU_CFLAGS += -fno-PIE -fPIC -DEMULATION_MODE=\"$(TARGET_TYPE)\"
+tcg-plugin-%.o: QEMU_CFLAGS += -fno-PIE -fPIC -DEMULATION_MODE=\"$(EMULATION_MODE)\"
 tcg-plugin-%.o: $(SRC_PATH)/tcg/plugins/%.c
 	$(call COMPILE_CC)
 
@@ -228,8 +234,8 @@ ifdef CONFIG_TRACE_SYSTEMTAP
 	$(INSTALL_DATA) $(QEMU_PROG).stp-installed "$(DESTDIR)$(qemu_datadir)/../systemtap/tapset/$(QEMU_PROG).stp"
 endif
 ifdef CONFIG_TCG_PLUGIN
-	$(INSTALL_DIR) "$(DESTDIR)$(libexecdir)/$(TARGET_ARCH)/$(TARGET_TYPE)"
-	$(INSTALL_PROG) $(TCG_PLUGINS) "$(DESTDIR)$(libexecdir)/$(TARGET_ARCH)/$(TARGET_TYPE)"
+	$(INSTALL_DIR) "$(DESTDIR)$(libexecdir)/$(TARGET_NAME)/$(EMULATION_MODE)"
+	$(INSTALL_PROG) $(TCG_PLUGINS) "$(DESTDIR)$(libexecdir)/$(TARGET_NAME)/$(EMULATION_MODE)"
 endif
 
 GENERATED_HEADERS += config-target.h

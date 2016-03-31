@@ -411,7 +411,7 @@ static void before_gen_tb(const TCGPluginInterface *tpi)
 
     /* icount_args = &tb_icount32 */
     /* tb_icount32 = fixup(tb->icount) */
-    icount_total_args = gen_opparam_ptr + 1;
+    icount_total_args = tcg_ctx.gen_opparam_ptr + 1;
     tb_icount32 = tcg_const_i32(0);
 
     /* tb_icount64 = (int64_t)tb_icount32 */
