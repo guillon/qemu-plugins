@@ -69,7 +69,7 @@ profile
         main         | /tmp/a.out          |     32 |      8
         [...]
 
-dineroIV-data
+dineroIV
     Print the address/size/cpu of each loaded/stored data in a format
     supported by DineroIV, a highly configurable cache simulator::
 
@@ -81,6 +81,8 @@ dineroIV-data
         w 0x000000000046bb14 0x00000004 (0x00000000ffffffff) CPU #0 0x0000000000401e62
 
     This is a really good alternative to Cachegrind.
+
+    Refer to README.dineroIV for usage.
 
 
 How to Use TCG Plugins?
