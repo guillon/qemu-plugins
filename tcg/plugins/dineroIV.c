@@ -99,40 +99,43 @@ static inline int index2dinero(size_t index) {
 static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t pc)
 {
     TPIHelperInfo info = *(TPIHelperInfo *)&info_;
-    d4memref memref;
 
-    switch (info.type) {
-    case 'i':
-        address = pc;
-        instr_total += 1;
+    if (output_flags & (OUTPUT_CYCLES|OUTPUT_STATS|OUTPUT_DINERO)) {
 
-	memref.address    = pc;
-	memref.accesstype = D4XINSTRN;
-	memref.size       = (unsigned short) info.size;
-        d4ref(instr_cache, memref);
-        break;
+        d4memref memref;
 
-    case 'r':
-        load_total++;
-	memref.address    = address;
-	memref.accesstype = D4XREAD;
-	memref.size       = (unsigned short) info.size;
-        d4ref(data_cache, memref);
-        break;
+        switch (info.type) {
+        case 'i':
+            instr_total += 1;
+            memref.address    = pc;
+            memref.accesstype = D4XINSTRN;
+            memref.size       = (unsigned short) info.size;
+            d4ref(instr_cache, memref);
+            break;
 
-    case 'w':
-        store_total++;
-	memref.address    = address;
-	memref.accesstype = D4XWRITE;
-	memref.size       = (unsigned short) info.size;
-        d4ref(data_cache, memref);
-        break;
+        case 'r':
+            load_total++;
+            memref.address    = address;
+            memref.accesstype = D4XREAD;
+            memref.size       = (unsigned short) info.size;
+            d4ref(data_cache, memref);
+            break;
 
-    default:
-        assert(0);
+        case 'w':
+            store_total++;
+            memref.address    = address;
+            memref.accesstype = D4XWRITE;
+            memref.size       = (unsigned short) info.size;
+            d4ref(data_cache, memref);
+            break;
+
+        default:
+            assert(0);
+        }
     }
 
     if (output_flags & OUTPUT_TRACE) {
+        if (info.type == 'i') address = pc;
         fprintf(output, "%c 0x%016" PRIx64 " 0x%08" PRIx32 " (0x%016" PRIx64 ") CPU #%" PRIu32 " 0x%016" PRIx64 "\n",
                 info.type, address, info.size, (uint64_t)0, info.cpu_index, pc);
     }
@@ -368,13 +371,15 @@ static void dineroiv_sumup(FILE *output)
 
 static void cpus_stopped(const TCGPluginInterface *tpi)
 {
-    d4memref memref;
 
-    /* Flush the data cache.  */
-    memref.accesstype = D4XCOPYB;
-    memref.address = 0;
-    memref.size = 0;
-    d4ref(data_cache, memref);
+    if (output_flags & (OUTPUT_CYCLES|OUTPUT_STATS|OUTPUT_DINERO)) {
+        d4memref memref;
+        /* Flush the data cache.  */
+        memref.accesstype = D4XCOPYB;
+        memref.address = 0;
+        memref.size = 0;
+        d4ref(data_cache, memref);
+    }
 
     if (output_flags & (OUTPUT_CYCLES|OUTPUT_STATS)) {
         dineroiv_sumup(tpi->output);
@@ -471,55 +476,60 @@ void tpi_init(TCGPluginInterface *tpi)
     output_flags_str = getenv("DINEROIV_OUTPUTS");
     if (output_flags_str == NULL) output_flags_str = DINEROIV_DEFAULT_OUTPUTS;
 
-    latencies = getenv("DINEROIV_LATENCIES");
-    if (latencies == NULL) {
-        latencies = DINEROIV_DEFAULT_LATENCIES;
-        fprintf(output, "# WARNING: using default latencies "
-                "for cache hierarchy: %s\n", latencies);
-        fprintf(output, "# INFO: use the DINEROIV_LATENCIES environment variable "
-                "to specify the cache hierarchy latencies\n");
-    }
-
-    cmdline = getenv("DINEROIV_CMDLINE");
-    if (cmdline == NULL) {
-        cmdline = g_strdup(DINEROIV_DEFAULT_CMDLINE);
-        fprintf(output, "# WARNING: using default DineroIV cache hierarchy "
-                "command-line: %s\n", cmdline);
-        fprintf(output, "# INFO: use the DINEROIV_CMDLINE environment variable "
-                "to specify the cache hierarchy command-line\n");
-    }
-
     /* Parse output flags. */
     parse_output_flags(output_flags_str);
 
-    /* Parse mem hierarchy latencies values. */
-    parse_latencies(latencies);
-
-    /* Create a valid argv[] for Dineroiv.  */
-    argv = g_malloc0(2 * sizeof(char *));
-    argv[0] = g_strdup("tcg-plugin-dineroIV");
-    argv[1] = cmdline;
-    argc = 2;
-
-    for (i = 0; cmdline[i] != '\0'; i++) {
-        if (cmdline[i] == ' ') {
-            cmdline[i] = '\0';
-            argv = g_realloc(argv, (argc + 1) * sizeof(char *));
-            argv[argc++] = cmdline + i + 1;
+    if (output_flags & OUTPUT_CYCLES) {
+        latencies = getenv("DINEROIV_LATENCIES");
+        if (latencies == NULL) {
+            latencies = DINEROIV_DEFAULT_LATENCIES;
+            fprintf(output, "# WARNING: using default latencies "
+                    "for cache hierarchy: %s\n", latencies);
+            fprintf(output, "# INFO: use the DINEROIV_LATENCIES environment variable "
+                    "to specify the cache hierarchy latencies\n");
         }
+        /* Parse mem hierarchy latencies values. */
+        parse_latencies(latencies);
     }
 
-    doargs(argc, argv);
-    verify_options();
-    initialize_caches(&instr_cache, &data_cache);
+    if (output_flags & (OUTPUT_CYCLES|OUTPUT_STATS|OUTPUT_DINERO)) {
+        cmdline = getenv("DINEROIV_CMDLINE");
+        if (cmdline == NULL) {
+            cmdline = g_strdup(DINEROIV_DEFAULT_CMDLINE);
+            fprintf(output, "# WARNING: using default DineroIV cache hierarchy "
+                    "command-line: %s\n", cmdline);
+            fprintf(output, "# INFO: use the DINEROIV_CMDLINE environment variable "
+                    "to specify the cache hierarchy command-line\n");
+        }
 
-    if (data_cache == NULL) data_cache = instr_cache;
+        /* Create a valid argv[] for Dineroiv.  */
+        argv = g_malloc0(2 * sizeof(char *));
+        argv[0] = g_strdup("tcg-plugin-dineroIV");
+        argv[1] = cmdline;
+        argc = 2;
 
-    setup_caches_list(instr_cache, data_cache);
+        for (i = 0; cmdline[i] != '\0'; i++) {
+            if (cmdline[i] == ' ') {
+                cmdline[i] = '\0';
+                argv = g_realloc(argv, (argc + 1) * sizeof(char *));
+                argv[argc++] = cmdline + i + 1;
+            }
+        }
 
-    if (latencies_num < caches_num) {
-        fprintf(output, "# WARNING: provided latencies (%s) list does not match "
-                "the actual number of caches (%d)\n", latencies, caches_num);
+        doargs(argc, argv);
+        verify_options();
+        initialize_caches(&instr_cache, &data_cache);
+
+        if (data_cache == NULL) data_cache = instr_cache;
+
+        setup_caches_list(instr_cache, data_cache);
+
+        if (output_flags & OUTPUT_CYCLES) {
+            if (latencies_num < caches_num) {
+                fprintf(output, "# WARNING: provided latencies (%s) list does not match "
+                        "the actual number of caches (%d)\n", latencies, caches_num);
+            }
+        }
     }
 
     if (output_flags & OUTPUT_HELP) {
