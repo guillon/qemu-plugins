@@ -1808,7 +1808,7 @@ customize_caches()
 	struct arglist *adesc;
 	struct stat st;
 	char *cmdline = malloc(4096);	/* XXX add overflow checking or make this more dynamic */
-	char *psrc, *plib;
+	char *psrc, *plib, *pbld;
 	int x;
 
 	if (cmdline == NULL)
@@ -1833,20 +1833,23 @@ customize_caches()
 	psrc = getenv ("D4_SRC");
 	if (psrc == NULL || *psrc == 0)
 		psrc = ".";
+	pbld = getenv ("D4_BLD");
+	if (pbld == NULL || *pbld == 0)
+                pbld = ".";
 	plib = getenv ("D4_LIB");
 	if (plib == NULL || *plib == 0) {
-		plib = malloc (strlen(psrc)+strlen("/libd4.a")+1);
+		plib = malloc (strlen(pbld)+strlen("/libd4.a")+1);
 		if (plib == NULL)
 			die ("no memory for libd4.a pathname\n");
-		strcpy (plib, psrc);
+		strcpy (plib, pbld);
 		strcat (plib, "/libd4.a");
 	}
 
 	/* try to catch common errors */
-	sprintf (cmdline, "%s/Makefile", psrc);
+	sprintf (cmdline, "%s/Makefile", pbld);
 	if (stat (cmdline, &st) < 0)
 		die ("There is no %s%s\n", cmdline,
-		     getenv("D4_SRC")==NULL ? "; try setting D4_SRC" : "");
+		     getenv("D4_SRC")==NULL && getenv("D4_BLD")==NULL? "; try setting D4_BLD or D4_SRC" : "");
 	sprintf (cmdline, "%s/d4.h", psrc);
 	if (stat (cmdline, &st) < 0)
 		die ("There is no %s%s\n", cmdline,
@@ -1857,7 +1860,7 @@ customize_caches()
 
 	sprintf (cmdline, "make -s -f %s/Makefile %s CUSTOM_NAME=%s "
 		 "CUSTOM_C=%s D4_SRC=%s D4_LIB=%s\n",
-		 psrc, customname, customname, fname, psrc, plib);
+		 pbld, customname, customname, fname, psrc, plib);
 	x = system (cmdline);
 
 #if 1	/* remove custom source file */

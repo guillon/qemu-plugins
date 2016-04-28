@@ -38,6 +38,13 @@
 #include "d4-7/cmdd4.h"
 #include "d4-7/cmdargs.h"
 
+#ifdef __GNUC__
+#define EXTERNAL __attribute__((visibility("default")))
+#else
+#define EXTERNAL
+#endif
+EXTERNAL void tpi_init(TCGPluginInterface *tpi);
+
 static FILE *output;
 static d4cache *instr_cache, *data_cache;
 static d4cache **caches_list;
@@ -460,9 +467,6 @@ static void parse_output_flags(const char *outputs)
 
 void tpi_init(TCGPluginInterface *tpi)
 {
-    int i, argc;
-    char **argv;
-    char *cmdline;
     const char *latencies;
     const char *output_flags_str;
 
@@ -493,6 +497,10 @@ void tpi_init(TCGPluginInterface *tpi)
     }
 
     if (output_flags & (OUTPUT_CYCLES|OUTPUT_STATS|OUTPUT_DINERO)) {
+#if !D4CUSTOM
+        int i, argc;
+        char **argv;
+        char *cmdline;
         cmdline = getenv("DINEROIV_CMDLINE");
         if (cmdline == NULL) {
             cmdline = g_strdup(DINEROIV_DEFAULT_CMDLINE);
@@ -518,6 +526,7 @@ void tpi_init(TCGPluginInterface *tpi)
 
         doargs(argc, argv);
         verify_options();
+#endif /* D4CUSTOM */
         initialize_caches(&instr_cache, &data_cache);
 
         if (data_cache == NULL) data_cache = instr_cache;

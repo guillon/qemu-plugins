@@ -57,7 +57,8 @@ CMD_OBJ_LIST = cmdmain.o cmdargs.o tracein.o \
 	xdinfmt.o dinfmt.o binaryfmt.o pixie32fmt.o pixie64fmt.o
 
 D4_SRC = $(srcdir)
-D4_LIB = $(D4_SRC)/libd4.a
+D4_BLD = .
+D4_LIB = $(D4_BLD)/libd4.a
 CMD_SRC_LIST = $(D4_SRC)/cmdmain.c $(D4_SRC)/cmdargs.c $(D4_SRC)/tracein.c \
 	$(D4_SRC)/xdinfmt.c $(D4_SRC)/dinfmt.c $(D4_SRC)/binaryfmt.c \
 	$(D4_SRC)/pixie32fmt.c $(D4_SRC)/pixie64fmt.c
@@ -65,7 +66,7 @@ CUSTOM_NAME = d4custom # this is really just a placeholder
 
 CC = @CC@
 DEBUG=@D4_DEBUG_FLAGS@
-CFLAGS = @CFLAGS@ $(DEBUG) -I$(D4_SRC)
+CFLAGS = @CFLAGS@ $(DEBUG) -I$(D4_BLD) -I$(D4_SRC)
 LDFLAGS = @LDFLAGS@
 LIBS = @LIBS@
 RANLIB = @RANLIB@
@@ -89,10 +90,23 @@ libd4.a: $(LIB_OBJ_LIST)
 dineroIV: $(CMD_OBJ_LIST) libd4.a d4.h
 	$(CC) $(CFLAGS) -o dineroIV $(CMD_OBJ_LIST) libd4.a $(LIBS)
 
+$(CUSTOM_NAME)-libd4.a: $(CUSTOM_OBJ_LIST)
+	rm -f $(CUSTOM_NAME)-libd4.a
+	$(AR) cq $(CUSTOM_NAME)-libd4.a $(CUSTOM_OBJ_LIST)
+	$(RANLIB) libd4.a
+
+$(CUSTOM_NAME).o: $(CUSTOM_C) $(CMD_SRC_LIST) $(D4_SRC)/d4.h $(D4_BLD)/config.h
+	$(CC) $(CFLAGS) -r -nostdlib -DD4CUSTOM -o $(CUSTOM_NAME).o \
+		$(CUSTOM_C) $(CMD_SRC_LIST)
+
 # don't include $(D4_LIB) on next line; a custom make should not rebuild it
-$(CUSTOM_NAME): $(CUSTOM_C) $(CMD_SRC_LIST) $(D4_SRC)/d4.h $(D4_SRC)/config.h
-	$(CC) $(CFLAGS) -DD4CUSTOM -o $(CUSTOM_NAME) \
-		$(CUSTOM_C) $(CMD_SRC_LIST) $(D4_LIB) $(LIBS)
+#$(CUSTOM_NAME): $(CUSTOM_C) $(CMD_SRC_LIST) $(D4_SRC)/d4.h $(D4_BLD)/config.h
+#	$(CC) $(CFLAGS) -DD4CUSTOM -o $(CUSTOM_NAME) \
+#		$(CUSTOM_C) $(CMD_SRC_LIST) $(D4_LIB) $(LIBS)
+
+$(CUSTOM_NAME): $(CUSTOM_NAME).o
+	$(CC) $(CFLAGS) -o $(CUSTOM_NAME) $(CUSTOM_NAME).o $(D4_LIB) $(LIBS)
+
 
 ref.o: ref.c d4.h config.h
 misc.o: misc.c d4.h config.h

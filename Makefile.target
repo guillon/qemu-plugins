@@ -149,6 +149,8 @@ EMULATION_MODE=system
 endif
 
 TCG_PLUGINS := $(patsubst $(SRC_PATH)/tcg/plugins/%.c,tcg-plugin-%.so,$(wildcard $(SRC_PATH)/tcg/plugins/*.c))
+TCG_PLUGINS += tcg-plugin-dineroIV-custom.so
+
 all: $(TCG_PLUGINS)
 
 .SECONDARY: $(TCG_PLUGINS:.so=.o)
@@ -163,15 +165,40 @@ tcg-plugin-%.so: LDFLAGS += -shared
 tcg-plugin-%.so: tcg-plugin-%.o
 	$(call LINK,$^)
 
-d4-7/Makefile: $(SRC_PATH)/tcg/plugins/d4-7
+D4_SRC=$(SRC_PATH)/tcg/plugins/d4-7
+
+d4-7/Makefile d4-7/config.h: $(D4_SRC)/configure
 	mkdir -p d4-7
-	cd d4-7 && env CFLAGS="-O2 -DD4ADDR=uint64_t -include stdint.h -fPIC -I$${PWD}" $^/configure
+	cd d4-7 && rm -f Makefile config.h && env CFLAGS="-O3 -fvisibility=hidden -flto -DD4ADDR=uint64_t -include stdint.h -fPIC -I$${PWD}" $<
 
-D4_OBJS=d4-7/ref.o d4-7/misc.o d4-7/cmdmain.o d4-7/cmdargs.o d4-7/tracein.o d4-7/xdinfmt.o d4-7/dinfmt.o d4-7/binaryfmt.o d4-7/pixie32fmt.o d4-7/pixie64fmt.o
-d4-7/%.o: d4-7/Makefile
-	cd d4-7 && env MAKEFLAGS= $(MAKE) $*.o
+D4_LIB_OBJS=d4-7/ref.o d4-7/misc.o
+D4_CMD_OBJS=d4-7/cmdmain.o d4-7/cmdargs.o d4-7/tracein.o d4-7/xdinfmt.o d4-7/dinfmt.o d4-7/binaryfmt.o d4-7/pixie32fmt.o d4-7/pixie64fmt.o
+$(D4_LIB_OBJS) $(D4_CMD_OBJS): d4-7/%.o: d4-7/Makefile d4-7/config.h
+	cd d4-7 && rm -f $*.o && env MAKEFLAGS= $(MAKE) $*.o
 
-tcg-plugin-dineroIV.so: tcg-plugin-dineroIV.o $(D4_OBJS)
+d4-7/libd4.a: $(D4_LIB_OBJS) d4-7/Makefile d4-7/config.h
+	cd d4-7 && rm -f libd4.a && env MAKEFLAGS= $(MAKE) libd4.a
+
+d4-7/dineroIV: $(D4_CMD_OBJS) d4-7/libd4.a d4-7/Makefile d4-7/config.h
+	cd d4-7 && rm -f dineroIV && env MAKEFLAGS= $(MAKE) dineroIV
+
+d4-7/d4prebuilt.o: d4-7/dineroIV
+	cd d4-7 && rm -f d4-7/d4custom.o && env MAKEFLAGS= D4_SRC=$(D4_SRC) ./dineroIV -custom d4prebuilt -l1-isize 16k -l1-dsize 8192 -l1-ibsize 32 -l1-dbsize 16 </dev/null >/dev/null
+
+tcg-plugin-dineroIV-custom.o: CFLAGS += -fvisibility=hidden -flto -O3 -DD4CUSTOM
+tcg-plugin-dineroIV-custom.o: tcg-plugin-%.o: $(SRC_PATH)/tcg/plugins/dineroIV.c
+	$(call COMPILE_CC)
+
+tcg-plugin-dineroIV-custom.so:  CFLAGS += -fvisibility=hidden -fno-PIE -fPIC -flto -O3 -DD4CUSTOM
+tcg-plugin-dineroIV-custom.so: tcg-plugin-dineroIV-custom.o d4-7/d4prebuilt.o d4-7/libd4.a
+	$(call LINK,$^)
+
+tcg-plugin-dineroIV.o: CFLAGS += -fvisibility=hidden -flto -O3
+tcg-plugin-dineroIV.o: tcg-plugin-%.o: $(SRC_PATH)/tcg/plugins/dineroIV.c
+	$(call COMPILE_CC)
+
+tcg-plugin-dineroIV.so: CFLAGS += -fvisibility=hidden -fno-PIE -fPIC -flto -O3
+tcg-plugin-dineroIV.so: tcg-plugin-dineroIV.o $(D4_CMD_OBJS) d4-7/libd4.a
 	$(call LINK,$^)
 
 endif # CONFIG_TCG_PLUGIN
