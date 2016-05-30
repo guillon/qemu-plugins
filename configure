@@ -197,6 +197,7 @@ kvm="no"
 rdma=""
 gprof="no"
 tcg_plugin="no"
+capstone=""
 debug_tcg="no"
 debug="no"
 strip_opt="yes"
@@ -758,6 +759,10 @@ for opt do
   ;;
   --disable-tcg-plugin) tcg_plugin="no"
   ;;
+  --disable-capstone) capstone="no"
+  ;;
+  --enable-capstone) capstone="yes"
+  ;;
   --enable-debug-tcg) debug_tcg="yes"
   ;;
   --disable-debug-tcg) debug_tcg="no"
@@ -1114,6 +1119,8 @@ echo "  --sysconfdir=PATH        install config in PATH$confsuffix"
 echo "  --libexecdir=PATH        install TCG plugins in PATH"
 echo "  --enable-tcg-plugin      enable TCG plugin support"
 echo "  --disable-tcg-plugin     disable TCG plugin support (default)"
+echo "  --enable-capstone        enable capstone support"
+echo "  --disable-capstone       disable capstone support (default)"
 echo "  --localstatedir=PATH     install local state in PATH (set at runtime on win32)"
 echo "  --with-confsuffix=SUFFIX suffix for QEMU data inside datadir and sysconfdir [$confsuffix]"
 echo "  --enable-debug-tcg       enable TCG debugging"
@@ -1873,6 +1880,37 @@ EOF
     sdl_libs="$sdl_libs -lX11"
   fi
   libs_softmmu="$sdl_libs $libs_softmmu"
+fi
+
+################################################################
+# libcapstone probe (defaults to no when tcg-plugin is disabled)
+if test "$tcg_plugin" = "no"; then
+    if test "$capstone" != "yes"; then
+        capstone="no"
+    fi
+fi
+if test "$capstone" != "no"; then
+    if $pkg_config capstone --exists; then
+        _capstonemajor=`$pkg_config capstone --modversion 2>/dev/null | cut -f1 -d.`
+    else
+        if test "$capstone" = "yes" ; then
+            feature_not_found "capstone3"
+        fi
+        capstone=no
+    fi
+    if test "$capstone" != "no" ; then
+        if test -z "$_capstonemajor" || test "$_capstonemajor" -lt 3; then
+            if test "$capstone" = "yes" ; then
+                feature_not_found "capstone3"
+            fi
+            capstone=no
+        fi
+    fi
+    if test "$capstone" != "no" ; then
+        capstone_cflags=`$pkg_config capstone --cflags 2>/dev/null`
+        capstone_ldflags=`$pkg_config capstone --libs 2>/dev/null`
+        capstone=yes
+    fi
 fi
 
 ##########################################
@@ -3728,6 +3766,7 @@ echo "host CPU          $cpu"
 echo "host big endian   $bigendian"
 echo "target list       $target_list"
 echo "tcg plugin support $tcg_plugin"
+echo "capstone support   $capstone"
 echo "tcg debug enabled $debug_tcg"
 echo "gprof enabled     $gprof"
 echo "sparse enabled    $sparse"
@@ -3848,6 +3887,12 @@ if test "$tcg_plugin" = "yes" ; then
   echo "CONFIG_TCG_PLUGIN=y" >> $config_host_mak
   LIBS="-ldl $LIBS"
   LDFLAGS="-rdynamic $LDFLAGS"
+fi
+
+if test "$capstone" = "yes" ; then
+  echo "CONFIG_CAPSTONE=y" >> $config_host_mak
+  echo "CAPSTONE_CFLAGS=-DCONFIG_CAPSTONE $capstone_cflags" >> $config_host_mak
+  echo "CAPSTONE_LDFLAGS=$capstone_ldflags" >> $config_host_mak
 fi
 
 if test "$debug_tcg" = "yes" ; then

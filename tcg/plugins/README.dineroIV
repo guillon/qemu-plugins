@@ -8,10 +8,14 @@ Install
 In order to use the DineroIV plugin in user mode for instance, compile qemu
 user mode with plugins enabled::
 
-    $ ./configure --disable-system --enable-tcg-plugin \
-    --target-list=x86_64-linux-user --prefix=$HOME/local
+    $ ./configure --disable-system --disable-werror --enable-tcg-plugin --target-list=x86_64-linux-user --prefix=$HOME/local
     $ make -j4 all
     $ make install
+
+Note that a number of packages are required for the build, for instance on some
+Ubuntu systems::
+
+   $ sudo apt-get install python perl build-essential pkg-config zlib1g-dev libglib2.0-dev libpixman-1-dev git-core
 
 Usage
 =====
@@ -61,9 +65,7 @@ For instance a typical Intel Xeon 5500 series processor can be
 configured with::
 
     $ export DINEROIV_LATENCIES=0,1,6,40,160
-    $ export DINEROIV_CMDLINE="-l1-isize 32k -l1-ibsize 64 -l1-iassoc 4 \
-    -l1-dsize 32k -l1-dbsize 64 -l1-dassoc 8 -l2-usize 256k -l2-ubsize 64 \
-    -l2-uassoc 8 -l3-usize 4096k -l3-ubsize 64 -l3-uassoc 16"
+    $ export DINEROIV_CMDLINE="-l1-isize 32k -l1-ibsize 64 -l1-iassoc 4 -l1-dsize 32k -l1-dbsize 64 -l1-dassoc 8 -l2-usize 256k -l2-ubsize 64 -l2-uassoc 8 -l3-usize 4096k -l3-ubsize 64 -l3-uassoc 16"
 
 Then execute the program again, for instance::
 
