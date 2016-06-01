@@ -177,6 +177,9 @@ tcg-plugin-dineroIV.so: tcg-plugin-dineroIV.o $(D4_OBJS)
 tcg-plugin-dyncount.o: CFLAGS += $(CAPSTONE_CFLAGS)
 tcg-plugin-dyncount.so: LIBS += $(CAPSTONE_LDFLAGS)
 
+tcg-plugin-dyntrace.o: CFLAGS += $(CAPSTONE_CFLAGS)
+tcg-plugin-dyntrace.so: LIBS += $(CAPSTONE_LDFLAGS)
+
 endif # CONFIG_TCG_PLUGIN
 
 # Workaround for http://gcc.gnu.org/PR55489, see configure.
