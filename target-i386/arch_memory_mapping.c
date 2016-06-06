@@ -11,12 +11,14 @@
  *
  */
 
+#include "qemu/osdep.h"
 #include "cpu.h"
 #include "exec/cpu-all.h"
 #include "sysemu/memory_mapping.h"
 
 /* PAE Paging or IA-32e Paging */
-static void walk_pte(MemoryMappingList *list, hwaddr pte_start_addr,
+static void walk_pte(MemoryMappingList *list, AddressSpace *as,
+                     hwaddr pte_start_addr,
                      int32_t a20_mask, target_ulong start_line_addr)
 {
     hwaddr pte_addr, start_paddr;
@@ -26,7 +28,7 @@ static void walk_pte(MemoryMappingList *list, hwaddr pte_start_addr,
 
     for (i = 0; i < 512; i++) {
         pte_addr = (pte_start_addr + i * 8) & a20_mask;
-        pte = ldq_phys(pte_addr);
+        pte = address_space_ldq(as, pte_addr, MEMTXATTRS_UNSPECIFIED, NULL);
         if (!(pte & PG_PRESENT_MASK)) {
             /* not present */
             continue;
@@ -45,7 +47,7 @@ static void walk_pte(MemoryMappingList *list, hwaddr pte_start_addr,
 }
 
 /* 32-bit Paging */
-static void walk_pte2(MemoryMappingList *list,
+static void walk_pte2(MemoryMappingList *list, AddressSpace *as,
                       hwaddr pte_start_addr, int32_t a20_mask,
                       target_ulong start_line_addr)
 {
@@ -56,7 +58,7 @@ static void walk_pte2(MemoryMappingList *list,
 
     for (i = 0; i < 1024; i++) {
         pte_addr = (pte_start_addr + i * 4) & a20_mask;
-        pte = ldl_phys(pte_addr);
+        pte = address_space_ldl(as, pte_addr, MEMTXATTRS_UNSPECIFIED, NULL);
         if (!(pte & PG_PRESENT_MASK)) {
             /* not present */
             continue;
@@ -77,7 +79,8 @@ static void walk_pte2(MemoryMappingList *list,
 /* PAE Paging or IA-32e Paging */
 #define PLM4_ADDR_MASK 0xffffffffff000ULL /* selects bits 51:12 */
 
-static void walk_pde(MemoryMappingList *list, hwaddr pde_start_addr,
+static void walk_pde(MemoryMappingList *list, AddressSpace *as,
+                     hwaddr pde_start_addr,
                      int32_t a20_mask, target_ulong start_line_addr)
 {
     hwaddr pde_addr, pte_start_addr, start_paddr;
@@ -87,7 +90,7 @@ static void walk_pde(MemoryMappingList *list, hwaddr pde_start_addr,
 
     for (i = 0; i < 512; i++) {
         pde_addr = (pde_start_addr + i * 8) & a20_mask;
-        pde = ldq_phys(pde_addr);
+        pde = address_space_ldq(as, pde_addr, MEMTXATTRS_UNSPECIFIED, NULL);
         if (!(pde & PG_PRESENT_MASK)) {
             /* not present */
             continue;
@@ -108,12 +111,12 @@ static void walk_pde(MemoryMappingList *list, hwaddr pde_start_addr,
         }
 
         pte_start_addr = (pde & PLM4_ADDR_MASK) & a20_mask;
-        walk_pte(list, pte_start_addr, a20_mask, line_addr);
+        walk_pte(list, as, pte_start_addr, a20_mask, line_addr);
     }
 }
 
 /* 32-bit Paging */
-static void walk_pde2(MemoryMappingList *list,
+static void walk_pde2(MemoryMappingList *list, AddressSpace *as,
                       hwaddr pde_start_addr, int32_t a20_mask,
                       bool pse)
 {
@@ -124,7 +127,7 @@ static void walk_pde2(MemoryMappingList *list,
 
     for (i = 0; i < 1024; i++) {
         pde_addr = (pde_start_addr + i * 4) & a20_mask;
-        pde = ldl_phys(pde_addr);
+        pde = address_space_ldl(as, pde_addr, MEMTXATTRS_UNSPECIFIED, NULL);
         if (!(pde & PG_PRESENT_MASK)) {
             /* not present */
             continue;
@@ -150,12 +153,12 @@ static void walk_pde2(MemoryMappingList *list,
         }
 
         pte_start_addr = (pde & ~0xfff) & a20_mask;
-        walk_pte2(list, pte_start_addr, a20_mask, line_addr);
+        walk_pte2(list, as, pte_start_addr, a20_mask, line_addr);
     }
 }
 
 /* PAE Paging */
-static void walk_pdpe2(MemoryMappingList *list,
+static void walk_pdpe2(MemoryMappingList *list, AddressSpace *as,
                        hwaddr pdpe_start_addr, int32_t a20_mask)
 {
     hwaddr pdpe_addr, pde_start_addr;
@@ -165,7 +168,7 @@ static void walk_pdpe2(MemoryMappingList *list,
 
     for (i = 0; i < 4; i++) {
         pdpe_addr = (pdpe_start_addr + i * 8) & a20_mask;
-        pdpe = ldq_phys(pdpe_addr);
+        pdpe = address_space_ldq(as, pdpe_addr, MEMTXATTRS_UNSPECIFIED, NULL);
         if (!(pdpe & PG_PRESENT_MASK)) {
             /* not present */
             continue;
@@ -173,13 +176,13 @@ static void walk_pdpe2(MemoryMappingList *list,
 
         line_addr = (((unsigned int)i & 0x3) << 30);
         pde_start_addr = (pdpe & ~0xfff) & a20_mask;
-        walk_pde(list, pde_start_addr, a20_mask, line_addr);
+        walk_pde(list, as, pde_start_addr, a20_mask, line_addr);
     }
 }
 
 #ifdef TARGET_X86_64
 /* IA-32e Paging */
-static void walk_pdpe(MemoryMappingList *list,
+static void walk_pdpe(MemoryMappingList *list, AddressSpace *as,
                       hwaddr pdpe_start_addr, int32_t a20_mask,
                       target_ulong start_line_addr)
 {
@@ -190,7 +193,7 @@ static void walk_pdpe(MemoryMappingList *list,
 
     for (i = 0; i < 512; i++) {
         pdpe_addr = (pdpe_start_addr + i * 8) & a20_mask;
-        pdpe = ldq_phys(pdpe_addr);
+        pdpe = address_space_ldq(as, pdpe_addr, MEMTXATTRS_UNSPECIFIED, NULL);
         if (!(pdpe & PG_PRESENT_MASK)) {
             /* not present */
             continue;
@@ -211,12 +214,12 @@ static void walk_pdpe(MemoryMappingList *list,
         }
 
         pde_start_addr = (pdpe & PLM4_ADDR_MASK) & a20_mask;
-        walk_pde(list, pde_start_addr, a20_mask, line_addr);
+        walk_pde(list, as, pde_start_addr, a20_mask, line_addr);
     }
 }
 
 /* IA-32e Paging */
-static void walk_pml4e(MemoryMappingList *list,
+static void walk_pml4e(MemoryMappingList *list, AddressSpace *as,
                        hwaddr pml4e_start_addr, int32_t a20_mask)
 {
     hwaddr pml4e_addr, pdpe_start_addr;
@@ -226,7 +229,8 @@ static void walk_pml4e(MemoryMappingList *list,
 
     for (i = 0; i < 512; i++) {
         pml4e_addr = (pml4e_start_addr + i * 8) & a20_mask;
-        pml4e = ldq_phys(pml4e_addr);
+        pml4e = address_space_ldq(as, pml4e_addr, MEMTXATTRS_UNSPECIFIED,
+                                  NULL);
         if (!(pml4e & PG_PRESENT_MASK)) {
             /* not present */
             continue;
@@ -234,7 +238,7 @@ static void walk_pml4e(MemoryMappingList *list,
 
         line_addr = ((i & 0x1ffULL) << 39) | (0xffffULL << 48);
         pdpe_start_addr = (pml4e & PLM4_ADDR_MASK) & a20_mask;
-        walk_pdpe(list, pdpe_start_addr, a20_mask, line_addr);
+        walk_pdpe(list, as, pdpe_start_addr, a20_mask, line_addr);
     }
 }
 #endif
@@ -256,14 +260,14 @@ void x86_cpu_get_memory_mapping(CPUState *cs, MemoryMappingList *list,
             hwaddr pml4e_addr;
 
             pml4e_addr = (env->cr[3] & PLM4_ADDR_MASK) & env->a20_mask;
-            walk_pml4e(list, pml4e_addr, env->a20_mask);
+            walk_pml4e(list, cs->as, pml4e_addr, env->a20_mask);
         } else
 #endif
         {
             hwaddr pdpe_addr;
 
             pdpe_addr = (env->cr[3] & ~0x1f) & env->a20_mask;
-            walk_pdpe2(list, pdpe_addr, env->a20_mask);
+            walk_pdpe2(list, cs->as, pdpe_addr, env->a20_mask);
         }
     } else {
         hwaddr pde_addr;
@@ -271,7 +275,7 @@ void x86_cpu_get_memory_mapping(CPUState *cs, MemoryMappingList *list,
 
         pde_addr = (env->cr[3] & ~0xfff) & env->a20_mask;
         pse = !!(env->cr[4] & CR4_PSE_MASK);
-        walk_pde2(list, pde_addr, env->a20_mask, pse);
+        walk_pde2(list, cs->as, pde_addr, env->a20_mask, pse);
     }
 }
 

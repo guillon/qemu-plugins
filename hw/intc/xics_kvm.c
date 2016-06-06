@@ -25,6 +25,10 @@
  *
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
+#include "qemu-common.h"
+#include "cpu.h"
 #include "hw/hw.h"
 #include "trace.h"
 #include "hw/ppc/spapr.h"
@@ -38,10 +42,6 @@
 typedef struct KVMXICSState {
     XICSState parent_obj;
 
-    uint32_t set_xive_token;
-    uint32_t get_xive_token;
-    uint32_t int_off_token;
-    uint32_t int_on_token;
     int kernel_xics_fd;
 } KVMXICSState;
 
@@ -65,7 +65,7 @@ static void icp_get_kvm_state(ICPState *ss)
     ret = kvm_vcpu_ioctl(ss->cs, KVM_GET_ONE_REG, &reg);
     if (ret != 0) {
         error_report("Unable to retrieve KVM interrupt controller state"
-                " for CPU %d: %s", ss->cs->cpu_index, strerror(errno));
+                " for CPU %ld: %s", kvm_arch_vcpu_id(ss->cs), strerror(errno));
         exit(1);
     }
 
@@ -97,7 +97,7 @@ static int icp_set_kvm_state(ICPState *ss, int version_id)
     ret = kvm_vcpu_ioctl(ss->cs, KVM_SET_ONE_REG, &reg);
     if (ret != 0) {
         error_report("Unable to restore KVM interrupt controller state (0x%"
-                PRIx64 ") for CPU %d: %s", state, ss->cs->cpu_index,
+                PRIx64 ") for CPU %ld: %s", state, kvm_arch_vcpu_id(ss->cs),
                 strerror(errno));
         return ret;
     }
@@ -224,7 +224,7 @@ static int ics_set_kvm_state(ICSState *ics, int version_id)
             state |= KVM_XICS_MASKED;
         }
 
-        if (ics->islsi[i]) {
+        if (ics->irqs[i].flags & XICS_FLAGS_IRQ_LSI) {
             state |= KVM_XICS_LEVEL_SENSITIVE;
             if (irq->status & XICS_STATUS_ASSERTED) {
                 state |= KVM_XICS_PENDING;
@@ -253,7 +253,7 @@ static void ics_kvm_set_irq(void *opaque, int srcno, int val)
     int rc;
 
     args.irq = srcno + ics->offset;
-    if (!ics->islsi[srcno]) {
+    if (ics->irqs[srcno].flags & XICS_FLAGS_IRQ_MSI) {
         if (!val) {
             return;
         }
@@ -269,7 +269,23 @@ static void ics_kvm_set_irq(void *opaque, int srcno, int val)
 
 static void ics_kvm_reset(DeviceState *dev)
 {
-    ics_set_kvm_state(ICS(dev), 1);
+    ICSState *ics = ICS(dev);
+    int i;
+    uint8_t flags[ics->nr_irqs];
+
+    for (i = 0; i < ics->nr_irqs; i++) {
+        flags[i] = ics->irqs[i].flags;
+    }
+
+    memset(ics->irqs, 0, sizeof(ICSIRQState) * ics->nr_irqs);
+
+    for (i = 0; i < ics->nr_irqs; i++) {
+        ics->irqs[i].priority = 0xff;
+        ics->irqs[i].saved_priority = 0xff;
+        ics->irqs[i].flags = flags[i];
+    }
+
+    ics_set_kvm_state(ics, 1);
 }
 
 static void ics_kvm_realize(DeviceState *dev, Error **errp)
@@ -281,7 +297,6 @@ static void ics_kvm_realize(DeviceState *dev, Error **errp)
         return;
     }
     ics->irqs = g_malloc0(ics->nr_irqs * sizeof(ICSIRQState));
-    ics->islsi = g_malloc0(ics->nr_irqs * sizeof(bool));
     ics->qirqs = qemu_allocate_irqs(ics_kvm_set_irq, ics, ics->nr_irqs);
 }
 
@@ -320,22 +335,28 @@ static void xics_kvm_cpu_setup(XICSState *icp, PowerPCCPU *cpu)
         abort();
     }
 
+    /*
+     * If we are reusing a parked vCPU fd corresponding to the CPU
+     * which was hot-removed earlier we don't have to renable
+     * KVM_CAP_IRQ_XICS capability again.
+     */
+    if (ss->cap_irq_xics_enabled) {
+        return;
+    }
+
     if (icpkvm->kernel_xics_fd != -1) {
         int ret;
-        struct kvm_enable_cap xics_enable_cap = {
-            .cap = KVM_CAP_IRQ_XICS,
-            .flags = 0,
-            .args = {icpkvm->kernel_xics_fd, cs->cpu_index, 0, 0},
-        };
 
         ss->cs = cs;
 
-        ret = kvm_vcpu_ioctl(ss->cs, KVM_ENABLE_CAP, &xics_enable_cap);
+        ret = kvm_vcpu_enable_cap(cs, KVM_CAP_IRQ_XICS, 0,
+                                  icpkvm->kernel_xics_fd, kvm_arch_vcpu_id(cs));
         if (ret < 0) {
-            error_report("Unable to connect CPU%d to kernel XICS: %s",
-                    cs->cpu_index, strerror(errno));
+            error_report("Unable to connect CPU%ld to kernel XICS: %s",
+                    kvm_arch_vcpu_id(cs), strerror(errno));
             exit(1);
         }
+        ss->cap_irq_xics_enabled = true;
     }
 }
 
@@ -361,7 +382,7 @@ static void xics_kvm_set_nr_servers(XICSState *icp, uint32_t nr_servers,
     }
 }
 
-static void rtas_dummy(PowerPCCPU *cpu, sPAPREnvironment *spapr,
+static void rtas_dummy(PowerPCCPU *cpu, sPAPRMachineState *spapr,
                        uint32_t token,
                        uint32_t nargs, target_ulong args,
                        uint32_t nret, target_ulong rets)
@@ -387,32 +408,30 @@ static void xics_kvm_realize(DeviceState *dev, Error **errp)
         goto fail;
     }
 
-    icpkvm->set_xive_token = spapr_rtas_register("ibm,set-xive", rtas_dummy);
-    icpkvm->get_xive_token = spapr_rtas_register("ibm,get-xive", rtas_dummy);
-    icpkvm->int_off_token = spapr_rtas_register("ibm,int-off", rtas_dummy);
-    icpkvm->int_on_token = spapr_rtas_register("ibm,int-on", rtas_dummy);
+    spapr_rtas_register(RTAS_IBM_SET_XIVE, "ibm,set-xive", rtas_dummy);
+    spapr_rtas_register(RTAS_IBM_GET_XIVE, "ibm,get-xive", rtas_dummy);
+    spapr_rtas_register(RTAS_IBM_INT_OFF, "ibm,int-off", rtas_dummy);
+    spapr_rtas_register(RTAS_IBM_INT_ON, "ibm,int-on", rtas_dummy);
 
-    rc = kvmppc_define_rtas_kernel_token(icpkvm->set_xive_token,
-                                         "ibm,set-xive");
+    rc = kvmppc_define_rtas_kernel_token(RTAS_IBM_SET_XIVE, "ibm,set-xive");
     if (rc < 0) {
         error_setg(errp, "kvmppc_define_rtas_kernel_token: ibm,set-xive");
         goto fail;
     }
 
-    rc = kvmppc_define_rtas_kernel_token(icpkvm->get_xive_token,
-                                         "ibm,get-xive");
+    rc = kvmppc_define_rtas_kernel_token(RTAS_IBM_GET_XIVE, "ibm,get-xive");
     if (rc < 0) {
         error_setg(errp, "kvmppc_define_rtas_kernel_token: ibm,get-xive");
         goto fail;
     }
 
-    rc = kvmppc_define_rtas_kernel_token(icpkvm->int_on_token, "ibm,int-on");
+    rc = kvmppc_define_rtas_kernel_token(RTAS_IBM_INT_ON, "ibm,int-on");
     if (rc < 0) {
         error_setg(errp, "kvmppc_define_rtas_kernel_token: ibm,int-on");
         goto fail;
     }
 
-    rc = kvmppc_define_rtas_kernel_token(icpkvm->int_off_token, "ibm,int-off");
+    rc = kvmppc_define_rtas_kernel_token(RTAS_IBM_INT_OFF, "ibm,int-off");
     if (rc < 0) {
         error_setg(errp, "kvmppc_define_rtas_kernel_token: ibm,int-off");
         goto fail;
@@ -443,7 +462,6 @@ static void xics_kvm_realize(DeviceState *dev, Error **errp)
     }
 
     kvm_kernel_irqchip = true;
-    kvm_irqfds_allowed = true;
     kvm_msi_via_irqfd_allowed = true;
     kvm_gsi_direct_mapping = true;
 

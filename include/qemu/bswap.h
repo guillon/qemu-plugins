@@ -1,16 +1,13 @@
 #ifndef BSWAP_H
 #define BSWAP_H
 
-#include "config-host.h"
-#include <inttypes.h>
-#include <limits.h>
-#include <string.h>
 #include "fpu/softfloat.h"
 
 #ifdef CONFIG_MACHINE_BSWAP_H
 # include <sys/endian.h>
-# include <sys/types.h>
 # include <machine/bswap.h>
+#elif defined(__FreeBSD__)
+# include <sys/endian.h>
 #elif defined(CONFIG_BYTESWAP_H)
 # include <byteswap.h>
 
@@ -128,6 +125,25 @@ static inline uint32_t qemu_bswap_len(uint32_t value, int len)
     return bswap32(value) >> (32 - 8 * len);
 }
 
+/*
+ * Same as cpu_to_le{16,23}, except that gcc will figure the result is
+ * a compile-time constant if you pass in a constant.  So this can be
+ * used to initialize static variables.
+ */
+#if defined(HOST_WORDS_BIGENDIAN)
+# define const_le32(_x)                          \
+    ((((_x) & 0x000000ffU) << 24) |              \
+     (((_x) & 0x0000ff00U) <<  8) |              \
+     (((_x) & 0x00ff0000U) >>  8) |              \
+     (((_x) & 0xff000000U) >> 24))
+# define const_le16(_x)                          \
+    ((((_x) & 0x00ff) << 8) |                    \
+     (((_x) & 0xff00) >> 8))
+#else
+# define const_le32(_x) (_x)
+# define const_le16(_x) (_x)
+#endif
+
 /* Unions for reinterpreting between floats and integers.  */
 
 typedef union {
@@ -202,7 +218,7 @@ typedef union {
  *   f    : float access
  *
  * sign is:
- * (empty): for floats or 32 bit size
+ * (empty): for 32 or 64 bit sizes (including floats and doubles)
  *   u    : unsigned
  *   s    : signed
  *
@@ -213,9 +229,19 @@ typedef union {
  *   q: 64 bits
  *
  * endian is:
- * (empty): host endian
+ *   he   : host endian
  *   be   : big endian
  *   le   : little endian
+ *   te   : target endian
+ * (except for byte accesses, which have no endian infix).
+ *
+ * The target endian accessors are obviously only available to source
+ * files which are built per-target; they are defined in cpu-all.h.
+ *
+ * In all cases these functions take a host pointer.
+ * For accessors that take a guest address rather than a
+ * host address, see the cpu_{ld,st}_* accessors defined in
+ * cpu_ldst.h.
  */
 
 static inline int ldub_p(const void *ptr)
@@ -228,7 +254,7 @@ static inline int ldsb_p(const void *ptr)
     return *(int8_t *)ptr;
 }
 
-static inline void stb_p(void *ptr, int v)
+static inline void stb_p(void *ptr, uint8_t v)
 {
     *(uint8_t *)ptr = v;
 }
@@ -237,82 +263,82 @@ static inline void stb_p(void *ptr, int v)
    operations.  Thus we don't need to play games with packed attributes, or
    inline byte-by-byte stores.  */
 
-static inline int lduw_p(const void *ptr)
+static inline int lduw_he_p(const void *ptr)
 {
     uint16_t r;
     memcpy(&r, ptr, sizeof(r));
     return r;
 }
 
-static inline int ldsw_p(const void *ptr)
+static inline int ldsw_he_p(const void *ptr)
 {
     int16_t r;
     memcpy(&r, ptr, sizeof(r));
     return r;
 }
 
-static inline void stw_p(void *ptr, uint16_t v)
+static inline void stw_he_p(void *ptr, uint16_t v)
 {
     memcpy(ptr, &v, sizeof(v));
 }
 
-static inline int ldl_p(const void *ptr)
+static inline int ldl_he_p(const void *ptr)
 {
     int32_t r;
     memcpy(&r, ptr, sizeof(r));
     return r;
 }
 
-static inline void stl_p(void *ptr, uint32_t v)
+static inline void stl_he_p(void *ptr, uint32_t v)
 {
     memcpy(ptr, &v, sizeof(v));
 }
 
-static inline uint64_t ldq_p(const void *ptr)
+static inline uint64_t ldq_he_p(const void *ptr)
 {
     uint64_t r;
     memcpy(&r, ptr, sizeof(r));
     return r;
 }
 
-static inline void stq_p(void *ptr, uint64_t v)
+static inline void stq_he_p(void *ptr, uint64_t v)
 {
     memcpy(ptr, &v, sizeof(v));
 }
 
 static inline int lduw_le_p(const void *ptr)
 {
-    return (uint16_t)le_bswap(lduw_p(ptr), 16);
+    return (uint16_t)le_bswap(lduw_he_p(ptr), 16);
 }
 
 static inline int ldsw_le_p(const void *ptr)
 {
-    return (int16_t)le_bswap(lduw_p(ptr), 16);
+    return (int16_t)le_bswap(lduw_he_p(ptr), 16);
 }
 
 static inline int ldl_le_p(const void *ptr)
 {
-    return le_bswap(ldl_p(ptr), 32);
+    return le_bswap(ldl_he_p(ptr), 32);
 }
 
 static inline uint64_t ldq_le_p(const void *ptr)
 {
-    return le_bswap(ldq_p(ptr), 64);
+    return le_bswap(ldq_he_p(ptr), 64);
 }
 
-static inline void stw_le_p(void *ptr, int v)
+static inline void stw_le_p(void *ptr, uint16_t v)
 {
-    stw_p(ptr, le_bswap(v, 16));
+    stw_he_p(ptr, le_bswap(v, 16));
 }
 
-static inline void stl_le_p(void *ptr, int v)
+static inline void stl_le_p(void *ptr, uint32_t v)
 {
-    stl_p(ptr, le_bswap(v, 32));
+    stl_he_p(ptr, le_bswap(v, 32));
 }
 
 static inline void stq_le_p(void *ptr, uint64_t v)
 {
-    stq_p(ptr, le_bswap(v, 64));
+    stq_he_p(ptr, le_bswap(v, 64));
 }
 
 /* float access */
@@ -347,37 +373,37 @@ static inline void stfq_le_p(void *ptr, float64 v)
 
 static inline int lduw_be_p(const void *ptr)
 {
-    return (uint16_t)be_bswap(lduw_p(ptr), 16);
+    return (uint16_t)be_bswap(lduw_he_p(ptr), 16);
 }
 
 static inline int ldsw_be_p(const void *ptr)
 {
-    return (int16_t)be_bswap(lduw_p(ptr), 16);
+    return (int16_t)be_bswap(lduw_he_p(ptr), 16);
 }
 
 static inline int ldl_be_p(const void *ptr)
 {
-    return be_bswap(ldl_p(ptr), 32);
+    return be_bswap(ldl_he_p(ptr), 32);
 }
 
 static inline uint64_t ldq_be_p(const void *ptr)
 {
-    return be_bswap(ldq_p(ptr), 64);
+    return be_bswap(ldq_he_p(ptr), 64);
 }
 
-static inline void stw_be_p(void *ptr, int v)
+static inline void stw_be_p(void *ptr, uint16_t v)
 {
-    stw_p(ptr, be_bswap(v, 16));
+    stw_he_p(ptr, be_bswap(v, 16));
 }
 
-static inline void stl_be_p(void *ptr, int v)
+static inline void stl_be_p(void *ptr, uint32_t v)
 {
-    stl_p(ptr, be_bswap(v, 32));
+    stl_he_p(ptr, be_bswap(v, 32));
 }
 
 static inline void stq_be_p(void *ptr, uint64_t v)
 {
-    stq_p(ptr, be_bswap(v, 64));
+    stq_he_p(ptr, be_bswap(v, 64));
 }
 
 /* float access */
@@ -412,11 +438,9 @@ static inline void stfq_be_p(void *ptr, float64 v)
 
 static inline unsigned long leul_to_cpu(unsigned long v)
 {
-    /* In order to break an include loop between here and
-       qemu-common.h, don't rely on HOST_LONG_BITS.  */
-#if ULONG_MAX == UINT32_MAX
+#if HOST_LONG_BITS == 32
     return le_bswap(v, 32);
-#elif ULONG_MAX == UINT64_MAX
+#elif HOST_LONG_BITS == 64
     return le_bswap(v, 64);
 #else
 # error Unknown sizeof long

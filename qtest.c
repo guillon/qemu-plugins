@@ -11,19 +11,23 @@
  *
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "sysemu/qtest.h"
 #include "hw/qdev.h"
 #include "sysemu/char.h"
 #include "exec/ioport.h"
 #include "exec/memory.h"
 #include "hw/irq.h"
+#include "sysemu/accel.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/cpus.h"
+#include "qemu/config-file.h"
+#include "qemu/option.h"
+#include "qemu/error-report.h"
 
 #define MAX_IRQ 256
 
-const char *qtest_chrdev;
-const char *qtest_log;
 bool qtest_allowed;
 
 static DeviceState *irq_intercept_dev;
@@ -117,11 +121,23 @@ static bool qtest_opened;
  *  > write ADDR SIZE DATA
  *  < OK
  *
+ *  > b64read ADDR SIZE
+ *  < OK B64_DATA
+ *
+ *  > b64write ADDR SIZE B64_DATA
+ *  < OK
+ *
+ *  > memset ADDR SIZE VALUE
+ *  < OK
+ *
  * ADDR, SIZE, VALUE are all integers parsed with strtoul() with a base of 0.
  *
  * DATA is an arbitrarily long hex number prefixed with '0x'.  If it's smaller
  * than the expected size, the value will be zero filled at the end of the data
  * sequence.
+ *
+ * B64_DATA is an arbitrarily long base64 encoded string.
+ * If the sizes do not match, the data will be truncated.
  *
  * IRQ management:
  *
@@ -150,7 +166,7 @@ static int hex2nib(char ch)
     } else if (ch >= 'a' && ch <= 'f') {
         return 10 + (ch - 'a');
     } else if (ch >= 'A' && ch <= 'F') {
-        return 10 + (ch - 'a');
+        return 10 + (ch - 'A');
     } else {
         return -1;
     }
@@ -180,34 +196,57 @@ static void qtest_send_prefix(CharDriverState *chr)
             (long) tv.tv_sec, (long) tv.tv_usec);
 }
 
-static void GCC_FMT_ATTR(2, 3) qtest_send(CharDriverState *chr,
-                                          const char *fmt, ...)
+static void GCC_FMT_ATTR(1, 2) qtest_log_send(const char *fmt, ...)
 {
     va_list ap;
-    char buffer[1024];
-    size_t len;
+
+    if (!qtest_log_fp || !qtest_opened) {
+        return;
+    }
+
+    qtest_send_prefix(NULL);
 
     va_start(ap, fmt);
-    len = vsnprintf(buffer, sizeof(buffer), fmt, ap);
+    vfprintf(qtest_log_fp, fmt, ap);
     va_end(ap);
+}
 
-    qemu_chr_fe_write_all(chr, (uint8_t *)buffer, len);
+static void do_qtest_send(CharDriverState *chr, const char *str, size_t len)
+{
+    qemu_chr_fe_write_all(chr, (uint8_t *)str, len);
     if (qtest_log_fp && qtest_opened) {
-        fprintf(qtest_log_fp, "%s", buffer);
+        fprintf(qtest_log_fp, "%s", str);
     }
+}
+
+static void qtest_send(CharDriverState *chr, const char *str)
+{
+    do_qtest_send(chr, str, strlen(str));
+}
+
+static void GCC_FMT_ATTR(2, 3) qtest_sendf(CharDriverState *chr,
+                                           const char *fmt, ...)
+{
+    va_list ap;
+    gchar *buffer;
+
+    va_start(ap, fmt);
+    buffer = g_strdup_vprintf(fmt, ap);
+    qtest_send(chr, buffer);
+    va_end(ap);
 }
 
 static void qtest_irq_handler(void *opaque, int n, int level)
 {
-    qemu_irq *old_irqs = opaque;
-    qemu_set_irq(old_irqs[n], level);
+    qemu_irq old_irq = *(qemu_irq *)opaque;
+    qemu_set_irq(old_irq, level);
 
     if (irq_levels[n] != level) {
         CharDriverState *chr = qtest_chr;
         irq_levels[n] = level;
         qtest_send_prefix(chr);
-        qtest_send(chr, "IRQ %s %d\n",
-                   level ? "raise" : "lower", n);
+        qtest_sendf(chr, "IRQ %s %d\n",
+                    level ? "raise" : "lower", n);
     }
 }
 
@@ -235,7 +274,8 @@ static void qtest_process_command(CharDriverState *chr, gchar **words)
     g_assert(command);
     if (strcmp(words[0], "irq_intercept_out") == 0
         || strcmp(words[0], "irq_intercept_in") == 0) {
-	DeviceState *dev;
+        DeviceState *dev;
+        NamedGPIOList *ngl;
 
         g_assert(words[1]);
         dev = DEVICE(object_resolve_path(words[1], NULL));
@@ -255,10 +295,25 @@ static void qtest_process_command(CharDriverState *chr, gchar **words)
 	    return;
         }
 
-        if (words[0][14] == 'o') {
-            qemu_irq_intercept_out(&dev->gpio_out, qtest_irq_handler, dev->num_gpio_out);
-        } else {
-            qemu_irq_intercept_in(dev->gpio_in, qtest_irq_handler, dev->num_gpio_in);
+        QLIST_FOREACH(ngl, &dev->gpios, node) {
+            /* We don't support intercept of named GPIOs yet */
+            if (ngl->name) {
+                continue;
+            }
+            if (words[0][14] == 'o') {
+                int i;
+                for (i = 0; i < ngl->num_out; ++i) {
+                    qemu_irq *disconnected = g_new0(qemu_irq, 1);
+                    qemu_irq icpt = qemu_allocate_irq(qtest_irq_handler,
+                                                      disconnected, i);
+
+                    *disconnected = qdev_intercept_gpio_out(dev, icpt,
+                                                            ngl->name, i);
+                }
+            } else {
+                qemu_irq_intercept_in(ngl->in, qtest_irq_handler,
+                                      ngl->num_in);
+            }
         }
         irq_intercept_dev = dev;
         qtest_send_prefix(chr);
@@ -300,7 +355,7 @@ static void qtest_process_command(CharDriverState *chr, gchar **words)
             value = cpu_inl(addr);
         }
         qtest_send_prefix(chr);
-        qtest_send(chr, "OK 0x%04x\n", value);
+        qtest_sendf(chr, "OK 0x%04x\n", value);
     } else if (strcmp(words[0], "writeb") == 0 ||
                strcmp(words[0], "writew") == 0 ||
                strcmp(words[0], "writel") == 0 ||
@@ -357,10 +412,11 @@ static void qtest_process_command(CharDriverState *chr, gchar **words)
             tswap64s(&value);
         }
         qtest_send_prefix(chr);
-        qtest_send(chr, "OK 0x%016" PRIx64 "\n", value);
+        qtest_sendf(chr, "OK 0x%016" PRIx64 "\n", value);
     } else if (strcmp(words[0], "read") == 0) {
         uint64_t addr, len, i;
         uint8_t *data;
+        char *enc;
 
         g_assert(words[1] && words[2]);
         addr = strtoull(words[1], NULL, 0);
@@ -369,14 +425,33 @@ static void qtest_process_command(CharDriverState *chr, gchar **words)
         data = g_malloc(len);
         cpu_physical_memory_read(addr, data, len);
 
-        qtest_send_prefix(chr);
-        qtest_send(chr, "OK 0x");
+        enc = g_malloc(2 * len + 1);
         for (i = 0; i < len; i++) {
-            qtest_send(chr, "%02x", data[i]);
+            sprintf(&enc[i * 2], "%02x", data[i]);
         }
-        qtest_send(chr, "\n");
+
+        qtest_send_prefix(chr);
+        qtest_sendf(chr, "OK 0x%s\n", enc);
 
         g_free(data);
+        g_free(enc);
+    } else if (strcmp(words[0], "b64read") == 0) {
+        uint64_t addr, len;
+        uint8_t *data;
+        gchar *b64_data;
+
+        g_assert(words[1] && words[2]);
+        addr = strtoull(words[1], NULL, 0);
+        len = strtoull(words[2], NULL, 0);
+
+        data = g_malloc(len);
+        cpu_physical_memory_read(addr, data, len);
+        b64_data = g_base64_encode(data, len);
+        qtest_send_prefix(chr);
+        qtest_sendf(chr, "OK %s\n", b64_data);
+
+        g_free(data);
+        g_free(b64_data);
     } else if (strcmp(words[0], "write") == 0) {
         uint64_t addr, len, i;
         uint8_t *data;
@@ -406,7 +481,52 @@ static void qtest_process_command(CharDriverState *chr, gchar **words)
 
         qtest_send_prefix(chr);
         qtest_send(chr, "OK\n");
-    } else if (strcmp(words[0], "clock_step") == 0) {
+    } else if (strcmp(words[0], "memset") == 0) {
+        uint64_t addr, len;
+        uint8_t *data;
+        uint8_t pattern;
+
+        g_assert(words[1] && words[2] && words[3]);
+        addr = strtoull(words[1], NULL, 0);
+        len = strtoull(words[2], NULL, 0);
+        pattern = strtoull(words[3], NULL, 0);
+
+        data = g_malloc(len);
+        memset(data, pattern, len);
+        cpu_physical_memory_write(addr, data, len);
+        g_free(data);
+
+        qtest_send_prefix(chr);
+        qtest_send(chr, "OK\n");
+    }  else if (strcmp(words[0], "b64write") == 0) {
+        uint64_t addr, len;
+        uint8_t *data;
+        size_t data_len;
+        gsize out_len;
+
+        g_assert(words[1] && words[2] && words[3]);
+        addr = strtoull(words[1], NULL, 0);
+        len = strtoull(words[2], NULL, 0);
+
+        data_len = strlen(words[3]);
+        if (data_len < 3) {
+            qtest_send(chr, "ERR invalid argument size\n");
+            return;
+        }
+
+        data = g_base64_decode_inplace(words[3], &out_len);
+        if (out_len != len) {
+            qtest_log_send("b64write: data length mismatch (told %"PRIu64", "
+                           "found %zu)\n",
+                           len, out_len);
+            out_len = MIN(out_len, len);
+        }
+
+        cpu_physical_memory_write(addr, data, out_len);
+
+        qtest_send_prefix(chr);
+        qtest_send(chr, "OK\n");
+    } else if (qtest_enabled() && strcmp(words[0], "clock_step") == 0) {
         int64_t ns;
 
         if (words[1]) {
@@ -416,18 +536,20 @@ static void qtest_process_command(CharDriverState *chr, gchar **words)
         }
         qtest_clock_warp(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ns);
         qtest_send_prefix(chr);
-        qtest_send(chr, "OK %"PRIi64"\n", (int64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
-    } else if (strcmp(words[0], "clock_set") == 0) {
+        qtest_sendf(chr, "OK %"PRIi64"\n",
+                    (int64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    } else if (qtest_enabled() && strcmp(words[0], "clock_set") == 0) {
         int64_t ns;
 
         g_assert(words[1]);
         ns = strtoll(words[1], NULL, 0);
         qtest_clock_warp(ns);
         qtest_send_prefix(chr);
-        qtest_send(chr, "OK %"PRIi64"\n", (int64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        qtest_sendf(chr, "OK %"PRIi64"\n",
+                    (int64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     } else {
         qtest_send_prefix(chr);
-        qtest_send(chr, "FAIL Unknown command `%s'\n", words[0]);
+        qtest_sendf(chr, "FAIL Unknown command '%s'\n", words[0]);
     }
 }
 
@@ -502,19 +624,27 @@ static void qtest_event(void *opaque, int event)
     }
 }
 
-int qtest_init(void)
+static int qtest_init_accel(MachineState *ms)
+{
+    QemuOpts *opts = qemu_opts_create(qemu_find_opts("icount"), NULL, 0,
+                                      &error_abort);
+    qemu_opt_set(opts, "shift", "0", &error_abort);
+    configure_icount(opts, &error_abort);
+    qemu_opts_del(opts);
+    return 0;
+}
+
+void qtest_init(const char *qtest_chrdev, const char *qtest_log, Error **errp)
 {
     CharDriverState *chr;
 
-    g_assert(qtest_chrdev != NULL);
-
-    configure_icount("0");
     chr = qemu_chr_new("qtest", qtest_chrdev, NULL);
 
-    qemu_chr_add_handlers(chr, qtest_can_read, qtest_read, qtest_event, chr);
-    qemu_chr_fe_set_echo(chr, true);
-
-    inbuf = g_string_new("");
+    if (chr == NULL) {
+        error_setg(errp, "Failed to initialize device for qtest: \"%s\"",
+                   qtest_chrdev);
+        return;
+    }
 
     if (qtest_log) {
         if (strcmp(qtest_log, "none") != 0) {
@@ -524,7 +654,38 @@ int qtest_init(void)
         qtest_log_fp = stderr;
     }
 
-    qtest_chr = chr;
+    qemu_chr_add_handlers(chr, qtest_can_read, qtest_read, qtest_event, chr);
+    qemu_chr_fe_set_echo(chr, true);
 
-    return 0;
+    inbuf = g_string_new("");
+    qtest_chr = chr;
 }
+
+bool qtest_driver(void)
+{
+    return qtest_chr;
+}
+
+static void qtest_accel_class_init(ObjectClass *oc, void *data)
+{
+    AccelClass *ac = ACCEL_CLASS(oc);
+    ac->name = "QTest";
+    ac->available = qtest_available;
+    ac->init_machine = qtest_init_accel;
+    ac->allowed = &qtest_allowed;
+}
+
+#define TYPE_QTEST_ACCEL ACCEL_CLASS_NAME("qtest")
+
+static const TypeInfo qtest_accel_type = {
+    .name = TYPE_QTEST_ACCEL,
+    .parent = TYPE_ACCEL,
+    .class_init = qtest_accel_class_init,
+};
+
+static void qtest_type_init(void)
+{
+    type_register_static(&qtest_accel_type);
+}
+
+type_init(qtest_type_init);

@@ -34,7 +34,6 @@
 #define MAX_CPUS 1
 
 #define BIOS_SIZE     (1024 * 1024)
-#define BIOS_FILENAME "ppc_rom.bin"
 #define NVRAM_SIZE        0x2000
 #define PROM_FILENAME    "openbios-ppc"
 #define PROM_ADDR         0xfff00000
@@ -58,6 +57,7 @@ typedef struct CUDATimer {
     uint16_t counter_value;
     int64_t load_time;
     int64_t next_irq_time;
+    uint64_t frequency;
     QEMUTimer *timer;
 } CUDATimer;
 
@@ -98,15 +98,21 @@ typedef struct CUDAState {
     CUDATimer timers[2];
 
     uint32_t tick_offset;
+    uint64_t frequency;
 
     uint8_t last_b;
     uint8_t last_acr;
+
+    /* MacOS 9 is racy and requires a delay upon setting the SR_INT bit */
+    QEMUTimer *sr_delay_timer;
 
     int data_in_size;
     int data_in_index;
     int data_out_index;
 
     qemu_irq irq;
+    uint16_t adb_poll_mask;
+    uint8_t autopoll_rate_ms;
     uint8_t autopoll;
     uint8_t data_in[128];
     uint8_t data_out[16];
@@ -130,7 +136,6 @@ typedef struct MACIOIDEState {
 
     MemoryRegion mem;
     IDEBus bus;
-    BlockDriverAIOCB *aiocb;
     IDEDMA dma;
     void *dbdma;
     bool dma_active;
@@ -179,6 +184,4 @@ typedef struct MacIONVRAMState {
 } MacIONVRAMState;
 
 void pmac_format_nvram_partition (MacIONVRAMState *nvr, int len);
-uint8_t macio_nvram_read(MacIONVRAMState *s, uint32_t addr);
-void macio_nvram_write(MacIONVRAMState *s, uint32_t addr, uint8_t val);
 #endif /* !defined(__PPC_MAC_H__) */

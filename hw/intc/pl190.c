@@ -7,6 +7,7 @@
  * This code is licensed under the GPL.
  */
 
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
 
 /* The number of virtual priority levels.  16 user vectors plus the
@@ -273,7 +274,6 @@ static void pl190_class_init(ObjectClass *klass, void *data)
     SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
     k->init = pl190_init;
-    dc->no_user = 1;
     dc->reset = pl190_reset;
     dc->vmsd = &vmstate_pl190;
 }

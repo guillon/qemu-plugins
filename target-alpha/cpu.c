@@ -19,6 +19,8 @@
  * <http://www.gnu.org/licenses/lgpl-2.1.html>
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "cpu.h"
 #include "qemu-common.h"
 #include "migration/vmstate.h"
@@ -29,6 +31,27 @@ static void alpha_cpu_set_pc(CPUState *cs, vaddr value)
     AlphaCPU *cpu = ALPHA_CPU(cs);
 
     cpu->env.pc = value;
+}
+
+static bool alpha_cpu_has_work(CPUState *cs)
+{
+    /* Here we are checking to see if the CPU should wake up from HALT.
+       We will have gotten into this state only for WTINT from PALmode.  */
+    /* ??? I'm not sure how the IPL state works with WTINT to keep a CPU
+       asleep even if (some) interrupts have been asserted.  For now,
+       assume that if a CPU really wants to stay asleep, it will mask
+       interrupts at the chipset level, which will prevent these bits
+       from being set in the first place.  */
+    return cs->interrupt_request & (CPU_INTERRUPT_HARD
+                                    | CPU_INTERRUPT_TIMER
+                                    | CPU_INTERRUPT_SMP
+                                    | CPU_INTERRUPT_MCHK);
+}
+
+static void alpha_cpu_disas_set_info(CPUState *cpu, disassemble_info *info)
+{
+    info->mach = bfd_mach_alpha_ev6;
+    info->print_insn = print_insn_alpha;
 }
 
 static void alpha_cpu_realizefn(DeviceState *dev, Error **errp)
@@ -242,8 +265,8 @@ static void alpha_cpu_initfn(Object *obj)
     CPUAlphaState *env = &cpu->env;
 
     cs->env_ptr = env;
-    cpu_exec_init(env);
-    tlb_flush(env, 1);
+    cpu_exec_init(cs, &error_abort);
+    tlb_flush(cs, 1);
 
     alpha_translate_init();
 
@@ -267,17 +290,31 @@ static void alpha_cpu_class_init(ObjectClass *oc, void *data)
     dc->realize = alpha_cpu_realizefn;
 
     cc->class_by_name = alpha_cpu_class_by_name;
+    cc->has_work = alpha_cpu_has_work;
     cc->do_interrupt = alpha_cpu_do_interrupt;
+    cc->cpu_exec_interrupt = alpha_cpu_exec_interrupt;
     cc->dump_state = alpha_cpu_dump_state;
     cc->set_pc = alpha_cpu_set_pc;
     cc->gdb_read_register = alpha_cpu_gdb_read_register;
     cc->gdb_write_register = alpha_cpu_gdb_write_register;
-#ifndef CONFIG_USER_ONLY
+#ifdef CONFIG_USER_ONLY
+    cc->handle_mmu_fault = alpha_cpu_handle_mmu_fault;
+#else
     cc->do_unassigned_access = alpha_cpu_unassigned_access;
+    cc->do_unaligned_access = alpha_cpu_do_unaligned_access;
     cc->get_phys_page_debug = alpha_cpu_get_phys_page_debug;
     dc->vmsd = &vmstate_alpha_cpu;
 #endif
+    cc->disas_set_info = alpha_cpu_disas_set_info;
+
     cc->gdb_num_core_regs = 67;
+
+    /*
+     * Reason: alpha_cpu_initfn() calls cpu_exec_init(), which saves
+     * the object in cpus -> dangling pointer after final
+     * object_unref().
+     */
+    dc->cannot_destroy_with_object_finalize_yet = true;
 }
 
 static const TypeInfo alpha_cpu_type_info = {

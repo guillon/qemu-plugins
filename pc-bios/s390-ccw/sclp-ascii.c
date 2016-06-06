@@ -24,6 +24,7 @@ static int sclp_service_call(unsigned int command, void *sccb)
                 "       srl     %0,28"
                 : "=&d" (cc) : "d" (command), "a" (__pa(sccb))
                 : "cc", "memory");
+        consume_sclp_int();
         if (cc == 3)
                 return -EIO;
         if (cc == 2)
@@ -33,7 +34,7 @@ static int sclp_service_call(unsigned int command, void *sccb)
 
 static void sclp_set_write_mask(void)
 {
-    WriteEventMask *sccb = (void*)_sccb;
+    WriteEventMask *sccb = (void *)_sccb;
 
     sccb->h.length = sizeof(WriteEventMask);
     sccb->mask_length = sizeof(unsigned int);
@@ -68,7 +69,7 @@ static void _memcpy(char *dest, const char *src, int len)
 void sclp_print(const char *str)
 {
     int len = _strlen(str);
-    WriteEventData *sccb = (void*)_sccb;
+    WriteEventData *sccb = (void *)_sccb;
 
     sccb->h.length = sizeof(WriteEventData) + len;
     sccb->h.function_code = SCLP_FC_NORMAL_WRITE;

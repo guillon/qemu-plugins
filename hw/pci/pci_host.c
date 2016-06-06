@@ -18,8 +18,10 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
+#include "hw/pci/pci_bus.h"
 #include "trace.h"
 
 /* debug PCI */
@@ -52,6 +54,13 @@ void pci_host_config_write_common(PCIDevice *pci_dev, uint32_t addr,
                                   uint32_t limit, uint32_t val, uint32_t len)
 {
     assert(len <= 4);
+    /* non-zero functions are only exposed when function 0 is present,
+     * allowing direct removal of unexposed functions.
+     */
+    if (pci_dev->qdev.hotplugged && !pci_get_function_0(pci_dev)) {
+        return;
+    }
+
     trace_pci_cfg_write(pci_dev->name, PCI_SLOT(pci_dev->devfn),
                         PCI_FUNC(pci_dev->devfn), addr, val);
     pci_dev->config_write(pci_dev, addr, val, MIN(len, limit - addr));
@@ -63,6 +72,13 @@ uint32_t pci_host_config_read_common(PCIDevice *pci_dev, uint32_t addr,
     uint32_t ret;
 
     assert(len <= 4);
+    /* non-zero functions are only exposed when function 0 is present,
+     * allowing direct removal of unexposed functions.
+     */
+    if (pci_dev->qdev.hotplugged && !pci_get_function_0(pci_dev)) {
+        return ~0x0;
+    }
+
     ret = pci_dev->config_read(pci_dev, addr, MIN(len, limit - addr));
     trace_pci_cfg_read(pci_dev->name, PCI_SLOT(pci_dev->devfn),
                        PCI_FUNC(pci_dev->devfn), addr, ret);
@@ -142,8 +158,9 @@ static uint64_t pci_host_data_read(void *opaque,
 {
     PCIHostState *s = opaque;
     uint32_t val;
-    if (!(s->config_reg & (1 << 31)))
+    if (!(s->config_reg & (1U << 31))) {
         return 0xffffffff;
+    }
     val = pci_data_read(s->bus, s->config_reg | (addr & 3), len);
     PCI_DPRINTF("read addr " TARGET_FMT_plx " len %d val %x\n",
                 addr, len, val);

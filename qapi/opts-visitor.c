@@ -1,7 +1,7 @@
 /*
  * Options Visitor
  *
- * Copyright Red Hat, Inc. 2012, 2013
+ * Copyright Red Hat, Inc. 2012-2016
  *
  * Author: Laszlo Ersek <lersek@redhat.com>
  *
@@ -10,7 +10,9 @@
  *
  */
 
-#include "qemu-common.h"
+#include "qemu/osdep.h"
+#include "qapi/error.h"
+#include "qemu/cutils.h"
 #include "qapi/qmp/qerror.h"
 #include "qapi/opts-visitor.h"
 #include "qemu/queue.h"
@@ -89,6 +91,12 @@ struct OptsVisitor
 };
 
 
+static OptsVisitor *to_ov(Visitor *v)
+{
+    return container_of(v, OptsVisitor, visitor);
+}
+
+
 static void
 destroy_list(gpointer list)
 {
@@ -118,13 +126,15 @@ opts_visitor_insert(GHashTable *unprocessed_opts, const QemuOpt *opt)
 
 
 static void
-opts_start_struct(Visitor *v, void **obj, const char *kind,
-                  const char *name, size_t size, Error **errp)
+opts_start_struct(Visitor *v, const char *name, void **obj,
+                  size_t size, Error **errp)
 {
-    OptsVisitor *ov = DO_UPCAST(OptsVisitor, visitor, v);
+    OptsVisitor *ov = to_ov(v);
     const QemuOpt *opt;
 
-    *obj = g_malloc0(size > 0 ? size : 1);
+    if (obj) {
+        *obj = g_malloc0(size > 0 ? size : 1);
+    }
     if (ov->depth++ > 0) {
         return;
     }
@@ -141,24 +151,18 @@ opts_start_struct(Visitor *v, void **obj, const char *kind,
     if (ov->opts_root->id != NULL) {
         ov->fake_id_opt = g_malloc0(sizeof *ov->fake_id_opt);
 
-        ov->fake_id_opt->name = "id";
-        ov->fake_id_opt->str = ov->opts_root->id;
+        ov->fake_id_opt->name = g_strdup("id");
+        ov->fake_id_opt->str = g_strdup(ov->opts_root->id);
         opts_visitor_insert(ov->unprocessed_opts, ov->fake_id_opt);
     }
-}
-
-
-static gboolean
-ghr_true(gpointer ign_key, gpointer ign_value, gpointer ign_user_data)
-{
-    return TRUE;
 }
 
 
 static void
 opts_end_struct(Visitor *v, Error **errp)
 {
-    OptsVisitor *ov = DO_UPCAST(OptsVisitor, visitor, v);
+    OptsVisitor *ov = to_ov(v);
+    GHashTableIter iter;
     GQueue *any;
 
     if (--ov->depth > 0) {
@@ -166,16 +170,20 @@ opts_end_struct(Visitor *v, Error **errp)
     }
 
     /* we should have processed all (distinct) QemuOpt instances */
-    any = g_hash_table_find(ov->unprocessed_opts, &ghr_true, NULL);
-    if (any) {
+    g_hash_table_iter_init(&iter, ov->unprocessed_opts);
+    if (g_hash_table_iter_next(&iter, NULL, (void **)&any)) {
         const QemuOpt *first;
 
         first = g_queue_peek_head(any);
-        error_set(errp, QERR_INVALID_PARAMETER, first->name);
+        error_setg(errp, QERR_INVALID_PARAMETER, first->name);
     }
     g_hash_table_destroy(ov->unprocessed_opts);
     ov->unprocessed_opts = NULL;
-    g_free(ov->fake_id_opt);
+    if (ov->fake_id_opt) {
+        g_free(ov->fake_id_opt->name);
+        g_free(ov->fake_id_opt->str);
+        g_free(ov->fake_id_opt);
+    }
     ov->fake_id_opt = NULL;
 }
 
@@ -187,7 +195,7 @@ lookup_distinct(const OptsVisitor *ov, const char *name, Error **errp)
 
     list = g_hash_table_lookup(ov->unprocessed_opts, name);
     if (!list) {
-        error_set(errp, QERR_MISSING_PARAMETER, name);
+        error_setg(errp, QERR_MISSING_PARAMETER, name);
     }
     return list;
 }
@@ -196,7 +204,7 @@ lookup_distinct(const OptsVisitor *ov, const char *name, Error **errp)
 static void
 opts_start_list(Visitor *v, const char *name, Error **errp)
 {
-    OptsVisitor *ov = DO_UPCAST(OptsVisitor, visitor, v);
+    OptsVisitor *ov = to_ov(v);
 
     /* we can't traverse a list in a list */
     assert(ov->list_mode == LM_NONE);
@@ -208,9 +216,9 @@ opts_start_list(Visitor *v, const char *name, Error **errp)
 
 
 static GenericList *
-opts_next_list(Visitor *v, GenericList **list, Error **errp)
+opts_next_list(Visitor *v, GenericList **list, size_t size)
 {
-    OptsVisitor *ov = DO_UPCAST(OptsVisitor, visitor, v);
+    OptsVisitor *ov = to_ov(v);
     GenericList **link;
 
     switch (ov->list_mode) {
@@ -251,15 +259,15 @@ opts_next_list(Visitor *v, GenericList **list, Error **errp)
         abort();
     }
 
-    *link = g_malloc0(sizeof **link);
+    *link = g_malloc0(size);
     return *link;
 }
 
 
 static void
-opts_end_list(Visitor *v, Error **errp)
+opts_end_list(Visitor *v)
 {
-    OptsVisitor *ov = DO_UPCAST(OptsVisitor, visitor, v);
+    OptsVisitor *ov = to_ov(v);
 
     assert(ov->list_mode == LM_STARTED ||
            ov->list_mode == LM_IN_PROGRESS ||
@@ -299,9 +307,9 @@ processed(OptsVisitor *ov, const char *name)
 
 
 static void
-opts_type_str(Visitor *v, char **obj, const char *name, Error **errp)
+opts_type_str(Visitor *v, const char *name, char **obj, Error **errp)
 {
-    OptsVisitor *ov = DO_UPCAST(OptsVisitor, visitor, v);
+    OptsVisitor *ov = to_ov(v);
     const QemuOpt *opt;
 
     opt = lookup_scalar(ov, name, errp);
@@ -315,9 +323,9 @@ opts_type_str(Visitor *v, char **obj, const char *name, Error **errp)
 
 /* mimics qemu-option.c::parse_option_bool() */
 static void
-opts_type_bool(Visitor *v, bool *obj, const char *name, Error **errp)
+opts_type_bool(Visitor *v, const char *name, bool *obj, Error **errp)
 {
-    OptsVisitor *ov = DO_UPCAST(OptsVisitor, visitor, v);
+    OptsVisitor *ov = to_ov(v);
     const QemuOpt *opt;
 
     opt = lookup_scalar(ov, name, errp);
@@ -335,8 +343,8 @@ opts_type_bool(Visitor *v, bool *obj, const char *name, Error **errp)
             strcmp(opt->str, "n") == 0) {
             *obj = false;
         } else {
-            error_set(errp, QERR_INVALID_PARAMETER_VALUE, opt->name,
-                "on|yes|y|off|no|n");
+            error_setg(errp, QERR_INVALID_PARAMETER_VALUE, opt->name,
+                       "on|yes|y|off|no|n");
             return;
         }
     } else {
@@ -348,9 +356,9 @@ opts_type_bool(Visitor *v, bool *obj, const char *name, Error **errp)
 
 
 static void
-opts_type_int(Visitor *v, int64_t *obj, const char *name, Error **errp)
+opts_type_int64(Visitor *v, const char *name, int64_t *obj, Error **errp)
 {
-    OptsVisitor *ov = DO_UPCAST(OptsVisitor, visitor, v);
+    OptsVisitor *ov = to_ov(v);
     const QemuOpt *opt;
     const char *str;
     long long val;
@@ -397,16 +405,16 @@ opts_type_int(Visitor *v, int64_t *obj, const char *name, Error **errp)
             }
         }
     }
-    error_set(errp, QERR_INVALID_PARAMETER_VALUE, opt->name,
-              (ov->list_mode == LM_NONE) ? "an int64 value" :
-                                           "an int64 value or range");
+    error_setg(errp, QERR_INVALID_PARAMETER_VALUE, opt->name,
+               (ov->list_mode == LM_NONE) ? "an int64 value" :
+                                            "an int64 value or range");
 }
 
 
 static void
-opts_type_uint64(Visitor *v, uint64_t *obj, const char *name, Error **errp)
+opts_type_uint64(Visitor *v, const char *name, uint64_t *obj, Error **errp)
 {
-    OptsVisitor *ov = DO_UPCAST(OptsVisitor, visitor, v);
+    OptsVisitor *ov = to_ov(v);
     const QemuOpt *opt;
     const char *str;
     unsigned long long val;
@@ -449,16 +457,16 @@ opts_type_uint64(Visitor *v, uint64_t *obj, const char *name, Error **errp)
             }
         }
     }
-    error_set(errp, QERR_INVALID_PARAMETER_VALUE, opt->name,
-              (ov->list_mode == LM_NONE) ? "a uint64 value" :
-                                           "a uint64 value or range");
+    error_setg(errp, QERR_INVALID_PARAMETER_VALUE, opt->name,
+               (ov->list_mode == LM_NONE) ? "a uint64 value" :
+                                            "a uint64 value or range");
 }
 
 
 static void
-opts_type_size(Visitor *v, uint64_t *obj, const char *name, Error **errp)
+opts_type_size(Visitor *v, const char *name, uint64_t *obj, Error **errp)
 {
-    OptsVisitor *ov = DO_UPCAST(OptsVisitor, visitor, v);
+    OptsVisitor *ov = to_ov(v);
     const QemuOpt *opt;
     int64_t val;
     char *endptr;
@@ -468,23 +476,23 @@ opts_type_size(Visitor *v, uint64_t *obj, const char *name, Error **errp)
         return;
     }
 
-    val = strtosz_suffix(opt->str ? opt->str : "", &endptr,
-                         STRTOSZ_DEFSUFFIX_B);
-    if (val != -1 && *endptr == '\0') {
-        *obj = val;
-        processed(ov, name);
+    val = qemu_strtosz_suffix(opt->str ? opt->str : "", &endptr,
+                         QEMU_STRTOSZ_DEFSUFFIX_B);
+    if (val < 0 || *endptr) {
+        error_setg(errp, QERR_INVALID_PARAMETER_VALUE, opt->name,
+                   "a size value representible as a non-negative int64");
         return;
     }
-    error_set(errp, QERR_INVALID_PARAMETER_VALUE, opt->name,
-              "a size value representible as a non-negative int64");
+
+    *obj = val;
+    processed(ov, name);
 }
 
 
 static void
-opts_start_optional(Visitor *v, bool *present, const char *name,
-                       Error **errp)
+opts_optional(Visitor *v, const char *name, bool *present)
 {
-    OptsVisitor *ov = DO_UPCAST(OptsVisitor, visitor, v);
+    OptsVisitor *ov = to_ov(v);
 
     /* we only support a single mandatory scalar field in a list node */
     assert(ov->list_mode == LM_NONE);
@@ -516,7 +524,7 @@ opts_visitor_new(const QemuOpts *opts)
      */
     ov->visitor.type_enum = &input_type_enum;
 
-    ov->visitor.type_int    = &opts_type_int;
+    ov->visitor.type_int64  = &opts_type_int64;
     ov->visitor.type_uint64 = &opts_type_uint64;
     ov->visitor.type_size   = &opts_type_size;
     ov->visitor.type_bool   = &opts_type_bool;
@@ -525,7 +533,7 @@ opts_visitor_new(const QemuOpts *opts)
     /* type_number() is not filled in, but this is not the first visitor to
      * skip some mandatory methods... */
 
-    ov->visitor.start_optional = &opts_start_optional;
+    ov->visitor.optional = &opts_optional;
 
     ov->opts_root = opts;
 

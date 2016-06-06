@@ -10,6 +10,7 @@
  * GNU GPL, version 2 or (at your option) any later version.
  */
 
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "net/net.h"
 #include "hw/devices.h"
@@ -55,6 +56,8 @@ do { fprintf(stderr, "lan9118: error: " fmt , ## __VA_ARGS__);} while (0)
 #define CSR_AFC_CFG     0xac
 #define CSR_E2P_CMD     0xb0
 #define CSR_E2P_DATA    0xb4
+
+#define E2P_CMD_MAC_ADDR_LOADED 0x100
 
 /* IRQ_CFG */
 #define IRQ_INT         0x00001000
@@ -352,14 +355,14 @@ static void lan9118_reload_eeprom(lan9118_state *s)
 {
     int i;
     if (s->eeprom[0] != 0xa5) {
-        s->e2p_cmd &= ~0x10;
+        s->e2p_cmd &= ~E2P_CMD_MAC_ADDR_LOADED;
         DPRINTF("MACADDR load failed\n");
         return;
     }
     for (i = 0; i < 6; i++) {
         s->conf.macaddr.a[i] = s->eeprom[i + 1];
     }
-    s->e2p_cmd |= 0x10;
+    s->e2p_cmd |= E2P_CMD_MAC_ADDR_LOADED;
     DPRINTF("MACADDR loaded from eeprom\n");
     lan9118_mac_changed(s);
 }
@@ -459,11 +462,6 @@ static void lan9118_reset(DeviceState *d)
 
     s->eeprom_writable = 0;
     lan9118_reload_eeprom(s);
-}
-
-static int lan9118_can_receive(NetClientState *nc)
-{
-    return 1;
 }
 
 static void rx_fifo_push(lan9118_state *s, uint32_t val)
@@ -727,14 +725,14 @@ static void tx_fifo_push(lan9118_state *s, uint32_t val)
         s->txp->cmd_a = val & 0x831f37ff;
         s->txp->fifo_used++;
         s->txp->state = TX_B;
+        s->txp->buffer_size = extract32(s->txp->cmd_a, 0, 11);
+        s->txp->offset = extract32(s->txp->cmd_a, 16, 5);
         break;
     case TX_B:
         if (s->txp->cmd_a & 0x2000) {
             /* First segment */
             s->txp->cmd_b = val;
             s->txp->fifo_used++;
-            s->txp->buffer_size = s->txp->cmd_a & 0x7ff;
-            s->txp->offset = (s->txp->cmd_a >> 16) & 0x1f;
             /* End alignment does not include command words.  */
             n = (s->txp->buffer_size + s->txp->offset + 3) >> 2;
             switch ((n >> 24) & 3) {
@@ -763,7 +761,7 @@ static void tx_fifo_push(lan9118_state *s, uint32_t val)
         if (s->txp->buffer_size <= 0 && s->txp->pad != 0) {
             s->txp->pad--;
         } else {
-            n = 4;
+            n = MIN(4, s->txp->buffer_size + s->txp->offset);
             while (s->txp->offset) {
                 val >>= 8;
                 n--;
@@ -907,7 +905,8 @@ static void do_mac_write(lan9118_state *s, int reg, uint32_t val)
          */
         break;
     default:
-        hw_error("lan9118: Unimplemented MAC register write: %d = 0x%x\n",
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "lan9118: Unimplemented MAC register write: %d = 0x%x\n",
                  s->mac_cmd & 0xf, val);
     }
 }
@@ -935,14 +934,16 @@ static uint32_t do_mac_read(lan9118_state *s, int reg)
     case MAC_FLOW:
         return s->mac_flow;
     default:
-        hw_error("lan9118: Unimplemented MAC register read: %d\n",
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "lan9118: Unimplemented MAC register read: %d\n",
                  s->mac_cmd & 0xf);
+        return 0;
     }
 }
 
 static void lan9118_eeprom_cmd(lan9118_state *s, int cmd, int addr)
 {
-    s->e2p_cmd = (s->e2p_cmd & 0x10) | (cmd << 28) | addr;
+    s->e2p_cmd = (s->e2p_cmd & E2P_CMD_MAC_ADDR_LOADED) | (cmd << 28) | addr;
     switch (cmd) {
     case 0:
         s->e2p_data = s->eeprom[addr];
@@ -1133,7 +1134,8 @@ static void lan9118_writel(void *opaque, hwaddr offset,
         break;
 
     default:
-        hw_error("lan9118_write: Bad reg 0x%x = %x\n", (int)offset, (int)val);
+        qemu_log_mask(LOG_GUEST_ERROR, "lan9118_write: Bad reg 0x%x = %x\n",
+                      (int)offset, (int)val);
         break;
     }
     lan9118_update(s);
@@ -1251,7 +1253,7 @@ static uint64_t lan9118_readl(void *opaque, hwaddr offset,
     case CSR_E2P_DATA:
         return s->e2p_data;
     }
-    hw_error("lan9118_read: Bad reg 0x%x\n", (int)offset);
+    qemu_log_mask(LOG_GUEST_ERROR, "lan9118_read: Bad reg 0x%x\n", (int)offset);
     return 0;
 }
 
@@ -1309,19 +1311,10 @@ static const MemoryRegionOps lan9118_16bit_mem_ops = {
     .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
-static void lan9118_cleanup(NetClientState *nc)
-{
-    lan9118_state *s = qemu_get_nic_opaque(nc);
-
-    s->nic = NULL;
-}
-
 static NetClientInfo net_lan9118_info = {
     .type = NET_CLIENT_OPTIONS_KIND_NIC,
     .size = sizeof(NICState),
-    .can_receive = lan9118_can_receive,
     .receive = lan9118_receive,
-    .cleanup = lan9118_cleanup,
     .link_status_changed = lan9118_set_link,
 };
 

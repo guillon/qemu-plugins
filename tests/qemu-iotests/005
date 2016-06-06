@@ -28,7 +28,6 @@ seq=`basename $0`
 echo "QA output created by $seq"
 
 here=`pwd`
-tmp=/tmp/$$
 status=1	# failure is the default!
 
 _cleanup()
@@ -44,6 +43,8 @@ trap "_cleanup; exit \$status" 0 1 2 3 15
 _supported_fmt generic
 _supported_proto generic
 _supported_os Linux
+_unsupported_imgopts "subformat=twoGbMaxExtentFlat" \
+                     "subformat=twoGbMaxExtentSparse"
 
 # vpc is limited to 127GB, so we can't test it here
 if [ "$IMGFMT" = "vpc" ]; then

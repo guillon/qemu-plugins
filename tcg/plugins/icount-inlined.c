@@ -30,7 +30,6 @@
 #include <inttypes.h>
 #include <unistd.h>
 
-#include "tcg-op.h"
 #include "tcg-plugin.h"
 
 static TCGArg **icount_total_args;
@@ -63,7 +62,7 @@ static void before_gen_tb(const TCGPluginInterface *tpi)
 
     /* icount_args = &tb_icount32 */
     /* tb_icount32 = fixup(tb->icount) */
-    icount_total_args[tpi->env->cpu_index] = tcg_ctx.gen_opparam_ptr + 1;
+    icount_total_args[tpi->env->cpu_index] = &tpi->tcg_ctx->gen_opparam_buf[tpi->tcg_ctx->gen_next_parm_idx + 1];
     tb_icount32 = tcg_const_i32(0);
 
     /* tb_icount64 = (int64_t)tb_icount32 */
@@ -90,7 +89,7 @@ static void after_gen_tb(const TCGPluginInterface *tpi)
 
 void tpi_init(TCGPluginInterface *tpi)
 {
-    TPI_INIT_VERSION(*tpi);
+    TPI_INIT_VERSION(tpi);
 
     tpi->cpus_stopped  = cpus_stopped;
     tpi->before_gen_tb = before_gen_tb;

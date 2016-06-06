@@ -10,8 +10,9 @@
  * See the COPYING file in the top-level directory.
  */
 
-#include <stdio.h>
+#include "qemu/osdep.h"
 #include "monitor/monitor.h"
+#include "qemu/error-report.h"
 
 /*
  * Print to current monitor if we have one, else to stderr.
@@ -20,7 +21,7 @@
  */
 void error_vprintf(const char *fmt, va_list ap)
 {
-    if (cur_mon) {
+    if (cur_mon && !monitor_cur_is_qmp()) {
         monitor_vprintf(cur_mon, fmt, ap);
     } else {
         vfprintf(stderr, fmt, ap);
@@ -165,7 +166,7 @@ const char *error_get_progname(void)
 /*
  * Print current location to current monitor if we have one, else to stderr.
  */
-void error_print_loc(void)
+static void error_print_loc(void)
 {
     const char *sep = "";
     int i;
@@ -199,18 +200,17 @@ void error_print_loc(void)
 bool enable_timestamp_msg;
 /*
  * Print an error message to current monitor if we have one, else to stderr.
- * Format arguments like sprintf().  The result should not contain
- * newlines.
+ * Format arguments like vsprintf().  The resulting message should be
+ * a single phrase, with no newline or trailing punctuation.
  * Prepend the current location and append a newline.
- * It's wrong to call this in a QMP monitor.  Use qerror_report() there.
+ * It's wrong to call this in a QMP monitor.  Use error_setg() there.
  */
-void error_report(const char *fmt, ...)
+void error_vreport(const char *fmt, va_list ap)
 {
-    va_list ap;
     GTimeVal tv;
     gchar *timestr;
 
-    if (enable_timestamp_msg) {
+    if (enable_timestamp_msg && !cur_mon) {
         g_get_current_time(&tv);
         timestr = g_time_val_to_iso8601(&tv);
         error_printf("%s ", timestr);
@@ -218,8 +218,22 @@ void error_report(const char *fmt, ...)
     }
 
     error_print_loc();
-    va_start(ap, fmt);
     error_vprintf(fmt, ap);
-    va_end(ap);
     error_printf("\n");
+}
+
+/*
+ * Print an error message to current monitor if we have one, else to stderr.
+ * Format arguments like sprintf().  The resulting message should be a
+ * single phrase, with no newline or trailing punctuation.
+ * Prepend the current location and append a newline.
+ * It's wrong to call this in a QMP monitor.  Use error_setg() there.
+ */
+void error_report(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    error_vreport(fmt, ap);
+    va_end(ap);
 }

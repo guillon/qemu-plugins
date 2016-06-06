@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/ppc/mac.h"
 #include "hw/pci/pci.h"
@@ -92,7 +93,10 @@ static uint32_t unin_get_config_reg(uint32_t reg, uint32_t addr)
         uint32_t slot, func;
 
         /* Grab CFA0 style values */
-        slot = ffs(reg & 0xfffff800) - 1;
+        slot = ctz32(reg & 0xfffff800);
+        if (slot == 32) {
+            slot = -1; /* XXX: should this be 0? */
+        }
         func = (reg >> 8) & 7;
 
         /* ... and then convert them to x86 format */
@@ -116,7 +120,7 @@ static void unin_data_write(void *opaque, hwaddr addr,
 {
     UNINState *s = opaque;
     PCIHostState *phb = PCI_HOST_BRIDGE(s);
-    UNIN_DPRINTF("write addr %" TARGET_FMT_plx " len %d val %"PRIx64"\n",
+    UNIN_DPRINTF("write addr " TARGET_FMT_plx " len %d val %"PRIx64"\n",
                  addr, len, val);
     pci_data_write(phb->bus,
                    unin_get_config_reg(phb->config_reg, addr),
@@ -133,7 +137,7 @@ static uint64_t unin_data_read(void *opaque, hwaddr addr,
     val = pci_data_read(phb->bus,
                         unin_get_config_reg(phb->config_reg, addr),
                         len);
-    UNIN_DPRINTF("read addr %" TARGET_FMT_plx " len %d val %x\n",
+    UNIN_DPRINTF("read addr " TARGET_FMT_plx " len %d val %x\n",
                  addr, len, val);
     return val;
 }
@@ -230,11 +234,11 @@ PCIBus *pci_pmac_init(qemu_irq *pic,
     d = UNI_NORTH_PCI_HOST_BRIDGE(dev);
     memory_region_init(&d->pci_mmio, OBJECT(d), "pci-mmio", 0x100000000ULL);
     memory_region_init_alias(&d->pci_hole, OBJECT(d), "pci-hole", &d->pci_mmio,
-                             0x80000000ULL, 0x70000000ULL);
+                             0x80000000ULL, 0x10000000ULL);
     memory_region_add_subregion(address_space_mem, 0x80000000ULL,
                                 &d->pci_hole);
 
-    h->bus = pci_register_bus(dev, "pci",
+    h->bus = pci_register_bus(dev, NULL,
                               pci_unin_set_irq, pci_unin_map_irq,
                               pic,
                               &d->pci_mmio,
@@ -300,7 +304,7 @@ PCIBus *pci_pmac_u3_init(qemu_irq *pic,
     memory_region_add_subregion(address_space_mem, 0x80000000ULL,
                                 &d->pci_hole);
 
-    h->bus = pci_register_bus(dev, "pci",
+    h->bus = pci_register_bus(dev, NULL,
                               pci_unin_set_irq, pci_unin_map_irq,
                               pic,
                               &d->pci_mmio,
@@ -315,48 +319,59 @@ PCIBus *pci_pmac_u3_init(qemu_irq *pic,
     return h->bus;
 }
 
-static int unin_main_pci_host_init(PCIDevice *d)
+static void unin_main_pci_host_realize(PCIDevice *d, Error **errp)
 {
     d->config[0x0C] = 0x08; // cache_line_size
     d->config[0x0D] = 0x10; // latency_timer
     d->config[0x34] = 0x00; // capabilities_pointer
-    return 0;
 }
 
-static int unin_agp_pci_host_init(PCIDevice *d)
+static void unin_agp_pci_host_realize(PCIDevice *d, Error **errp)
 {
     d->config[0x0C] = 0x08; // cache_line_size
     d->config[0x0D] = 0x10; // latency_timer
     //    d->config[0x34] = 0x80; // capabilities_pointer
-    return 0;
+    /*
+     * Set kMacRISCPCIAddressSelect (0x48) register to indicate PCI
+     * memory space with base 0x80000000, size 0x10000000 for Apple's
+     * AppleMacRiscPCI driver
+     */
+    d->config[0x48] = 0x0;
+    d->config[0x49] = 0x0;
+    d->config[0x4a] = 0x0;
+    d->config[0x4b] = 0x1;
 }
 
-static int u3_agp_pci_host_init(PCIDevice *d)
+static void u3_agp_pci_host_realize(PCIDevice *d, Error **errp)
 {
     /* cache line size */
     d->config[0x0C] = 0x08;
     /* latency timer */
     d->config[0x0D] = 0x10;
-    return 0;
 }
 
-static int unin_internal_pci_host_init(PCIDevice *d)
+static void unin_internal_pci_host_realize(PCIDevice *d, Error **errp)
 {
     d->config[0x0C] = 0x08; // cache_line_size
     d->config[0x0D] = 0x10; // latency_timer
     d->config[0x34] = 0x00; // capabilities_pointer
-    return 0;
 }
 
 static void unin_main_pci_host_class_init(ObjectClass *klass, void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
 
-    k->init      = unin_main_pci_host_init;
+    k->realize   = unin_main_pci_host_realize;
     k->vendor_id = PCI_VENDOR_ID_APPLE;
     k->device_id = PCI_DEVICE_ID_APPLE_UNI_N_PCI;
     k->revision  = 0x00;
     k->class_id  = PCI_CLASS_BRIDGE_HOST;
+    /*
+     * PCI-facing part of the host bridge, not usable without the
+     * host-facing part, which can't be device_add'ed, yet.
+     */
+    dc->cannot_instantiate_with_device_add_yet = true;
 }
 
 static const TypeInfo unin_main_pci_host_info = {
@@ -369,12 +384,18 @@ static const TypeInfo unin_main_pci_host_info = {
 static void u3_agp_pci_host_class_init(ObjectClass *klass, void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
 
-    k->init      = u3_agp_pci_host_init;
+    k->realize   = u3_agp_pci_host_realize;
     k->vendor_id = PCI_VENDOR_ID_APPLE;
     k->device_id = PCI_DEVICE_ID_APPLE_U3_AGP;
     k->revision  = 0x00;
     k->class_id  = PCI_CLASS_BRIDGE_HOST;
+    /*
+     * PCI-facing part of the host bridge, not usable without the
+     * host-facing part, which can't be device_add'ed, yet.
+     */
+    dc->cannot_instantiate_with_device_add_yet = true;
 }
 
 static const TypeInfo u3_agp_pci_host_info = {
@@ -387,12 +408,18 @@ static const TypeInfo u3_agp_pci_host_info = {
 static void unin_agp_pci_host_class_init(ObjectClass *klass, void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
 
-    k->init      = unin_agp_pci_host_init;
+    k->realize   = unin_agp_pci_host_realize;
     k->vendor_id = PCI_VENDOR_ID_APPLE;
     k->device_id = PCI_DEVICE_ID_APPLE_UNI_N_AGP;
     k->revision  = 0x00;
     k->class_id  = PCI_CLASS_BRIDGE_HOST;
+    /*
+     * PCI-facing part of the host bridge, not usable without the
+     * host-facing part, which can't be device_add'ed, yet.
+     */
+    dc->cannot_instantiate_with_device_add_yet = true;
 }
 
 static const TypeInfo unin_agp_pci_host_info = {
@@ -405,12 +432,18 @@ static const TypeInfo unin_agp_pci_host_info = {
 static void unin_internal_pci_host_class_init(ObjectClass *klass, void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
 
-    k->init      = unin_internal_pci_host_init;
+    k->realize   = unin_internal_pci_host_realize;
     k->vendor_id = PCI_VENDOR_ID_APPLE;
     k->device_id = PCI_DEVICE_ID_APPLE_UNI_N_I_PCI;
     k->revision  = 0x00;
     k->class_id  = PCI_CLASS_BRIDGE_HOST;
+    /*
+     * PCI-facing part of the host bridge, not usable without the
+     * host-facing part, which can't be device_add'ed, yet.
+     */
+    dc->cannot_instantiate_with_device_add_yet = true;
 }
 
 static const TypeInfo unin_internal_pci_host_info = {
@@ -423,8 +456,10 @@ static const TypeInfo unin_internal_pci_host_info = {
 static void pci_unin_main_class_init(ObjectClass *klass, void *data)
 {
     SysBusDeviceClass *sbc = SYS_BUS_DEVICE_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
 
     sbc->init = pci_unin_main_init_device;
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
 }
 
 static const TypeInfo pci_unin_main_info = {
@@ -437,8 +472,10 @@ static const TypeInfo pci_unin_main_info = {
 static void pci_u3_agp_class_init(ObjectClass *klass, void *data)
 {
     SysBusDeviceClass *sbc = SYS_BUS_DEVICE_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
 
     sbc->init = pci_u3_agp_init_device;
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
 }
 
 static const TypeInfo pci_u3_agp_info = {
@@ -451,8 +488,10 @@ static const TypeInfo pci_u3_agp_info = {
 static void pci_unin_agp_class_init(ObjectClass *klass, void *data)
 {
     SysBusDeviceClass *sbc = SYS_BUS_DEVICE_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
 
     sbc->init = pci_unin_agp_init_device;
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
 }
 
 static const TypeInfo pci_unin_agp_info = {
@@ -465,8 +504,10 @@ static const TypeInfo pci_unin_agp_info = {
 static void pci_unin_internal_class_init(ObjectClass *klass, void *data)
 {
     SysBusDeviceClass *sbc = SYS_BUS_DEVICE_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
 
     sbc->init = pci_unin_internal_init_device;
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
 }
 
 static const TypeInfo pci_unin_internal_info = {

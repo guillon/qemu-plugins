@@ -9,62 +9,93 @@
  */
 
 #include "s390-ccw.h"
+#include "virtio.h"
 
-struct subchannel_id blk_schid;
 char stack[PAGE_SIZE * 8] __attribute__((__aligned__(PAGE_SIZE)));
 uint64_t boot_value;
+static SubChannelId blk_schid = { .one = 1 };
 
-void virtio_panic(const char *string)
+/*
+ * Priniciples of Operations (SA22-7832-09) chapter 17 requires that
+ * a subsystem-identification is at 184-187 and bytes 188-191 are zero
+ * after list-directed-IPL and ccw-IPL.
+ */
+void write_subsystem_identification(void)
+{
+    SubChannelId *schid = (SubChannelId *) 184;
+    uint32_t *zeroes = (uint32_t *) 188;
+
+    *schid = blk_schid;
+    *zeroes = 0;
+}
+
+
+void panic(const char *string)
 {
     sclp_print(string);
     disabled_wait();
     while (1) { }
 }
 
-static void virtio_setup(uint64_t dev_info)
+static bool find_dev(Schib *schib, int dev_no)
 {
-    struct schib schib;
-    int i;
-    int r;
-    bool found = false;
-    bool check_devno = false;
-    uint16_t dev_no = -1;
-    blk_schid.one = 1;
-
-    if (dev_info != -1) {
-        check_devno = true;
-        dev_no = dev_info & 0xffff;
-        debug_print_int("device no. ", dev_no);
-        blk_schid.ssid = (dev_info >> 16) & 0x3;
-        if (blk_schid.ssid != 0) {
-            debug_print_int("ssid ", blk_schid.ssid);
-            if (enable_mss_facility() != 0) {
-                virtio_panic("Failed to enable mss facility\n");
-            }
-        }
-    }
+    int i, r;
 
     for (i = 0; i < 0x10000; i++) {
         blk_schid.sch_no = i;
-        r = stsch_err(blk_schid, &schib);
-        if (r == 3) {
+        r = stsch_err(blk_schid, schib);
+        if ((r == 3) || (r == -EIO)) {
             break;
         }
-        if (schib.pmcw.dnv) {
-            if (!check_devno || (schib.pmcw.dev == dev_no)) {
-                if (virtio_is_blk(blk_schid)) {
-                    found = true;
-                    break;
-                }
+        if (!schib->pmcw.dnv) {
+            continue;
+        }
+        if (!virtio_is_supported(blk_schid)) {
+            continue;
+        }
+        if ((dev_no < 0) || (schib->pmcw.dev == dev_no)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void virtio_setup(uint64_t dev_info)
+{
+    Schib schib;
+    int ssid;
+    bool found = false;
+    uint16_t dev_no;
+
+    /*
+     * We unconditionally enable mss support. In every sane configuration,
+     * this will succeed; and even if it doesn't, stsch_err() can deal
+     * with the consequences.
+     */
+    enable_mss_facility();
+
+    if (dev_info != -1) {
+        dev_no = dev_info & 0xffff;
+        debug_print_int("device no. ", dev_no);
+        blk_schid.ssid = (dev_info >> 16) & 0x3;
+        debug_print_int("ssid ", blk_schid.ssid);
+        found = find_dev(&schib, dev_no);
+    } else {
+        for (ssid = 0; ssid < 0x3; ssid++) {
+            blk_schid.ssid = ssid;
+            found = find_dev(&schib, -1);
+            if (found) {
+                break;
             }
         }
     }
 
-    if (!found) {
-        virtio_panic("No virtio-blk device found!\n");
-    }
+    IPL_assert(found, "No virtio device found");
 
-    virtio_setup_block(blk_schid);
+    virtio_setup_device(blk_schid);
+
+    IPL_assert(virtio_ipl_disk_is_valid(), "No valid IPL device detected");
 }
 
 int main(void)
@@ -73,8 +104,8 @@ int main(void)
     debug_print_int("boot reg[7] ", boot_value);
     virtio_setup(boot_value);
 
-    if (zipl_load() < 0)
-        sclp_print("Failed to load OS from hard disk\n");
-    disabled_wait();
-    while (1) { }
+    zipl_load(); /* no return */
+
+    panic("Failed to load OS from hard disk\n");
+    return 0; /* make compiler happy */
 }

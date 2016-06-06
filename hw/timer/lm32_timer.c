@@ -21,6 +21,7 @@
  *   http://www.latticesemi.com/documents/mico32timer.pdf
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "trace.h"
@@ -196,8 +197,7 @@ static const VMStateDescription vmstate_lm32_timer = {
     .name = "lm32-timer",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_PTIMER(ptimer, LM32TimerState),
         VMSTATE_UINT32(freq_hz, LM32TimerState),
         VMSTATE_UINT32_ARRAY(regs, LM32TimerState, R_MAX),

@@ -21,6 +21,7 @@
  *   http://www.milkymist.org/socdoc/sysctl.pdf
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "sysemu/sysemu.h"
@@ -295,8 +296,7 @@ static const VMStateDescription vmstate_milkymist_sysctl = {
     .name = "milkymist-sysctl",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, MilkymistSysctlState, R_MAX),
         VMSTATE_PTIMER(ptimer0, MilkymistSysctlState),
         VMSTATE_PTIMER(ptimer1, MilkymistSysctlState),

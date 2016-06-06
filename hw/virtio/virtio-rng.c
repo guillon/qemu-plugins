@@ -9,12 +9,15 @@
  * top-level directory.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu/iov.h"
 #include "hw/qdev.h"
-#include "qapi/qmp/qerror.h"
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/virtio-rng.h"
 #include "sysemu/rng.h"
+#include "qom/object_interfaces.h"
+#include "trace.h"
 
 static bool is_guest_ready(VirtIORNG *vrng)
 {
@@ -23,6 +26,7 @@ static bool is_guest_ready(VirtIORNG *vrng)
         && (vdev->status & VIRTIO_CONFIG_S_DRIVER_OK)) {
         return true;
     }
+    trace_virtio_rng_guest_not_ready(vrng);
     return false;
 }
 
@@ -41,7 +45,7 @@ static void chr_read(void *opaque, const void *buf, size_t size)
 {
     VirtIORNG *vrng = opaque;
     VirtIODevice *vdev = VIRTIO_DEVICE(vrng);
-    VirtQueueElement elem;
+    VirtQueueElement *elem;
     size_t len;
     int offset;
 
@@ -53,16 +57,26 @@ static void chr_read(void *opaque, const void *buf, size_t size)
 
     offset = 0;
     while (offset < size) {
-        if (!virtqueue_pop(vrng->vq, &elem)) {
+        elem = virtqueue_pop(vrng->vq, sizeof(VirtQueueElement));
+        if (!elem) {
             break;
         }
-        len = iov_from_buf(elem.in_sg, elem.in_num,
+        len = iov_from_buf(elem->in_sg, elem->in_num,
                            0, buf + offset, size - offset);
         offset += len;
 
-        virtqueue_push(vrng->vq, &elem, len);
+        virtqueue_push(vrng->vq, elem, len);
+        trace_virtio_rng_pushed(vrng, len);
+        g_free(elem);
     }
     virtio_notify(vdev, vrng->vq);
+
+    if (!virtio_queue_empty(vrng->vq)) {
+        /* If we didn't drain the queue, call virtio_rng_process
+         * to take care of asking for more data as appropriate.
+         */
+        virtio_rng_process(vrng);
+    }
 }
 
 static void virtio_rng_process(VirtIORNG *vrng)
@@ -74,12 +88,21 @@ static void virtio_rng_process(VirtIORNG *vrng)
         return;
     }
 
+    if (vrng->activate_timer) {
+        timer_mod(vrng->rate_limit_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + vrng->conf.period_ms);
+        vrng->activate_timer = false;
+    }
+
     if (vrng->quota_remaining < 0) {
         quota = 0;
     } else {
         quota = MIN((uint64_t)vrng->quota_remaining, (uint64_t)UINT32_MAX);
     }
     size = get_request_size(vrng->vq, quota);
+
+    trace_virtio_rng_request(vrng, size, quota);
+
     size = MIN(vrng->quota_remaining, size);
     if (size) {
         rng_backend_request_entropy(vrng->rng, size, chr_read, vrng);
@@ -92,7 +115,7 @@ static void handle_input(VirtIODevice *vdev, VirtQueue *vq)
     virtio_rng_process(vrng);
 }
 
-static uint32_t get_features(VirtIODevice *vdev, uint32_t f)
+static uint64_t get_features(VirtIODevice *vdev, uint64_t f, Error **errp)
 {
     return f;
 }
@@ -107,12 +130,15 @@ static void virtio_rng_save(QEMUFile *f, void *opaque)
 static int virtio_rng_load(QEMUFile *f, void *opaque, int version_id)
 {
     VirtIORNG *vrng = opaque;
-    VirtIODevice *vdev = VIRTIO_DEVICE(vrng);
+    int ret;
 
     if (version_id != 1) {
         return -EINVAL;
     }
-    virtio_load(vdev, f);
+    ret = virtio_load(VIRTIO_DEVICE(vrng), f, version_id);
+    if (ret != 0) {
+        return ret;
+    }
 
     /* We may have an element ready but couldn't process it due to a quota
      * limit.  Make sure to try again after live migration when the quota may
@@ -129,81 +155,88 @@ static void check_rate_limit(void *opaque)
 
     vrng->quota_remaining = vrng->conf.max_bytes;
     virtio_rng_process(vrng);
-    timer_mod(vrng->rate_limit_timer,
-                   qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + vrng->conf.period_ms);
+    vrng->activate_timer = true;
 }
 
-static int virtio_rng_device_init(VirtIODevice *vdev)
+static void virtio_rng_device_realize(DeviceState *dev, Error **errp)
 {
-    DeviceState *qdev = DEVICE(vdev);
-    VirtIORNG *vrng = VIRTIO_RNG(vdev);
+    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
+    VirtIORNG *vrng = VIRTIO_RNG(dev);
     Error *local_err = NULL;
 
-    if (!vrng->conf.period_ms > 0) {
-        qerror_report(QERR_INVALID_PARAMETER_VALUE, "period",
-                      "a positive number");
-        return -1;
+    if (vrng->conf.period_ms <= 0) {
+        error_setg(errp, "'period' parameter expects a positive integer");
+        return;
+    }
+
+    /* Workaround: Property parsing does not enforce unsigned integers,
+     * So this is a hack to reject such numbers. */
+    if (vrng->conf.max_bytes > INT64_MAX) {
+        error_setg(errp, "'max-bytes' parameter must be non-negative, "
+                   "and less than 2^63");
+        return;
     }
 
     if (vrng->conf.rng == NULL) {
         vrng->conf.default_backend = RNG_RANDOM(object_new(TYPE_RNG_RANDOM));
 
-        object_property_add_child(OBJECT(qdev),
+        user_creatable_complete(OBJECT(vrng->conf.default_backend),
+                                &local_err);
+        if (local_err) {
+            error_propagate(errp, local_err);
+            object_unref(OBJECT(vrng->conf.default_backend));
+            return;
+        }
+
+        object_property_add_child(OBJECT(dev),
                                   "default-backend",
                                   OBJECT(vrng->conf.default_backend),
                                   NULL);
 
-        object_property_set_link(OBJECT(qdev),
+        /* The child property took a reference, we can safely drop ours now */
+        object_unref(OBJECT(vrng->conf.default_backend));
+
+        object_property_set_link(OBJECT(dev),
                                  OBJECT(vrng->conf.default_backend),
                                  "rng", NULL);
     }
 
-    virtio_init(vdev, "virtio-rng", VIRTIO_ID_RNG, 0);
-
     vrng->rng = vrng->conf.rng;
     if (vrng->rng == NULL) {
-        qerror_report(QERR_INVALID_PARAMETER_VALUE, "rng", "a valid object");
-        return -1;
+        error_setg(errp, "'rng' parameter expects a valid object");
+        return;
     }
 
-    rng_backend_open(vrng->rng, &local_err);
-    if (local_err) {
-        qerror_report_err(local_err);
-        error_free(local_err);
-        return -1;
-    }
+    virtio_init(vdev, "virtio-rng", VIRTIO_ID_RNG, 0);
 
     vrng->vq = virtio_add_queue(vdev, 8, handle_input);
-
-    assert(vrng->conf.max_bytes <= INT64_MAX);
     vrng->quota_remaining = vrng->conf.max_bytes;
-
     vrng->rate_limit_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
                                                check_rate_limit, vrng);
-
-    timer_mod(vrng->rate_limit_timer,
-                   qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + vrng->conf.period_ms);
-
-    register_savevm(qdev, "virtio-rng", -1, 1, virtio_rng_save,
+    vrng->activate_timer = true;
+    register_savevm(dev, "virtio-rng", -1, 1, virtio_rng_save,
                     virtio_rng_load, vrng);
-
-    return 0;
 }
 
-static int virtio_rng_device_exit(DeviceState *qdev)
+static void virtio_rng_device_unrealize(DeviceState *dev, Error **errp)
 {
-    VirtIORNG *vrng = VIRTIO_RNG(qdev);
-    VirtIODevice *vdev = VIRTIO_DEVICE(qdev);
+    VirtIODevice *vdev = VIRTIO_DEVICE(dev);
+    VirtIORNG *vrng = VIRTIO_RNG(dev);
 
     timer_del(vrng->rate_limit_timer);
     timer_free(vrng->rate_limit_timer);
-    unregister_savevm(qdev, "virtio-rng", vrng);
+    unregister_savevm(dev, "virtio-rng", vrng);
     virtio_cleanup(vdev);
-    return 0;
 }
 
 static Property virtio_rng_properties[] = {
-    DEFINE_VIRTIO_RNG_PROPERTIES(VirtIORNG, conf),
+    /* Set a default rate limit of 2^47 bytes per minute or roughly 2TB/s.  If
+     * you have an entropy source capable of generating more entropy than this
+     * and you can pass it through via virtio-rng, then hats off to you.  Until
+     * then, this is unlimited for all practical purposes.
+     */
+    DEFINE_PROP_UINT64("max-bytes", VirtIORNG, conf.max_bytes, INT64_MAX),
+    DEFINE_PROP_UINT32("period", VirtIORNG, conf.period_ms, 1 << 16),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -211,10 +244,11 @@ static void virtio_rng_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_CLASS(klass);
-    dc->exit = virtio_rng_device_exit;
+
     dc->props = virtio_rng_properties;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
-    vdc->init = virtio_rng_device_init;
+    vdc->realize = virtio_rng_device_realize;
+    vdc->unrealize = virtio_rng_device_unrealize;
     vdc->get_features = get_features;
 }
 
@@ -223,7 +257,9 @@ static void virtio_rng_initfn(Object *obj)
     VirtIORNG *vrng = VIRTIO_RNG(obj);
 
     object_property_add_link(obj, "rng", TYPE_RNG_BACKEND,
-                             (Object **)&vrng->conf.rng, NULL);
+                             (Object **)&vrng->conf.rng,
+                             qdev_prop_allow_set_link_before_realize,
+                             OBJ_PROP_LINK_UNREF_ON_RELEASE, NULL);
 }
 
 static const TypeInfo virtio_rng_info = {

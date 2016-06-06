@@ -17,8 +17,9 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "cpu.h"
-#include "helper.h"
+#include "exec/helper-proto.h"
 
 static uint32_t compute_all_flags(CPUSPARCState *env)
 {

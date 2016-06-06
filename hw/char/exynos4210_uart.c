@@ -19,7 +19,9 @@
  *
  */
 
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
+#include "qemu/error-report.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/char.h"
 
@@ -192,10 +194,9 @@ typedef struct Exynos4210UartState {
 static const char *exynos4210_uart_regname(hwaddr  offset)
 {
 
-    int regs_number = sizeof(exynos4210_uart_regs) / sizeof(Exynos4210UartReg);
     int i;
 
-    for (i = 0; i < regs_number; i++) {
+    for (i = 0; i < ARRAY_SIZE(exynos4210_uart_regs); i++) {
         if (offset == exynos4210_uart_regs[i].offset) {
             return exynos4210_uart_regs[i].name;
         }
@@ -235,10 +236,8 @@ static int fifo_empty_elements_number(Exynos4210UartFIFO *q)
 
 static void fifo_reset(Exynos4210UartFIFO *q)
 {
-    if (q->data != NULL) {
-        g_free(q->data);
-        q->data = NULL;
-    }
+    g_free(q->data);
+    q->data = NULL;
 
     q->data = (uint8_t *)g_malloc0(q->size);
 
@@ -544,10 +543,9 @@ static void exynos4210_uart_event(void *opaque, int event)
 static void exynos4210_uart_reset(DeviceState *dev)
 {
     Exynos4210UartState *s = EXYNOS4210_UART(dev);
-    int regs_number = sizeof(exynos4210_uart_regs)/sizeof(Exynos4210UartReg);
     int i;
 
-    for (i = 0; i < regs_number; i++) {
+    for (i = 0; i < ARRAY_SIZE(exynos4210_uart_regs); i++) {
         s->reg[I_(exynos4210_uart_regs[i].offset)] =
                 exynos4210_uart_regs[i].reset_value;
     }
@@ -562,7 +560,6 @@ static const VMStateDescription vmstate_exynos4210_uart_fifo = {
     .name = "exynos4210.uart.fifo",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32(sp, Exynos4210UartFIFO),
         VMSTATE_UINT32(rp, Exynos4210UartFIFO),
@@ -575,7 +572,6 @@ static const VMStateDescription vmstate_exynos4210_uart = {
     .name = "exynos4210.uart",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .fields = (VMStateField[]) {
         VMSTATE_STRUCT(rx, Exynos4210UartState, 1,
                        vmstate_exynos4210_uart_fifo, Exynos4210UartFIFO),
@@ -601,15 +597,17 @@ DeviceState *exynos4210_uart_create(hwaddr addr,
 
     if (!chr) {
         if (channel >= MAX_SERIAL_PORTS) {
-            hw_error("Only %d serial ports are supported by QEMU.\n",
-                     MAX_SERIAL_PORTS);
+            error_report("Only %d serial ports are supported by QEMU",
+                         MAX_SERIAL_PORTS);
+            exit(1);
         }
         chr = serial_hds[channel];
         if (!chr) {
             snprintf(label, ARRAY_SIZE(label), "%s%d", chr_name, channel);
             chr = qemu_chr_new(label, "null", NULL);
             if (!(chr)) {
-                hw_error("Can't assign serial port to UART%d.\n", channel);
+                error_report("Can't assign serial port to UART%d", channel);
+                exit(1);
             }
         }
     }

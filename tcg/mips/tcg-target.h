@@ -26,10 +26,8 @@
 #ifndef TCG_TARGET_MIPS 
 #define TCG_TARGET_MIPS 1
 
-#ifdef __MIPSEB__
-# define TCG_TARGET_WORDS_BIGENDIAN
-#endif
-
+#define TCG_TARGET_INSN_UNIT_SIZE 4
+#define TCG_TARGET_TLB_DISPLACEMENT_BITS 16
 #define TCG_TARGET_NB_REGS 32
 
 typedef enum {
@@ -63,16 +61,14 @@ typedef enum {
     TCG_REG_K1,
     TCG_REG_GP,
     TCG_REG_SP,
-    TCG_REG_FP,
+    TCG_REG_S8,
     TCG_REG_RA,
+
+    TCG_REG_CALL_STACK = TCG_REG_SP,
+    TCG_AREG0 = TCG_REG_S0,
 } TCGReg;
 
-#define TCG_CT_CONST_ZERO 0x100
-#define TCG_CT_CONST_U16  0x200
-#define TCG_CT_CONST_S16  0x400
-
 /* used for function call generation */
-#define TCG_REG_CALL_STACK TCG_REG_SP
 #define TCG_TARGET_STACK_ALIGN 8
 #define TCG_TARGET_CALL_STACK_OFFSET 16
 #define TCG_TARGET_CALL_ALIGN_ARGS 1
@@ -100,6 +96,13 @@ extern bool use_mips32_instructions;
 extern bool use_mips32r2_instructions;
 #endif
 
+/* MIPS32R6 instruction set detection */
+#if defined(__mips_isa_rev) && (__mips_isa_rev >= 6)
+#define use_mips32r6_instructions  1
+#else
+#define use_mips32r6_instructions  0
+#endif
+
 /* optional instructions */
 #define TCG_TARGET_HAS_div_i32          1
 #define TCG_TARGET_HAS_rem_i32          1
@@ -109,7 +112,8 @@ extern bool use_mips32r2_instructions;
 #define TCG_TARGET_HAS_orc_i32          0
 #define TCG_TARGET_HAS_eqv_i32          0
 #define TCG_TARGET_HAS_nand_i32         0
-#define TCG_TARGET_HAS_muls2_i32        1
+#define TCG_TARGET_HAS_mulu2_i32        (!use_mips32r6_instructions)
+#define TCG_TARGET_HAS_muls2_i32        (!use_mips32r6_instructions)
 #define TCG_TARGET_HAS_muluh_i32        1
 #define TCG_TARGET_HAS_mulsh_i32        1
 
@@ -122,14 +126,10 @@ extern bool use_mips32r2_instructions;
 #define TCG_TARGET_HAS_ext16s_i32       use_mips32r2_instructions
 #define TCG_TARGET_HAS_rot_i32          use_mips32r2_instructions
 
-#define TCG_TARGET_HAS_new_ldst         0
-
 /* optional instructions automatically implemented */
 #define TCG_TARGET_HAS_neg_i32          0 /* sub  rd, zero, rt   */
 #define TCG_TARGET_HAS_ext8u_i32        0 /* andi rt, rs, 0xff   */
 #define TCG_TARGET_HAS_ext16u_i32       0 /* andi rt, rs, 0xffff */
-
-#define TCG_AREG0 TCG_REG_S0
 
 #ifdef __OpenBSD__
 #include <machine/sysarch.h>

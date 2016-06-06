@@ -7,6 +7,10 @@
  * This code is licensed under the GPL.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
+#include "qemu-common.h"
+#include "cpu.h"
 #include "hw/sysbus.h"
 #include "hw/arm/arm.h"
 #include "hw/devices.h"
@@ -15,9 +19,10 @@
 #include "hw/pci/pci.h"
 #include "hw/i2c/i2c.h"
 #include "hw/boards.h"
-#include "sysemu/blockdev.h"
+#include "sysemu/block-backend.h"
 #include "exec/address-spaces.h"
 #include "hw/block/flash.h"
+#include "qemu/error-report.h"
 
 #define VERSATILE_FLASH_ADDR 0x34000000
 #define VERSATILE_FLASH_SIZE (64 * 1024 * 1024)
@@ -173,8 +178,10 @@ static int vpb_sic_init(SysBusDevice *sbd)
 
 static struct arm_boot_info versatile_binfo;
 
-static void versatile_init(QEMUMachineInitArgs *args, int board_id)
+static void versatile_init(MachineState *machine, int board_id)
 {
+    ObjectClass *cpu_oc;
+    Object *cpuobj;
     ARMCPU *cpu;
     MemoryRegion *sysmem = get_system_memory();
     MemoryRegion *ram = g_new(MemoryRegion, 1);
@@ -185,21 +192,37 @@ static void versatile_init(QEMUMachineInitArgs *args, int board_id)
     DeviceState *pl041;
     PCIBus *pci_bus;
     NICInfo *nd;
-    i2c_bus *i2c;
+    I2CBus *i2c;
     int n;
     int done_smc = 0;
     DriveInfo *dinfo;
 
-    if (!args->cpu_model) {
-        args->cpu_model = "arm926";
+    if (!machine->cpu_model) {
+        machine->cpu_model = "arm926";
     }
-    cpu = cpu_arm_init(args->cpu_model);
-    if (!cpu) {
+
+    cpu_oc = cpu_class_by_name(TYPE_ARM_CPU, machine->cpu_model);
+    if (!cpu_oc) {
         fprintf(stderr, "Unable to find CPU definition\n");
         exit(1);
     }
-    memory_region_init_ram(ram, NULL, "versatile.ram", args->ram_size);
-    vmstate_register_ram_global(ram);
+
+    cpuobj = object_new(object_class_get_name(cpu_oc));
+
+    /* By default ARM1176 CPUs have EL3 enabled.  This board does not
+     * currently support EL3 so the CPU EL3 property is disabled before
+     * realization.
+     */
+    if (object_property_find(cpuobj, "has_el3", NULL)) {
+        object_property_set_bool(cpuobj, false, "has_el3", &error_fatal);
+    }
+
+    object_property_set_bool(cpuobj, true, "realized", &error_fatal);
+
+    cpu = ARM_CPU(cpuobj);
+
+    memory_region_allocate_system_memory(ram, NULL, "versatile.ram",
+                                         machine->ram_size);
     /* ??? RAM should repeat to fill physical memory space.  */
     /* SDRAM at address zero.  */
     memory_region_add_subregion(sysmem, 0, ram);
@@ -252,7 +275,7 @@ static void versatile_init(QEMUMachineInitArgs *args, int board_id)
             pci_nic_init_nofail(nd, pci_bus, "rtl8139", NULL);
         }
     }
-    if (usb_enabled(false)) {
+    if (usb_enabled()) {
         pci_create_simple(pci_bus, -1, "pci-ohci");
     }
     n = drive_get_max_bus(IF_SCSI);
@@ -288,7 +311,7 @@ static void versatile_init(QEMUMachineInitArgs *args, int board_id)
     sysbus_create_simple("pl031", 0x101e8000, pic[10]);
 
     dev = sysbus_create_simple("versatile_i2c", 0x10002000, NULL);
-    i2c = (i2c_bus *)qdev_get_child_bus(dev, "i2c");
+    i2c = (I2CBus *)qdev_get_child_bus(dev, "i2c");
     i2c_create_slave(i2c, "ds1338", 0x68);
 
     /* Add PL041 AACI Interface to the LM4549 codec */
@@ -337,52 +360,69 @@ static void versatile_init(QEMUMachineInitArgs *args, int board_id)
 
     dinfo = drive_get(IF_PFLASH, 0, 0);
     if (!pflash_cfi01_register(VERSATILE_FLASH_ADDR, NULL, "versatile.flash",
-                          VERSATILE_FLASH_SIZE, dinfo ? dinfo->bdrv : NULL,
+                          VERSATILE_FLASH_SIZE,
+                          dinfo ? blk_by_legacy_dinfo(dinfo) : NULL,
                           VERSATILE_FLASH_SECT_SIZE,
                           VERSATILE_FLASH_SIZE / VERSATILE_FLASH_SECT_SIZE,
                           4, 0x0089, 0x0018, 0x0000, 0x0, 0)) {
         fprintf(stderr, "qemu: Error registering flash memory.\n");
     }
 
-    versatile_binfo.ram_size = args->ram_size;
-    versatile_binfo.kernel_filename = args->kernel_filename;
-    versatile_binfo.kernel_cmdline = args->kernel_cmdline;
-    versatile_binfo.initrd_filename = args->initrd_filename;
+    versatile_binfo.ram_size = machine->ram_size;
+    versatile_binfo.kernel_filename = machine->kernel_filename;
+    versatile_binfo.kernel_cmdline = machine->kernel_cmdline;
+    versatile_binfo.initrd_filename = machine->initrd_filename;
     versatile_binfo.board_id = board_id;
     arm_load_kernel(cpu, &versatile_binfo);
 }
 
-static void vpb_init(QEMUMachineInitArgs *args)
+static void vpb_init(MachineState *machine)
 {
-    versatile_init(args, 0x183);
+    versatile_init(machine, 0x183);
 }
 
-static void vab_init(QEMUMachineInitArgs *args)
+static void vab_init(MachineState *machine)
 {
-    versatile_init(args, 0x25e);
+    versatile_init(machine, 0x25e);
 }
 
-static QEMUMachine versatilepb_machine = {
-    .name = "versatilepb",
-    .desc = "ARM Versatile/PB (ARM926EJ-S)",
-    .init = vpb_init,
-    .block_default_type = IF_SCSI,
+static void versatilepb_class_init(ObjectClass *oc, void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+
+    mc->desc = "ARM Versatile/PB (ARM926EJ-S)";
+    mc->init = vpb_init;
+    mc->block_default_type = IF_SCSI;
+}
+
+static const TypeInfo versatilepb_type = {
+    .name = MACHINE_TYPE_NAME("versatilepb"),
+    .parent = TYPE_MACHINE,
+    .class_init = versatilepb_class_init,
 };
 
-static QEMUMachine versatileab_machine = {
-    .name = "versatileab",
-    .desc = "ARM Versatile/AB (ARM926EJ-S)",
-    .init = vab_init,
-    .block_default_type = IF_SCSI,
+static void versatileab_class_init(ObjectClass *oc, void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+
+    mc->desc = "ARM Versatile/AB (ARM926EJ-S)";
+    mc->init = vab_init;
+    mc->block_default_type = IF_SCSI;
+}
+
+static const TypeInfo versatileab_type = {
+    .name = MACHINE_TYPE_NAME("versatileab"),
+    .parent = TYPE_MACHINE,
+    .class_init = versatileab_class_init,
 };
 
 static void versatile_machine_init(void)
 {
-    qemu_register_machine(&versatilepb_machine);
-    qemu_register_machine(&versatileab_machine);
+    type_register_static(&versatilepb_type);
+    type_register_static(&versatileab_type);
 }
 
-machine_init(versatile_machine_init);
+type_init(versatile_machine_init)
 
 static void vpb_sic_class_init(ObjectClass *klass, void *data)
 {
@@ -390,7 +430,6 @@ static void vpb_sic_class_init(ObjectClass *klass, void *data)
     SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
 
     k->init = vpb_sic_init;
-    dc->no_user = 1;
     dc->vmsd = &vmstate_vpb_sic;
 }
 

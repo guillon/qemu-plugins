@@ -18,41 +18,32 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <assert.h>
+#include "qemu/osdep.h"
 #include "cpu.h"
-#include "helper.h"
+#include "exec/helper-proto.h"
 #include "qemu/host-utils.h"
+#include "exec/cpu_ldst.h"
 
 #define D(x)
 
 #if !defined(CONFIG_USER_ONLY)
-#include "exec/softmmu_exec.h"
-
-#define MMUSUFFIX _mmu
-#define SHIFT 0
-#include "exec/softmmu_template.h"
-#define SHIFT 1
-#include "exec/softmmu_template.h"
-#define SHIFT 2
-#include "exec/softmmu_template.h"
-#define SHIFT 3
-#include "exec/softmmu_template.h"
 
 /* Try to fill the TLB and return an exception if error. If retaddr is
-   NULL, it means that the function was called in C code (i.e. not
-   from generated code or from helper.c) */
-void tlb_fill(CPUMBState *env, target_ulong addr, int is_write, int mmu_idx,
+ * NULL, it means that the function was called in C code (i.e. not
+ * from generated code or from helper.c)
+ */
+void tlb_fill(CPUState *cs, target_ulong addr, int is_write, int mmu_idx,
               uintptr_t retaddr)
 {
     int ret;
 
-    ret = cpu_mb_handle_mmu_fault(env, addr, is_write, mmu_idx);
+    ret = mb_cpu_handle_mmu_fault(cs, addr, is_write, mmu_idx);
     if (unlikely(ret)) {
         if (retaddr) {
             /* now we have a real cpu fault */
-            cpu_restore_state(env, retaddr);
+            cpu_restore_state(cs, retaddr);
         }
-        cpu_loop_exit(env);
+        cpu_loop_exit(cs);
     }
 }
 #endif
@@ -65,7 +56,7 @@ void helper_put(uint32_t id, uint32_t ctrl, uint32_t data)
     int nonblock = ctrl & STREAM_NONBLOCK;
     int exception = ctrl & STREAM_EXCEPTION;
 
-    qemu_log("Unhandled stream put to stream-id=%d data=%x %s%s%s%s%s\n",
+    qemu_log_mask(LOG_UNIMP, "Unhandled stream put to stream-id=%d data=%x %s%s%s%s%s\n",
              id, data,
              test ? "t" : "",
              nonblock ? "n" : "",
@@ -82,7 +73,7 @@ uint32_t helper_get(uint32_t id, uint32_t ctrl)
     int nonblock = ctrl & STREAM_NONBLOCK;
     int exception = ctrl & STREAM_EXCEPTION;
 
-    qemu_log("Unhandled stream get from stream-id=%d %s%s%s%s%s\n",
+    qemu_log_mask(LOG_UNIMP, "Unhandled stream get from stream-id=%d %s%s%s%s%s\n",
              id,
              test ? "t" : "",
              nonblock ? "n" : "",
@@ -94,8 +85,10 @@ uint32_t helper_get(uint32_t id, uint32_t ctrl)
 
 void helper_raise_exception(CPUMBState *env, uint32_t index)
 {
-    env->exception_index = index;
-    cpu_loop_exit(env);
+    CPUState *cs = CPU(mb_env_get_cpu(env));
+
+    cs->exception_index = index;
+    cpu_loop_exit(cs);
 }
 
 void helper_debug(CPUMBState *env)
@@ -158,9 +151,7 @@ uint32_t helper_clz(uint32_t t0)
 
 uint32_t helper_carry(uint32_t a, uint32_t b, uint32_t cf)
 {
-    uint32_t ncf;
-    ncf = compute_carry(a, b, cf);
-    return ncf;
+    return compute_carry(a, b, cf);
 }
 
 static inline int div_prepare(CPUMBState *env, uint32_t a, uint32_t b)
@@ -475,11 +466,11 @@ void helper_memalign(CPUMBState *env, uint32_t addr, uint32_t dr, uint32_t wr,
 void helper_stackprot(CPUMBState *env, uint32_t addr)
 {
     if (addr < env->slr || addr > env->shr) {
-            qemu_log("Stack protector violation at %x %x %x\n",
-                     addr, env->slr, env->shr);
-            env->sregs[SR_EAR] = addr;
-            env->sregs[SR_ESR] = ESR_EC_STACKPROT;
-            helper_raise_exception(env, EXCP_HW_EXCP);
+        qemu_log_mask(CPU_LOG_INT, "Stack protector violation at %x %x %x\n",
+                      addr, env->slr, env->shr);
+        env->sregs[SR_EAR] = addr;
+        env->sregs[SR_ESR] = ESR_EC_STACKPROT;
+        helper_raise_exception(env, EXCP_HW_EXCP);
     }
 }
 

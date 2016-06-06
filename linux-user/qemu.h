@@ -1,21 +1,19 @@
 #ifndef QEMU_H
 #define QEMU_H
 
-#include <signal.h>
-#include <string.h>
 
 #include "cpu.h"
+#include "exec/cpu_ldst.h"
 
 #undef DEBUG_REMAP
 #ifdef DEBUG_REMAP
-#include <stdlib.h>
 #endif /* DEBUG_REMAP */
 
 #include "exec/user/abitypes.h"
 
 #include "exec/user/thunk.h"
 #include "syscall_defs.h"
-#include "syscall.h"
+#include "target_syscall.h"
 #include "exec/gdbstub.h"
 #include "qemu/queue.h"
 
@@ -35,8 +33,6 @@ struct image_info {
         abi_ulong       start_brk;
         abi_ulong       brk;
         abi_ulong       start_mmap;
-        abi_ulong       mmap;
-        abi_ulong       rss;
         abi_ulong       start_stack;
         abi_ulong       stack_limit;
         abi_ulong       entry;
@@ -126,6 +122,7 @@ typedef struct TaskState {
 #endif
     uint32_t stack_base;
     int used; /* non zero if used */
+    bool sigsegv_blocked; /* SIGSEGV blocked by guest */
     struct image_info *info;
     struct linux_binprm *bprm;
 
@@ -143,12 +140,6 @@ extern const char *qemu_uname_release;
 extern unsigned long mmap_min_addr;
 
 /* ??? See if we can avoid exposing so much of the loader internals.  */
-/*
- * MAX_ARG_PAGES defines the number of pages allocated for arguments
- * and envelope for the new program. 32 should suffice, this gives
- * a maximum env+arg of 128kB w/4KB pages!
- */
-#define MAX_ARG_PAGES 33
 
 /* Read a good amount of data initially, to hopefully get all the
    program headers loaded.  */
@@ -160,7 +151,6 @@ extern unsigned long mmap_min_addr;
  */
 struct linux_binprm {
         char buf[BPRM_BUF_SIZE] __attribute__((aligned));
-        void *page[MAX_ARG_PAGES];
         abi_ulong p;
 	int fd;
         int e_uid, e_gid;
@@ -178,11 +168,10 @@ int loader_exec(int fdexec, const char *filename, char **argv, char **envp,
              struct target_pt_regs * regs, struct image_info *infop,
              struct linux_binprm *);
 
-int load_elf_binary(struct linux_binprm * bprm, struct target_pt_regs * regs,
-                    struct image_info * info);
-int load_flt_binary(struct linux_binprm * bprm, struct target_pt_regs * regs,
-                    struct image_info * info);
-void load_symbols(int fd, abi_ulong load_bias);
+void load_symbols_from_fd(int fd, abi_ulong load_bias);
+
+int load_elf_binary(struct linux_binprm *bprm, struct image_info *info);
+int load_flt_binary(struct linux_binprm *bprm, struct image_info *info);
 
 abi_long memcpy_to_target(abi_ulong dest, const void *src,
                           unsigned long len);
@@ -239,6 +228,7 @@ int host_to_target_signal(int sig);
 long do_sigreturn(CPUArchState *env);
 long do_rt_sigreturn(CPUArchState *env);
 abi_long do_sigaltstack(abi_ulong uss_addr, abi_ulong uoss_addr, abi_ulong sp);
+int do_sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 
 #ifdef TARGET_I386
 /* vm86.c */
@@ -262,8 +252,6 @@ abi_long target_mremap(abi_ulong old_addr, abi_ulong old_size,
 int target_msync(abi_ulong start, abi_ulong len, int flags);
 extern unsigned long last_brk;
 extern abi_ulong mmap_next_start;
-void mmap_lock(void);
-void mmap_unlock(void);
 abi_ulong mmap_find_vma(abi_ulong, abi_ulong);
 void cpu_list_lock(void);
 void cpu_list_unlock(void);
@@ -300,7 +288,7 @@ static inline int access_ok(int type, abi_ulong addr, abi_ulong size)
    __builtin_choose_expr(sizeof(*(hptr)) == 2, stw_##e##_p,             \
    __builtin_choose_expr(sizeof(*(hptr)) == 4, stl_##e##_p,             \
    __builtin_choose_expr(sizeof(*(hptr)) == 8, stq_##e##_p, abort))))   \
-     ((hptr), (x)), 0)
+     ((hptr), (x)), (void)0)
 
 #define __get_user_e(x, hptr, e)                                        \
   ((x) = (typeof(*hptr))(                                               \
@@ -308,7 +296,7 @@ static inline int access_ok(int type, abi_ulong addr, abi_ulong size)
    __builtin_choose_expr(sizeof(*(hptr)) == 2, lduw_##e##_p,            \
    __builtin_choose_expr(sizeof(*(hptr)) == 4, ldl_##e##_p,             \
    __builtin_choose_expr(sizeof(*(hptr)) == 8, ldq_##e##_p, abort))))   \
-     (hptr)), 0)
+     (hptr)), (void)0)
 
 #ifdef TARGET_WORDS_BIGENDIAN
 # define __put_user(x, hptr)  __put_user_e(x, hptr, be)
@@ -327,9 +315,9 @@ static inline int access_ok(int type, abi_ulong addr, abi_ulong size)
 ({									\
     abi_ulong __gaddr = (gaddr);					\
     target_type *__hptr;						\
-    abi_long __ret;							\
+    abi_long __ret = 0;							\
     if ((__hptr = lock_user(VERIFY_WRITE, __gaddr, sizeof(target_type), 0))) { \
-        __ret = __put_user((x), __hptr);				\
+        __put_user((x), __hptr);				\
         unlock_user(__hptr, __gaddr, sizeof(target_type));		\
     } else								\
         __ret = -TARGET_EFAULT;						\
@@ -340,9 +328,9 @@ static inline int access_ok(int type, abi_ulong addr, abi_ulong size)
 ({									\
     abi_ulong __gaddr = (gaddr);					\
     target_type *__hptr;						\
-    abi_long __ret;							\
+    abi_long __ret = 0;							\
     if ((__hptr = lock_user(VERIFY_READ, __gaddr, sizeof(target_type), 1))) { \
-        __ret = __get_user((x), __hptr);				\
+        __get_user((x), __hptr);				\
         unlock_user(__hptr, __gaddr, 0);				\
     } else {								\
         /* avoid warning */						\
@@ -454,5 +442,6 @@ static inline void *lock_user_string(abi_ulong guest_addr)
  */
 #include "target_cpu.h"
 #include "target_signal.h"
+#include "target_structs.h"
 
 #endif /* QEMU_H */

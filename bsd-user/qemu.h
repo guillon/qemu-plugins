@@ -1,14 +1,28 @@
+/*
+ *  qemu bsd user mode definition
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, see <http://www.gnu.org/licenses/>.
+ */
 #ifndef QEMU_H
 #define QEMU_H
 
-#include <signal.h>
-#include <string.h>
 
 #include "cpu.h"
+#include "exec/cpu_ldst.h"
 
 #undef DEBUG_REMAP
 #ifdef DEBUG_REMAP
-#include <stdlib.h>
 #endif /* DEBUG_REMAP */
 
 #include "exec/user/abitypes.h"
@@ -21,7 +35,7 @@ enum BSDType {
 extern enum BSDType bsd_type;
 
 #include "syscall_defs.h"
-#include "syscall.h"
+#include "target_syscall.h"
 #include "target_signal.h"
 #include "exec/gdbstub.h"
 
@@ -84,9 +98,7 @@ typedef struct TaskState {
 
 void init_task_state(TaskState *ts);
 extern const char *qemu_uname_release;
-#if defined(CONFIG_USE_GUEST_BASE)
 extern unsigned long mmap_min_addr;
-#endif
 
 /* ??? See if we can avoid exposing so much of the loader internals.  */
 /*
@@ -149,6 +161,16 @@ void fork_end(int child);
 #include "qemu/log.h"
 
 /* strace.c */
+struct syscallname {
+    int nr;
+    const char *name;
+    const char *format;
+    void (*call)(const struct syscallname *,
+                 abi_long, abi_long, abi_long,
+                 abi_long, abi_long, abi_long);
+    void (*result)(const struct syscallname *, abi_long);
+};
+
 void
 print_freebsd_syscall(int num,
                       abi_long arg1, abi_long arg2, abi_long arg3,
@@ -186,8 +208,6 @@ abi_long target_mremap(abi_ulong old_addr, abi_ulong old_size,
                        abi_ulong new_addr);
 int target_msync(abi_ulong start, abi_ulong len, int flags);
 extern unsigned long last_brk;
-void mmap_lock(void);
-void mmap_unlock(void);
 void cpu_list_lock(void);
 void cpu_list_unlock(void);
 #if defined(CONFIG_USE_NPTL)

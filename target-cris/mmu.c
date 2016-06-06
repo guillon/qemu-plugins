@@ -18,8 +18,7 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef CONFIG_USER_ONLY
-
+#include "qemu/osdep.h"
 #include "cpu.h"
 #include "mmu.h"
 
@@ -290,6 +289,7 @@ static int cris_mmu_translate_page(struct cris_mmu_result *res,
 
 void cris_mmu_flush_pid(CPUCRISState *env, uint32_t pid)
 {
+    CRISCPU *cpu = cris_env_get_cpu(env);
 	target_ulong vaddr;
 	unsigned int idx;
 	uint32_t lo, hi;
@@ -315,7 +315,7 @@ void cris_mmu_flush_pid(CPUCRISState *env, uint32_t pid)
 					vaddr = tlb_vpn << TARGET_PAGE_BITS;
 					D_LOG("flush pid=%x vaddr=%x\n", 
 						  pid, vaddr);
-					tlb_flush_page(env, vaddr);
+                    tlb_flush_page(CPU(cpu), vaddr);
 				}
 			}
 		}
@@ -359,4 +359,3 @@ int cris_mmu_translate(struct cris_mmu_result *res,
 	env->pregs[PR_SRS] = old_srs;
 	return miss;
 }
-#endif

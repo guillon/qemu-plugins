@@ -17,14 +17,7 @@
  *  along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <time.h>
+#include "qemu/osdep.h"
 
 #include "qemu.h"
 
@@ -98,6 +91,7 @@ static int translate_openflags(int flags)
 #define ARG(x) tswap32(args[x])
 void do_m68k_simcall(CPUM68KState *env, int nr)
 {
+    M68kCPU *cpu = m68k_env_get_cpu(env);
     uint32_t *args;
 
     args = (uint32_t *)(unsigned long)(env->aregs[7] + 4);
@@ -165,6 +159,6 @@ void do_m68k_simcall(CPUM68KState *env, int nr)
         check_err(env, lseek(ARG(0), (int32_t)ARG(1), ARG(2)));
         break;
     default:
-        cpu_abort(env, "Unsupported m68k sim syscall %d\n", nr);
+        cpu_abort(CPU(cpu), "Unsupported m68k sim syscall %d\n", nr);
     }
 }

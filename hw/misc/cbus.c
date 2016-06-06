@@ -20,7 +20,8 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "qemu-common.h"
+#include "qemu/osdep.h"
+#include "hw/hw.h"
 #include "hw/irq.h"
 #include "hw/devices.h"
 #include "sysemu/sysemu.h"
@@ -135,9 +136,9 @@ CBus *cbus_init(qemu_irq dat)
     CBusPriv *s = (CBusPriv *) g_malloc0(sizeof(*s));
 
     s->dat_out = dat;
-    s->cbus.clk = qemu_allocate_irqs(cbus_clk, s, 1)[0];
-    s->cbus.dat = qemu_allocate_irqs(cbus_dat, s, 1)[0];
-    s->cbus.sel = qemu_allocate_irqs(cbus_sel, s, 1)[0];
+    s->cbus.clk = qemu_allocate_irq(cbus_clk, s, 0);
+    s->cbus.dat = qemu_allocate_irq(cbus_dat, s, 0);
+    s->cbus.sel = qemu_allocate_irq(cbus_sel, s, 0);
 
     s->sel = 1;
     s->clk = 0;

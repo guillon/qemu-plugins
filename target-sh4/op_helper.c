@@ -16,43 +16,25 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
-#include <assert.h>
-#include <stdlib.h>
+#include "qemu/osdep.h"
 #include "cpu.h"
-#include "helper.h"
-#include "tcg.h"
+#include "exec/helper-proto.h"
+#include "exec/cpu_ldst.h"
 
 #ifndef CONFIG_USER_ONLY
-#include "exec/softmmu_exec.h"
 
-#define MMUSUFFIX _mmu
-
-#define SHIFT 0
-#include "exec/softmmu_template.h"
-
-#define SHIFT 1
-#include "exec/softmmu_template.h"
-
-#define SHIFT 2
-#include "exec/softmmu_template.h"
-
-#define SHIFT 3
-#include "exec/softmmu_template.h"
-
-void tlb_fill(CPUSH4State *env, target_ulong addr, int is_write, int mmu_idx,
+void tlb_fill(CPUState *cs, target_ulong addr, int is_write, int mmu_idx,
               uintptr_t retaddr)
 {
     int ret;
 
-    ret = cpu_sh4_handle_mmu_fault(env, addr, is_write, mmu_idx);
+    ret = superh_cpu_handle_mmu_fault(cs, addr, is_write, mmu_idx);
     if (ret) {
         /* now we have a real cpu fault */
         if (retaddr) {
-            spin_lock(&tcg_ctx.tb_ctx.tb_lock);
-            cpu_restore_state(env, retaddr);
-            spin_unlock(&tcg_ctx.tb_ctx.tb_lock);
+            cpu_restore_state(cs, retaddr);
         }
-        cpu_loop_exit(env);
+        cpu_loop_exit(cs);
     }
 }
 
@@ -61,8 +43,10 @@ void tlb_fill(CPUSH4State *env, target_ulong addr, int is_write, int mmu_idx,
 void helper_ldtlb(CPUSH4State *env)
 {
 #ifdef CONFIG_USER_ONLY
+    SuperHCPU *cpu = sh_env_get_cpu(env);
+
     /* XXXXX */
-    cpu_abort(env, "Unhandled ldtlb");
+    cpu_abort(CPU(cpu), "Unhandled ldtlb");
 #else
     cpu_load_tlb(env);
 #endif
@@ -71,13 +55,13 @@ void helper_ldtlb(CPUSH4State *env)
 static inline void QEMU_NORETURN raise_exception(CPUSH4State *env, int index,
                                                  uintptr_t retaddr)
 {
-    env->exception_index = index;
+    CPUState *cs = CPU(sh_env_get_cpu(env));
+
+    cs->exception_index = index;
     if (retaddr) {
-        spin_lock(&tcg_ctx.tb_ctx.tb_lock);
-        cpu_restore_state(env, retaddr);
-        spin_unlock(&tcg_ctx.tb_ctx.tb_lock);
+        cpu_restore_state(cs, retaddr);
     }
-    cpu_loop_exit(env);
+    cpu_loop_exit(cs);
 }
 
 void helper_raise_illegal_instruction(CPUSH4State *env)
@@ -171,124 +155,6 @@ void helper_ocbi(CPUSH4State *env, uint32_t address)
     }
 }
 
-#define T (env->sr & SR_T)
-#define Q (env->sr & SR_Q ? 1 : 0)
-#define M (env->sr & SR_M ? 1 : 0)
-#define SETT env->sr |= SR_T
-#define CLRT env->sr &= ~SR_T
-#define SETQ env->sr |= SR_Q
-#define CLRQ env->sr &= ~SR_Q
-#define SETM env->sr |= SR_M
-#define CLRM env->sr &= ~SR_M
-
-uint32_t helper_div1(CPUSH4State *env, uint32_t arg0, uint32_t arg1)
-{
-    uint32_t tmp0, tmp2;
-    uint8_t old_q, tmp1 = 0xff;
-
-    //printf("div1 arg0=0x%08x arg1=0x%08x M=%d Q=%d T=%d\n", arg0, arg1, M, Q, T);
-    old_q = Q;
-    if ((0x80000000 & arg1) != 0)
-	SETQ;
-    else
-	CLRQ;
-    tmp2 = arg0;
-    arg1 <<= 1;
-    arg1 |= T;
-    switch (old_q) {
-    case 0:
-	switch (M) {
-	case 0:
-	    tmp0 = arg1;
-	    arg1 -= tmp2;
-	    tmp1 = arg1 > tmp0;
-	    switch (Q) {
-	    case 0:
-		if (tmp1)
-		    SETQ;
-		else
-		    CLRQ;
-		break;
-	    case 1:
-		if (tmp1 == 0)
-		    SETQ;
-		else
-		    CLRQ;
-		break;
-	    }
-	    break;
-	case 1:
-	    tmp0 = arg1;
-	    arg1 += tmp2;
-	    tmp1 = arg1 < tmp0;
-	    switch (Q) {
-	    case 0:
-		if (tmp1 == 0)
-		    SETQ;
-		else
-		    CLRQ;
-		break;
-	    case 1:
-		if (tmp1)
-		    SETQ;
-		else
-		    CLRQ;
-		break;
-	    }
-	    break;
-	}
-	break;
-    case 1:
-	switch (M) {
-	case 0:
-	    tmp0 = arg1;
-	    arg1 += tmp2;
-	    tmp1 = arg1 < tmp0;
-	    switch (Q) {
-	    case 0:
-		if (tmp1)
-		    SETQ;
-		else
-		    CLRQ;
-		break;
-	    case 1:
-		if (tmp1 == 0)
-		    SETQ;
-		else
-		    CLRQ;
-		break;
-	    }
-	    break;
-	case 1:
-	    tmp0 = arg1;
-	    arg1 -= tmp2;
-	    tmp1 = arg1 > tmp0;
-	    switch (Q) {
-	    case 0:
-		if (tmp1 == 0)
-		    SETQ;
-		else
-		    CLRQ;
-		break;
-	    case 1:
-		if (tmp1)
-		    SETQ;
-		else
-		    CLRQ;
-		break;
-	    }
-	    break;
-	}
-	break;
-    }
-    if (Q == M)
-	SETT;
-    else
-	CLRT;
-    //printf("Output: arg1=0x%08x M=%d Q=%d T=%d\n", arg1, M, Q, T);
-    return arg1;
-}
-
 void helper_macl(CPUSH4State *env, uint32_t arg0, uint32_t arg1)
 {
     int64_t res;
@@ -297,7 +163,7 @@ void helper_macl(CPUSH4State *env, uint32_t arg0, uint32_t arg1)
     res += (int64_t) (int32_t) arg0 *(int64_t) (int32_t) arg1;
     env->mach = (res >> 32) & 0xffffffff;
     env->macl = res & 0xffffffff;
-    if (env->sr & SR_S) {
+    if (env->sr & (1u << SR_S)) {
 	if (res < 0)
 	    env->mach |= 0xffff0000;
 	else
@@ -313,7 +179,7 @@ void helper_macw(CPUSH4State *env, uint32_t arg0, uint32_t arg1)
     res += (int64_t) (int16_t) arg0 *(int64_t) (int16_t) arg1;
     env->mach = (res >> 32) & 0xffffffff;
     env->macl = res & 0xffffffff;
-    if (env->sr & SR_S) {
+    if (env->sr & (1u << SR_S)) {
 	if (res < -0x80000000) {
 	    env->mach = 1;
 	    env->macl = 0x80000000;
@@ -322,16 +188,6 @@ void helper_macw(CPUSH4State *env, uint32_t arg0, uint32_t arg1)
 	    env->macl = 0x7fffffff;
 	}
     }
-}
-
-static inline void set_t(CPUSH4State *env)
-{
-    env->sr |= SR_T;
-}
-
-static inline void clr_t(CPUSH4State *env)
-{
-    env->sr &= ~SR_T;
 }
 
 void helper_ld_fpscr(CPUSH4State *env, uint32_t val)
@@ -418,11 +274,9 @@ void helper_fcmp_eq_FT(CPUSH4State *env, float32 t0, float32 t1)
     relation = float32_compare(t0, t1, &env->fp_status);
     if (unlikely(relation == float_relation_unordered)) {
         update_fpscr(env, GETPC());
-        clr_t(env);
-    } else if (relation == float_relation_equal) {
-        set_t(env);
+        env->sr_t = 0;
     } else {
-        clr_t(env);
+        env->sr_t = (relation == float_relation_equal);
     }
 }
 
@@ -434,11 +288,9 @@ void helper_fcmp_eq_DT(CPUSH4State *env, float64 t0, float64 t1)
     relation = float64_compare(t0, t1, &env->fp_status);
     if (unlikely(relation == float_relation_unordered)) {
         update_fpscr(env, GETPC());
-        clr_t(env);
-    } else if (relation == float_relation_equal) {
-        set_t(env);
+        env->sr_t = 0;
     } else {
-        clr_t(env);
+        env->sr_t = (relation == float_relation_equal);
     }
 }
 
@@ -450,11 +302,9 @@ void helper_fcmp_gt_FT(CPUSH4State *env, float32 t0, float32 t1)
     relation = float32_compare(t0, t1, &env->fp_status);
     if (unlikely(relation == float_relation_unordered)) {
         update_fpscr(env, GETPC());
-        clr_t(env);
-    } else if (relation == float_relation_greater) {
-        set_t(env);
+        env->sr_t = 0;
     } else {
-        clr_t(env);
+        env->sr_t = (relation == float_relation_greater);
     }
 }
 
@@ -466,11 +316,9 @@ void helper_fcmp_gt_DT(CPUSH4State *env, float64 t0, float64 t1)
     relation = float64_compare(t0, t1, &env->fp_status);
     if (unlikely(relation == float_relation_unordered)) {
         update_fpscr(env, GETPC());
-        clr_t(env);
-    } else if (relation == float_relation_greater) {
-        set_t(env);
+        env->sr_t = 0;
     } else {
-        clr_t(env);
+        env->sr_t = (relation == float_relation_greater);
     }
 }
 

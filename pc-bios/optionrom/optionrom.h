@@ -19,8 +19,7 @@
  */
 
 
-#define NO_QEMU_PROTOS
-#include "../../include/hw/nvram/fw_cfg.h"
+#include "../../include/hw/nvram/fw_cfg_keys.h"
 
 #define BIOS_CFG_IOPORT_CFG	0x510
 #define BIOS_CFG_IOPORT_DATA	0x511
@@ -51,8 +50,6 @@
 .endm
 
 #define read_fw_blob_pre(var)				\
-	read_fw		var ## _ADDR;			\
-	mov		%eax, %edi;			\
 	read_fw		var ## _SIZE;			\
 	mov		%eax, %ecx;			\
 	mov		$var ## _DATA, %ax;		\
@@ -68,6 +65,8 @@
  * Clobbers:	%eax, %edx, %es, %ecx, %edi
  */
 #define read_fw_blob(var)				\
+	read_fw		var ## _ADDR;			\
+	mov		%eax, %edi;			\
 	read_fw_blob_pre(var);				\
 	/* old as(1) doesn't like this insn so emit the bytes instead: \
 	rep insb	(%dx), %es:(%edi);		\
@@ -80,7 +79,22 @@
  *
  * Clobbers:	%eax, %edx, %es, %ecx, %edi
  */
-#define read_fw_blob_addr32(var)				\
+#define read_fw_blob_addr32(var)			\
+	read_fw		var ## _ADDR;			\
+	mov		%eax, %edi;			\
+	read_fw_blob_pre(var);				\
+	/* old as(1) doesn't like this insn so emit the bytes instead: \
+	addr32 rep insb	(%dx), %es:(%edi);		\
+	*/						\
+	.dc.b		0x67,0xf3,0x6c
+
+/*
+ * Read a blob from the fw_cfg device in forced addr32 mode, address is in %edi.
+ * Requires _SIZE and _DATA values for the parameter.
+ *
+ * Clobbers:	%eax, %edx, %edi, %es, %ecx
+ */
+#define read_fw_blob_addr32_edi(var)			\
 	read_fw_blob_pre(var);				\
 	/* old as(1) doesn't like this insn so emit the bytes instead: \
 	addr32 rep insb	(%dx), %es:(%edi);		\

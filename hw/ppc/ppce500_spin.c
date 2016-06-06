@@ -27,6 +27,7 @@
  *
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "sysemu/sysemu.h"
 #include "hw/sysbus.h"
@@ -65,16 +66,16 @@ static void spin_reset(void *opaque)
     for (i = 0; i < MAX_CPUS; i++) {
         SpinInfo *info = &s->spin[i];
 
-        info->pir = i;
-        info->r3 = i;
-        info->addr = 1;
+        stl_p(&info->pir, i);
+        stq_p(&info->r3, i);
+        stq_p(&info->addr, 1);
     }
 }
 
 /* Create -kernel TLB entries for BookE, linearly spanning 256MB.  */
 static inline hwaddr booke206_page_size_to_tlb(uint64_t size)
 {
-    return (ffs(size >> 10) - 1) >> 1;
+    return ctz32(size >> 10) >> 1;
 }
 
 static void mmubooke_create_initial_mapping(CPUPPCState *env,
@@ -117,7 +118,7 @@ static void spin_kick(void *data)
     mmubooke_create_initial_mapping(env, 0, map_start, map_size);
 
     cpu->halted = 0;
-    env->exception_index = -1;
+    cpu->exception_index = -1;
     cpu->stopped = false;
     qemu_cpu_kick(cpu);
 }

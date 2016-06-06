@@ -25,7 +25,6 @@
 #define HW_VGA_INT_H 1
 
 #include <hw/hw.h>
-#include "qapi/error.h"
 #include "exec/memory.h"
 
 #define ST01_V_RETRACE      0x08
@@ -93,8 +92,10 @@ typedef struct VGACommonState {
     MemoryRegion vram_vbe;
     uint32_t vram_size;
     uint32_t vram_size_mb; /* property */
+    uint32_t vbe_size;
     uint32_t latch;
-    MemoryRegion *chain4_alias;
+    bool has_chain4_alias;
+    MemoryRegion chain4_alias;
     uint8_t sr_index;
     uint8_t sr[256];
     uint8_t gr_index;
@@ -124,6 +125,8 @@ typedef struct VGACommonState {
     void (*get_resolution)(struct VGACommonState *s,
                         int *pwidth,
                         int *pheight);
+    PortioList vga_port_list;
+    PortioList vbe_port_list;
     /* bochs vbe state */
     uint16_t vbe_index;
     uint16_t vbe_regs[VBE_DISPI_INDEX_NB];
@@ -146,17 +149,21 @@ typedef struct VGACommonState {
     uint32_t last_width, last_height; /* in chars or pixels */
     uint32_t last_scr_width, last_scr_height; /* in pixels */
     uint32_t last_depth; /* in bits */
+    bool last_byteswap;
+    bool force_shadow;
     uint8_t cursor_start, cursor_end;
     bool cursor_visible_phase;
     int64_t cursor_blink_time;
     uint32_t cursor_offset;
-    unsigned int (*rgb_to_pixel)(unsigned int r,
-                                 unsigned int g, unsigned b);
     const GraphicHwOps *hw_ops;
     bool full_update_text;
     bool full_update_gfx;
+    bool big_endian_fb;
+    bool default_endian_fb;
     /* hardware mouse cursor support */
     uint32_t invalidated_y_table[VGA_MAX_HEIGHT / 32];
+    uint32_t hw_cursor_x;
+    uint32_t hw_cursor_y;
     void (*cursor_invalidate)(struct VGACommonState *s);
     void (*cursor_draw_line)(struct VGACommonState *s, uint8_t *d, int y);
     /* tell for each page if it has been updated since the last time */
@@ -177,7 +184,7 @@ static inline int c6_to_8(int v)
     return (v << 2) | (b << 1) | b;
 }
 
-void vga_common_init(VGACommonState *s, Object *obj);
+void vga_common_init(VGACommonState *s, Object *obj, bool global_vmstate);
 void vga_init(VGACommonState *s, Object *obj, MemoryRegion *address_space,
               MemoryRegion *address_space_io, bool init_vga_ports);
 MemoryRegion *vga_init_io(VGACommonState *s, Object *obj,
@@ -210,5 +217,11 @@ extern const uint8_t gr_mask[16];
 #define VGABIOS_CIRRUS_FILENAME "vgabios-cirrus.bin"
 
 extern const MemoryRegionOps vga_mem_ops;
+
+/* vga-pci.c */
+void pci_std_vga_mmio_region_init(VGACommonState *s,
+                                  MemoryRegion *parent,
+                                  MemoryRegion *subs,
+                                  bool qext);
 
 #endif

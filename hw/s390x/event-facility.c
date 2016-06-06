@@ -15,19 +15,20 @@
  *
  */
 
-#include "monitor/monitor.h"
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "sysemu/sysemu.h"
 
 #include "hw/s390x/sclp.h"
 #include "hw/s390x/event-facility.h"
 
-typedef struct EventTypesBus {
+typedef struct SCLPEventsBus {
     BusState qbus;
-} EventTypesBus;
+} SCLPEventsBus;
 
 struct SCLPEventFacility {
-    EventTypesBus sbus;
-    DeviceState *qdev;
+    SysBusDevice parent_obj;
+    SCLPEventsBus sbus;
     /* guest' receive mask */
     unsigned int receive_mask;
 };
@@ -239,12 +240,13 @@ static void read_event_data(SCLPEventFacility *ef, SCCB *sccb)
         sclp_active_selection_mask = sclp_cp_receive_mask;
         break;
     case SCLP_SELECTIVE_READ:
-        if (!(sclp_cp_receive_mask & be32_to_cpu(red->mask))) {
+        sclp_active_selection_mask = be32_to_cpu(red->mask);
+        if (!sclp_cp_receive_mask ||
+            (sclp_active_selection_mask & ~sclp_cp_receive_mask)) {
             sccb->h.response_code =
                     cpu_to_be16(SCLP_RC_INVALID_SELECTION_MASK);
             goto out;
         }
-        sclp_active_selection_mask = be32_to_cpu(red->mask);
         break;
     default:
         sccb->h.response_code = cpu_to_be16(SCLP_RC_INVALID_FUNCTION);
@@ -285,11 +287,29 @@ out:
 
 #define TYPE_SCLP_EVENTS_BUS "s390-sclp-events-bus"
 
-static void sclp_events_bus_class_init(ObjectClass *klass, void *data)
+static void sclp_events_bus_realize(BusState *bus, Error **errp)
 {
+    BusChild *kid;
+
+    /* TODO: recursive realization has to be done in common code */
+    QTAILQ_FOREACH(kid, &bus->children, sibling) {
+        DeviceState *dev = kid->child;
+
+        object_property_set_bool(OBJECT(dev), true, "realized", errp);
+        if (*errp) {
+            return;
+        }
+    }
 }
 
-static const TypeInfo s390_sclp_events_bus_info = {
+static void sclp_events_bus_class_init(ObjectClass *klass, void *data)
+{
+    BusClass *bc = BUS_CLASS(klass);
+
+    bc->realize = sclp_events_bus_realize;
+}
+
+static const TypeInfo sclp_events_bus_info = {
     .name = TYPE_SCLP_EVENTS_BUS,
     .parent = TYPE_BUS,
     .class_init = sclp_events_bus_class_init,
@@ -297,7 +317,7 @@ static const TypeInfo s390_sclp_events_bus_info = {
 
 static void command_handler(SCLPEventFacility *ef, SCCB *sccb, uint64_t code)
 {
-    switch (code) {
+    switch (code & SCLP_CMD_CODE_MASK) {
     case SCLP_CMD_READ_EVENT_DATA:
         read_event_data(ef, sccb);
         break;
@@ -313,70 +333,92 @@ static void command_handler(SCLPEventFacility *ef, SCCB *sccb, uint64_t code)
     }
 }
 
-static int init_event_facility(S390SCLPDevice *sdev)
+static const VMStateDescription vmstate_event_facility = {
+    .name = "vmstate-event-facility",
+    .version_id = 0,
+    .minimum_version_id = 0,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(receive_mask, SCLPEventFacility),
+        VMSTATE_END_OF_LIST()
+     }
+};
+
+static void init_event_facility(Object *obj)
 {
-    SCLPEventFacility *event_facility;
-    DeviceState *quiesce;
+    SCLPEventFacility *event_facility = EVENT_FACILITY(obj);
+    DeviceState *sdev = DEVICE(obj);
+    Object *new;
 
-    event_facility = g_malloc0(sizeof(SCLPEventFacility));
-    sdev->ef = event_facility;
-    sdev->sclp_command_handler = command_handler;
-    sdev->event_pending = event_pending;
-
-    /* Spawn a new sclp-events facility */
+    /* Spawn a new bus for SCLP events */
     qbus_create_inplace(&event_facility->sbus, sizeof(event_facility->sbus),
-                        TYPE_SCLP_EVENTS_BUS, DEVICE(sdev), NULL);
-    event_facility->sbus.qbus.allow_hotplug = 0;
-    event_facility->qdev = (DeviceState *) sdev;
+                        TYPE_SCLP_EVENTS_BUS, sdev, NULL);
 
-    quiesce = qdev_create(&event_facility->sbus.qbus, "sclpquiesce");
-    if (!quiesce) {
-        return -1;
-    }
-    qdev_init_nofail(quiesce);
+    new = object_new(TYPE_SCLP_QUIESCE);
+    object_property_add_child(obj, TYPE_SCLP_QUIESCE, new, NULL);
+    object_unref(new);
+    qdev_set_parent_bus(DEVICE(new), &event_facility->sbus.qbus);
 
-    return 0;
+    new = object_new(TYPE_SCLP_CPU_HOTPLUG);
+    object_property_add_child(obj, TYPE_SCLP_CPU_HOTPLUG, new, NULL);
+    object_unref(new);
+    qdev_set_parent_bus(DEVICE(new), &event_facility->sbus.qbus);
+    /* the facility will automatically realize the devices via the bus */
 }
 
 static void reset_event_facility(DeviceState *dev)
 {
-    S390SCLPDevice *sdev = SCLP_S390_DEVICE(dev);
+    SCLPEventFacility *sdev = EVENT_FACILITY(dev);
 
-    sdev->ef->receive_mask = 0;
+    sdev->receive_mask = 0;
 }
 
 static void init_event_facility_class(ObjectClass *klass, void *data)
 {
-    DeviceClass *dc = DEVICE_CLASS(klass);
-    S390SCLPDeviceClass *k = SCLP_S390_DEVICE_CLASS(klass);
+    SysBusDeviceClass *sbdc = SYS_BUS_DEVICE_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(sbdc);
+    SCLPEventFacilityClass *k = EVENT_FACILITY_CLASS(dc);
 
     dc->reset = reset_event_facility;
-    k->init = init_event_facility;
+    dc->vmsd = &vmstate_event_facility;
+    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+    k->command_handler = command_handler;
+    k->event_pending = event_pending;
 }
 
-static const TypeInfo s390_sclp_event_facility_info = {
-    .name          = "s390-sclp-event-facility",
-    .parent        = TYPE_DEVICE_S390_SCLP,
-    .instance_size = sizeof(S390SCLPDevice),
+static const TypeInfo sclp_event_facility_info = {
+    .name          = TYPE_SCLP_EVENT_FACILITY,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_init = init_event_facility,
+    .instance_size = sizeof(SCLPEventFacility),
     .class_init    = init_event_facility_class,
+    .class_size    = sizeof(SCLPEventFacilityClass),
 };
 
-static int event_qdev_init(DeviceState *qdev)
+static void event_realize(DeviceState *qdev, Error **errp)
 {
-    SCLPEvent *event = DO_UPCAST(SCLPEvent, qdev, qdev);
+    SCLPEvent *event = SCLP_EVENT(qdev);
     SCLPEventClass *child = SCLP_EVENT_GET_CLASS(event);
 
-    return child->init(event);
+    if (child->init) {
+        int rc = child->init(event);
+        if (rc < 0) {
+            error_setg(errp, "SCLP event initialization failed.");
+            return;
+        }
+    }
 }
 
-static int event_qdev_exit(DeviceState *qdev)
+static void event_unrealize(DeviceState *qdev, Error **errp)
 {
-    SCLPEvent *event = DO_UPCAST(SCLPEvent, qdev, qdev);
+    SCLPEvent *event = SCLP_EVENT(qdev);
     SCLPEventClass *child = SCLP_EVENT_GET_CLASS(event);
     if (child->exit) {
-        child->exit(event);
+        int rc = child->exit(event);
+        if (rc < 0) {
+            error_setg(errp, "SCLP event exit failed.");
+            return;
+        }
     }
-    return 0;
 }
 
 static void event_class_init(ObjectClass *klass, void *data)
@@ -384,12 +426,11 @@ static void event_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->bus_type = TYPE_SCLP_EVENTS_BUS;
-    dc->unplug = qdev_simple_unplug_cb;
-    dc->init = event_qdev_init;
-    dc->exit = event_qdev_exit;
+    dc->realize = event_realize;
+    dc->unrealize = event_unrealize;
 }
 
-static const TypeInfo s390_sclp_event_type_info = {
+static const TypeInfo sclp_event_type_info = {
     .name = TYPE_SCLP_EVENT,
     .parent = TYPE_DEVICE,
     .instance_size = sizeof(SCLPEvent),
@@ -400,9 +441,9 @@ static const TypeInfo s390_sclp_event_type_info = {
 
 static void register_types(void)
 {
-    type_register_static(&s390_sclp_events_bus_info);
-    type_register_static(&s390_sclp_event_facility_info);
-    type_register_static(&s390_sclp_event_type_info);
+    type_register_static(&sclp_events_bus_info);
+    type_register_static(&sclp_event_facility_info);
+    type_register_static(&sclp_event_type_info);
 }
 
 type_init(register_types)

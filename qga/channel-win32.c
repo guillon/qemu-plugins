@@ -1,9 +1,6 @@
-#include <stdlib.h>
-#include <stdio.h>
-#include <stdbool.h>
+#include "qemu/osdep.h"
 #include <glib.h>
 #include <windows.h>
-#include <errno.h>
 #include <io.h>
 #include "qga/guest-agent-core.h"
 #include "qga/channel.h"
@@ -269,7 +266,7 @@ static GIOStatus ga_channel_write(GAChannel *c, const char *buf, size_t size,
 GIOStatus ga_channel_write_all(GAChannel *c, const char *buf, size_t size)
 {
     GIOStatus status = G_IO_STATUS_NORMAL;
-    size_t count;
+    size_t count = 0;
 
     while (size) {
         status = ga_channel_write(c, buf, size, &count);
@@ -287,16 +284,32 @@ GIOStatus ga_channel_write_all(GAChannel *c, const char *buf, size_t size)
 static gboolean ga_channel_open(GAChannel *c, GAChannelMethod method,
                                 const gchar *path)
 {
-    if (method != GA_CHANNEL_VIRTIO_SERIAL) {
+    COMMTIMEOUTS comTimeOut = {0};
+    gchar newpath[MAXPATHLEN] = {0};
+    comTimeOut.ReadIntervalTimeout = 1;
+
+    if (method != GA_CHANNEL_VIRTIO_SERIAL && method != GA_CHANNEL_ISA_SERIAL) {
         g_critical("unsupported communication method");
         return false;
     }
 
-    c->handle = CreateFile(path, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+    if (method == GA_CHANNEL_ISA_SERIAL){
+        snprintf(newpath, sizeof(newpath), "\\\\.\\%s", path);
+    }else {
+        g_strlcpy(newpath, path, sizeof(newpath));
+    }
+
+    c->handle = CreateFile(newpath, GENERIC_READ | GENERIC_WRITE, 0, NULL,
                            OPEN_EXISTING,
                            FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED, NULL);
     if (c->handle == INVALID_HANDLE_VALUE) {
-        g_critical("error opening path");
+        g_critical("error opening path %s", newpath);
+        return false;
+    }
+
+    if (method == GA_CHANNEL_ISA_SERIAL && !SetCommTimeouts(c->handle,&comTimeOut)) {
+        g_critical("error setting timeout for com port: %lu",GetLastError());
+        CloseHandle(c->handle);
         return false;
     }
 
@@ -306,7 +319,7 @@ static gboolean ga_channel_open(GAChannel *c, GAChannelMethod method,
 GAChannel *ga_channel_new(GAChannelMethod method, const gchar *path,
                           GAChannelCallback cb, gpointer opaque)
 {
-    GAChannel *c = g_malloc0(sizeof(GAChannel));
+    GAChannel *c = g_new0(GAChannel, 1);
     SECURITY_ATTRIBUTES sec_attrs;
 
     if (!ga_channel_open(c, method, path)) {

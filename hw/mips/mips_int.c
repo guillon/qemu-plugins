@@ -20,9 +20,12 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/mips/cpudevs.h"
 #include "cpu.h"
+#include "sysemu/kvm.h"
+#include "kvm_mips.h"
 
 static void cpu_mips_irq_request(void *opaque, int irq, int level)
 {
@@ -35,8 +38,17 @@ static void cpu_mips_irq_request(void *opaque, int irq, int level)
 
     if (level) {
         env->CP0_Cause |= 1 << (irq + CP0Ca_IP);
+
+        if (kvm_enabled() && irq == 2) {
+            kvm_mips_set_interrupt(cpu, irq, level);
+        }
+
     } else {
         env->CP0_Cause &= ~(1 << (irq + CP0Ca_IP));
+
+        if (kvm_enabled() && irq == 2) {
+            kvm_mips_set_interrupt(cpu, irq, level);
+        }
     }
 
     if (env->CP0_Cause & CP0Ca_IP_mask) {

@@ -12,6 +12,8 @@
 #ifndef CSS_H
 #define CSS_H
 
+#include "hw/s390x/adapter.h"
+#include "hw/s390x/s390_flic.h"
 #include "ioinst.h"
 
 /* Channel subsystem constants. */
@@ -76,15 +78,32 @@ struct SubchDev {
     hwaddr channel_prog;
     CCW1 last_cmd;
     bool last_cmd_valid;
-    ORB *orb;
+    bool ccw_fmt_1;
+    bool thinint_active;
+    uint8_t ccw_no_data_cnt;
     /* transport-provided data: */
     int (*ccw_cb) (SubchDev *, CCW1);
+    void (*disable_cb)(SubchDev *);
     SenseId id;
     void *driver_data;
 };
 
+typedef struct IndAddr {
+    hwaddr addr;
+    uint64_t map;
+    unsigned long refcnt;
+    int len;
+    QTAILQ_ENTRY(IndAddr) sibling;
+} IndAddr;
+
+IndAddr *get_indicator(hwaddr ind_addr, int len);
+void release_indicator(AdapterInfo *adapter, IndAddr *indicator);
+int map_indicator(AdapterInfo *adapter, IndAddr *indicator);
+
 typedef SubchDev *(*css_subch_cb_func)(uint8_t m, uint8_t cssid, uint8_t ssid,
                                        uint16_t schid);
+void subch_device_save(SubchDev *s, QEMUFile *f);
+int subch_device_load(SubchDev *s, QEMUFile *f);
 int css_create_css_image(uint8_t cssid, bool default_image);
 bool css_devno_used(uint8_t cssid, uint8_t ssid, uint16_t devno);
 void css_subch_assign(uint8_t cssid, uint8_t ssid, uint16_t schid,
@@ -97,4 +116,11 @@ void css_queue_crw(uint8_t rsc, uint8_t erc, int chain, uint16_t rsid);
 void css_generate_sch_crws(uint8_t cssid, uint8_t ssid, uint16_t schid,
                            int hotplugged, int add);
 void css_generate_chp_crws(uint8_t cssid, uint8_t chpid);
+void css_generate_css_crws(uint8_t cssid);
+void css_clear_sei_pending(void);
+void css_adapter_interrupt(uint8_t isc);
+
+#define CSS_IO_ADAPTER_VIRTIO 1
+int css_register_io_adapter(uint8_t type, uint8_t isc, bool swap,
+                            bool maskable, uint32_t *id);
 #endif

@@ -155,7 +155,7 @@ static gboolean key_equal_func(gconstpointer a, gconstpointer b)
 
 void tpi_init(TCGPluginInterface *tpi)
 {
-    TPI_INIT_VERSION_GENERIC(*tpi);
+    TPI_INIT_VERSION_GENERIC(tpi);
 
     tpi->pre_tb_helper_code = pre_tb_helper_code;
     tpi->pre_tb_helper_data = pre_tb_helper_data;

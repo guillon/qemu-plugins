@@ -29,6 +29,7 @@
  *                    VA Linux Systems Japan K.K.
  */
 
+#include "qemu/osdep.h"
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci/pci_bus.h"
 #include "qemu/range.h"
@@ -219,12 +220,12 @@ static void pci_bridge_region_del(PCIBridge *br, PCIBridgeWindows *w)
 
 static void pci_bridge_region_cleanup(PCIBridge *br, PCIBridgeWindows *w)
 {
-    memory_region_destroy(&w->alias_io);
-    memory_region_destroy(&w->alias_mem);
-    memory_region_destroy(&w->alias_pref_mem);
-    memory_region_destroy(&w->alias_vga[QEMU_PCI_VGA_IO_LO]);
-    memory_region_destroy(&w->alias_vga[QEMU_PCI_VGA_IO_HI]);
-    memory_region_destroy(&w->alias_vga[QEMU_PCI_VGA_MEM]);
+    object_unparent(OBJECT(&w->alias_io));
+    object_unparent(OBJECT(&w->alias_mem));
+    object_unparent(OBJECT(&w->alias_pref_mem));
+    object_unparent(OBJECT(&w->alias_vga[QEMU_PCI_VGA_IO_LO]));
+    object_unparent(OBJECT(&w->alias_vga[QEMU_PCI_VGA_IO_HI]));
+    object_unparent(OBJECT(&w->alias_vga[QEMU_PCI_VGA_MEM]));
     g_free(w);
 }
 
@@ -268,7 +269,7 @@ void pci_bridge_write_config(PCIDevice *d,
     newctl = pci_get_word(d->config + PCI_BRIDGE_CONTROL);
     if (~oldctl & newctl & PCI_BRIDGE_CTL_BUS_RESET) {
         /* Trigger hot reset on 0->1 transition. */
-        pci_bus_reset(&s->sec_bus);
+        qbus_reset_all(&s->sec_bus.qbus);
     }
 }
 
@@ -332,7 +333,7 @@ void pci_bridge_reset(DeviceState *qdev)
 }
 
 /* default qdev initialization function for PCI-to-PCI bridge */
-int pci_bridge_initfn(PCIDevice *dev, const char *typename)
+void pci_bridge_initfn(PCIDevice *dev, const char *typename)
 {
     PCIBus *parent = dev->bus;
     PCIBridge *br = PCI_BRIDGE(dev);
@@ -372,13 +373,12 @@ int pci_bridge_initfn(PCIDevice *dev, const char *typename)
     sec_bus->parent_dev = dev;
     sec_bus->map_irq = br->map_irq ? br->map_irq : pci_swizzle_map_irq_fn;
     sec_bus->address_space_mem = &br->address_space_mem;
-    memory_region_init(&br->address_space_mem, OBJECT(br), "pci_bridge_pci", INT64_MAX);
+    memory_region_init(&br->address_space_mem, OBJECT(br), "pci_bridge_pci", UINT64_MAX);
     sec_bus->address_space_io = &br->address_space_io;
     memory_region_init(&br->address_space_io, OBJECT(br), "pci_bridge_io", 65536);
     br->windows = pci_bridge_region_init(br);
     QLIST_INIT(&sec_bus->child);
     QLIST_INSERT_HEAD(&parent->child, sec_bus, sibling);
-    return 0;
 }
 
 /* default qdev clean up function for PCI-to-PCI bridge */
@@ -389,9 +389,7 @@ void pci_bridge_exitfn(PCIDevice *pci_dev)
     QLIST_REMOVE(&s->sec_bus, sibling);
     pci_bridge_region_del(s, s->windows);
     pci_bridge_region_cleanup(s, s->windows);
-    memory_region_destroy(&s->address_space_mem);
-    memory_region_destroy(&s->address_space_io);
-    /* qbus_free() is called automatically during device deletion */
+    /* object_unparent() is called automatically during device deletion */
 }
 
 /*

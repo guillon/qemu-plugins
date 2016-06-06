@@ -20,7 +20,6 @@
 #ifndef CPU_CRIS_H
 #define CPU_CRIS_H
 
-#include "config.h"
 #include "qemu-common.h"
 
 #define TARGET_LONG_BITS 32
@@ -28,10 +27,6 @@
 #define CPUArchState struct CPUCRISState
 
 #include "exec/cpu-defs.h"
-
-#define TARGET_HAS_ICE 1
-
-#define ELF_MACHINE	EM_CRIS
 
 #define EXCP_NMI        1
 #define EXCP_GURU       2
@@ -41,6 +36,10 @@
 
 /* CRIS-specific interrupt pending bits.  */
 #define CPU_INTERRUPT_NMI       CPU_INTERRUPT_TGT_EXT_3
+
+/* CRUS CPU device objects interrupt lines.  */
+#define CRIS_CPU_IRQ 0
+#define CRIS_CPU_NMI 1
 
 /* Register aliases. R0 - R15 */
 #define R_FP  8
@@ -106,6 +105,11 @@
 
 #define NB_MMU_MODES 2
 
+typedef struct {
+    uint32_t hi;
+    uint32_t lo;
+} TLBSet;
+
 typedef struct CPUCRISState {
 	uint32_t regs[16];
 	/* P0 - P15 are referred to as special registers in the docs.  */
@@ -149,7 +153,7 @@ typedef struct CPUCRISState {
 	uint32_t sregs[4][16];
 
 	/* Linear feedback shift reg in the mmu. Used to provide pseudo
-	   randomness for the 'hint' the mmu gives to sw for chosing valid
+	   randomness for the 'hint' the mmu gives to sw for choosing valid
 	   sets on TLB refills.  */
 	uint32_t mmu_rand_lfsr;
 
@@ -159,22 +163,18 @@ typedef struct CPUCRISState {
 	 *
 	 * One for I and another for D.
 	 */
-	struct
-	{
-		uint32_t hi;
-		uint32_t lo;
-	} tlbsets[2][4][16];
+        TLBSet tlbsets[2][4][16];
 
 	CPU_COMMON
 
-	/* Members after CPU_COMMON are preserved across resets.  */
-	void *load_info;
+    /* Members from load_info on are preserved across resets.  */
+    void *load_info;
 } CPUCRISState;
 
 #include "cpu-qom.h"
 
 CRISCPU *cpu_cris_init(const char *cpu_model);
-int cpu_cris_exec(CPUCRISState *s);
+int cpu_cris_exec(CPUState *cpu);
 /* you can call this signal handler from your SIGBUS and SIGSEGV
    signal handlers to inform the virtual CPU of exceptions. non zero
    is returned if the signal was handled by the virtual CPU.  */
@@ -219,33 +219,22 @@ enum {
 #define TARGET_PHYS_ADDR_SPACE_BITS 32
 #define TARGET_VIRT_ADDR_SPACE_BITS 32
 
-static inline CPUCRISState *cpu_init(const char *cpu_model)
-{
-    CRISCPU *cpu = cpu_cris_init(cpu_model);
-    if (cpu == NULL) {
-        return NULL;
-    }
-    return &cpu->env;
-}
+#define cpu_init(cpu_model) CPU(cpu_cris_init(cpu_model))
 
 #define cpu_exec cpu_cris_exec
-#define cpu_gen_code cpu_cris_gen_code
 #define cpu_signal_handler cpu_cris_signal_handler
-
-#define CPU_SAVE_VERSION 1
 
 /* MMU modes definitions */
 #define MMU_MODE0_SUFFIX _kernel
 #define MMU_MODE1_SUFFIX _user
 #define MMU_USER_IDX 1
-static inline int cpu_mmu_index (CPUCRISState *env)
+static inline int cpu_mmu_index (CPUCRISState *env, bool ifetch)
 {
 	return !!(env->pregs[PR_CCS] & U_FLAG);
 }
 
-int cpu_cris_handle_mmu_fault(CPUCRISState *env, target_ulong address, int rw,
+int cris_cpu_handle_mmu_fault(CPUState *cpu, vaddr address, int rw,
                               int mmu_idx);
-#define cpu_handle_mmu_fault cpu_cris_handle_mmu_fault
 
 /* Support function regs.  */
 #define SFR_RW_GC_CFG      0][0
@@ -271,11 +260,6 @@ static inline void cpu_get_tb_cpu_state(CPUCRISState *env, target_ulong *pc,
 
 #define cpu_list cris_cpu_list
 void cris_cpu_list(FILE *f, fprintf_function cpu_fprintf);
-
-static inline bool cpu_has_work(CPUState *cpu)
-{
-    return cpu->interrupt_request & (CPU_INTERRUPT_HARD | CPU_INTERRUPT_NMI);
-}
 
 #include "exec/exec-all.h"
 

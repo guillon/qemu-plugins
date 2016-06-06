@@ -2,441 +2,324 @@
 # QAPI visitor generator
 #
 # Copyright IBM, Corp. 2011
+# Copyright (C) 2014-2016 Red Hat, Inc.
 #
 # Authors:
 #  Anthony Liguori <aliguori@us.ibm.com>
 #  Michael Roth    <mdroth@linux.vnet.ibm.com>
+#  Markus Armbruster <armbru@redhat.com>
 #
-# This work is licensed under the terms of the GNU GPLv2.
-# See the COPYING.LIB file in the top-level directory.
+# This work is licensed under the terms of the GNU GPL, version 2.
+# See the COPYING file in the top-level directory.
 
-from ordereddict import OrderedDict
 from qapi import *
-import sys
-import os
-import getopt
-import errno
+import re
 
-def generate_visit_struct_fields(name, field_prefix, fn_prefix, members, base = None):
-    substructs = []
-    ret = ''
-    if not fn_prefix:
-        full_name = name
-    else:
-        full_name = "%s_%s" % (name, fn_prefix)
 
-    for argname, argentry, optional, structured in parse_args(members):
-        if structured:
-            if not fn_prefix:
-                nested_fn_prefix = argname
-            else:
-                nested_fn_prefix = "%s_%s" % (fn_prefix, argname)
+def gen_visit_decl(name, scalar=False):
+    c_type = c_name(name) + ' *'
+    if not scalar:
+        c_type += '*'
+    return mcgen('''
+void visit_type_%(c_name)s(Visitor *v, const char *name, %(c_type)sobj, Error **errp);
+''',
+                 c_name=c_name(name), c_type=c_type)
 
-            nested_field_prefix = "%s%s." % (field_prefix, argname)
-            ret += generate_visit_struct_fields(name, nested_field_prefix,
-                                                nested_fn_prefix, argentry)
 
-    ret += mcgen('''
+def gen_visit_members_decl(name):
+    return mcgen('''
 
-static void visit_type_%(full_name)s_fields(Visitor *m, %(name)s ** obj, Error **errp)
+void visit_type_%(c_name)s_members(Visitor *v, %(c_name)s *obj, Error **errp);
+''',
+                 c_name=c_name(name))
+
+
+def gen_visit_object_members(name, base, members, variants):
+    ret = mcgen('''
+
+void visit_type_%(c_name)s_members(Visitor *v, %(c_name)s *obj, Error **errp)
 {
     Error *err = NULL;
+
 ''',
-        name=name, full_name=full_name)
-    push_indent()
+                c_name=c_name(name))
 
     if base:
         ret += mcgen('''
-visit_start_implicit_struct(m, obj ? (void**) &(*obj)->%(c_name)s : NULL, sizeof(%(type)s), &err);
-if (!err) {
-    visit_type_%(type)s_fields(m, obj ? &(*obj)->%(c_prefix)s%(c_name)s : NULL, &err);
-    error_propagate(errp, err);
-    err = NULL;
-    visit_end_implicit_struct(m, &err);
-}
+    visit_type_%(c_type)s_members(v, (%(c_type)s *)obj, &err);
 ''',
-                     c_prefix=c_var(field_prefix),
-                     type=type_name(base), c_name=c_var('base'))
+                     c_type=base.c_name())
+        ret += gen_err_check()
 
-    for argname, argentry, optional, structured in parse_args(members):
-        if optional:
+    for memb in members:
+        if memb.optional:
             ret += mcgen('''
-visit_start_optional(m, obj ? &(*obj)->%(c_prefix)shas_%(c_name)s : NULL, "%(name)s", &err);
-if (obj && (*obj)->%(prefix)shas_%(c_name)s) {
+    if (visit_optional(v, "%(name)s", &obj->has_%(c_name)s)) {
 ''',
-                         c_prefix=c_var(field_prefix), prefix=field_prefix,
-                         c_name=c_var(argname), name=argname)
+                         name=memb.name, c_name=c_name(memb.name))
             push_indent()
-
-        if structured:
-            ret += generate_visit_struct_body(full_name, argname, argentry)
-        else:
-            ret += mcgen('''
-visit_type_%(type)s(m, obj ? &(*obj)->%(c_prefix)s%(c_name)s : NULL, "%(name)s", &err);
+        ret += mcgen('''
+    visit_type_%(c_type)s(v, "%(name)s", &obj->%(c_name)s, &err);
 ''',
-                         c_prefix=c_var(field_prefix), prefix=field_prefix,
-                         type=type_name(argentry), c_name=c_var(argname),
-                         name=argname)
-
-        if optional:
+                     c_type=memb.type.c_name(), name=memb.name,
+                     c_name=c_name(memb.name))
+        ret += gen_err_check()
+        if memb.optional:
             pop_indent()
             ret += mcgen('''
-}
-visit_end_optional(m, &err);
+    }
 ''')
 
-    pop_indent()
-    ret += mcgen('''
+    if variants:
+        ret += mcgen('''
+    switch (obj->%(c_name)s) {
+''',
+                     c_name=c_name(variants.tag_member.name))
 
+        for var in variants.variants:
+            ret += mcgen('''
+    case %(case)s:
+        visit_type_%(c_type)s_members(v, &obj->u.%(c_name)s, &err);
+        break;
+''',
+                         case=c_enum_const(variants.tag_member.type.name,
+                                           var.name,
+                                           variants.tag_member.type.prefix),
+                         c_type=var.type.c_name(), c_name=c_name(var.name))
+
+        ret += mcgen('''
+    default:
+        abort();
+    }
+''')
+
+    # 'goto out' produced for base, for each member, and if variants were
+    # present
+    if base or members or variants:
+        ret += mcgen('''
+
+out:
+''')
+    ret += mcgen('''
     error_propagate(errp, err);
 }
 ''')
     return ret
 
 
-def generate_visit_struct_body(field_prefix, name, members):
-    ret = mcgen('''
-if (!error_is_set(errp)) {
-''')
-    push_indent()
+def gen_visit_list(name, element_type):
+    # FIXME: if *obj is NULL on entry, and the first visit_next_list()
+    # assigns to *obj, while a later one fails, we should clean up *obj
+    # rather than leaving it non-NULL. As currently written, the caller must
+    # call qapi_free_FOOList() to avoid a memory leak of the partial FOOList.
+    return mcgen('''
 
-    if not field_prefix:
-        full_name = name
-    else:
-        full_name = "%s_%s" % (field_prefix, name)
+void visit_type_%(c_name)s(Visitor *v, const char *name, %(c_name)s **obj, Error **errp)
+{
+    Error *err = NULL;
+    GenericList *i, **prev;
 
-    if len(field_prefix):
-        ret += mcgen('''
-Error **errp = &err; /* from outer scope */
-Error *err = NULL;
-visit_start_struct(m, NULL, "", "%(name)s", 0, &err);
-''',
-                name=name)
-    else:
-        ret += mcgen('''
-Error *err = NULL;
-visit_start_struct(m, (void **)obj, "%(name)s", name, sizeof(%(name)s), &err);
-''',
-                name=name)
-
-    ret += mcgen('''
-if (!err) {
-    if (!obj || *obj) {
-        visit_type_%(name)s_fields(m, obj, &err);
-        error_propagate(errp, err);
-        err = NULL;
+    visit_start_list(v, name, &err);
+    if (err) {
+        goto out;
     }
-''',
-        name=full_name)
 
-    pop_indent()
-    ret += mcgen('''
-        /* Always call end_struct if start_struct succeeded.  */
-        visit_end_struct(m, &err);
+    for (prev = (GenericList **)obj;
+         !err && (i = visit_next_list(v, prev, sizeof(**obj))) != NULL;
+         prev = &i) {
+        %(c_name)s *native_i = (%(c_name)s *)i;
+        visit_type_%(c_elt_type)s(v, NULL, &native_i->value, &err);
     }
+
+    visit_end_list(v);
+out:
     error_propagate(errp, err);
 }
-''')
-    return ret
-
-def generate_visit_struct(expr):
-
-    name = expr['type']
-    members = expr['data']
-    base = expr.get('base')
-
-    ret = generate_visit_struct_fields(name, "", "", members, base)
-
-    ret += mcgen('''
-
-void visit_type_%(name)s(Visitor *m, %(name)s ** obj, const char *name, Error **errp)
-{
 ''',
-                name=name)
+                 c_name=c_name(name), c_elt_type=element_type.c_name())
 
-    push_indent()
-    ret += generate_visit_struct_body("", name, members)
-    pop_indent()
 
-    ret += mcgen('''
-}
-''')
-    return ret
-
-def generate_visit_list(name, members):
+def gen_visit_enum(name):
     return mcgen('''
 
-void visit_type_%(name)sList(Visitor *m, %(name)sList ** obj, const char *name, Error **errp)
+void visit_type_%(c_name)s(Visitor *v, const char *name, %(c_name)s *obj, Error **errp)
 {
-    GenericList *i, **prev = (GenericList **)obj;
+    int value = *obj;
+    visit_type_enum(v, name, &value, %(c_name)s_lookup, errp);
+    *obj = value;
+}
+''',
+                 c_name=c_name(name))
+
+
+def gen_visit_alternate(name, variants):
+    promote_int = 'true'
+    ret = ''
+    for var in variants.variants:
+        if var.type.alternate_qtype() == 'QTYPE_QINT':
+            promote_int = 'false'
+
+    ret += mcgen('''
+
+void visit_type_%(c_name)s(Visitor *v, const char *name, %(c_name)s **obj, Error **errp)
+{
     Error *err = NULL;
 
-    if (!error_is_set(errp)) {
-        visit_start_list(m, name, &err);
-        if (!err) {
-            for (; (i = visit_next_list(m, prev, &err)) != NULL; prev = &i) {
-                %(name)sList *native_i = (%(name)sList *)i;
-                visit_type_%(name)s(m, &native_i->value, NULL, &err);
-            }
-            error_propagate(errp, err);
-            err = NULL;
-
-            /* Always call end_list if start_list succeeded.  */
-            visit_end_list(m, &err);
-        }
-        error_propagate(errp, err);
+    visit_start_alternate(v, name, (GenericAlternate **)obj, sizeof(**obj),
+                          %(promote_int)s, &err);
+    if (err) {
+        goto out;
     }
-}
+    switch ((*obj)->type) {
 ''',
-                name=name)
+                 c_name=c_name(name), promote_int=promote_int)
 
-def generate_visit_enum(name, members):
-    return mcgen('''
-
-void visit_type_%(name)s(Visitor *m, %(name)s * obj, const char *name, Error **errp)
-{
-    visit_type_enum(m, (int *)obj, %(name)s_lookup, "%(name)s", name, errp);
-}
-''',
-                 name=name)
-
-def generate_visit_anon_union(name, members):
-    ret = mcgen('''
-
-void visit_type_%(name)s(Visitor *m, %(name)s ** obj, const char *name, Error **errp)
-{
-    Error *err = NULL;
-
-    if (!error_is_set(errp)) {
-        visit_start_implicit_struct(m, (void**) obj, sizeof(%(name)s), &err);
-        visit_get_next_type(m, (int*) &(*obj)->kind, %(name)s_qtypes, name, &err);
-        switch ((*obj)->kind) {
-''',
-    name=name)
-
-    for key in members:
-        assert (members[key] in builtin_types
-            or find_struct(members[key])
-            or find_union(members[key])), "Invalid anonymous union member"
-
+    for var in variants.variants:
         ret += mcgen('''
-        case %(abbrev)s_KIND_%(enum)s:
-            visit_type_%(c_type)s(m, &(*obj)->%(c_name)s, name, &err);
+    case %(case)s:
+''',
+                     case=var.type.alternate_qtype())
+        if isinstance(var.type, QAPISchemaObjectType):
+            ret += mcgen('''
+        visit_start_struct(v, name, NULL, 0, &err);
+        if (err) {
             break;
-''',
-                abbrev = de_camel_case(name).upper(),
-                enum = c_fun(de_camel_case(key),False).upper(),
-                c_type = type_name(members[key]),
-                c_name = c_fun(key))
-
-    ret += mcgen('''
-        default:
-            abort();
         }
+        visit_type_%(c_type)s_members(v, &(*obj)->u.%(c_name)s, &err);
         error_propagate(errp, err);
         err = NULL;
-        visit_end_implicit_struct(m, &err);
-    }
-}
+        visit_end_struct(v, &err);
+''',
+                         c_type=var.type.c_name(),
+                         c_name=c_name(var.name))
+        else:
+            ret += mcgen('''
+        visit_type_%(c_type)s(v, name, &(*obj)->u.%(c_name)s, &err);
+''',
+                         c_type=var.type.c_name(),
+                         c_name=c_name(var.name))
+        ret += mcgen('''
+        break;
 ''')
+
+    ret += mcgen('''
+    default:
+        error_setg(&err, QERR_INVALID_PARAMETER_TYPE, name ? name : "null",
+                   "%(name)s");
+    }
+    visit_end_alternate(v);
+out:
+    error_propagate(errp, err);
+}
+''',
+                 name=name)
 
     return ret
 
 
-def generate_visit_union(expr):
+def gen_visit_object(name, base, members, variants):
+    # FIXME: if *obj is NULL on entry, and visit_start_struct() assigns to
+    # *obj, but then visit_type_FOO_members() fails, we should clean up *obj
+    # rather than leaving it non-NULL. As currently written, the caller must
+    # call qapi_free_FOO() to avoid a memory leak of the partial FOO.
+    return mcgen('''
 
-    name = expr['union']
-    members = expr['data']
-
-    base = expr.get('base')
-    discriminator = expr.get('discriminator')
-
-    if discriminator == {}:
-        assert not base
-        return generate_visit_anon_union(name, members)
-
-    ret = generate_visit_enum('%sKind' % name, members.keys())
-
-    if base:
-        base_fields = find_struct(base)['data']
-        if discriminator:
-            base_fields = base_fields.copy()
-            del base_fields[discriminator]
-        ret += generate_visit_struct_fields(name, "", "", base_fields)
-
-    ret += mcgen('''
-
-void visit_type_%(name)s(Visitor *m, %(name)s ** obj, const char *name, Error **errp)
+void visit_type_%(c_name)s(Visitor *v, const char *name, %(c_name)s **obj, Error **errp)
 {
     Error *err = NULL;
 
-    if (!error_is_set(errp)) {
-        visit_start_struct(m, (void **)obj, "%(name)s", name, sizeof(%(name)s), &err);
-        if (!err) {
-            if (obj && *obj) {
-''',
-                 name=name)
-
-
-    push_indent()
-    push_indent()
-    push_indent()
-
-    if base:
-        ret += mcgen('''
-    visit_type_%(name)s_fields(m, obj, &err);
-''',
-            name=name)
-
-    pop_indent()
-
-    if not discriminator:
-        desc_type = "type"
-    else:
-        desc_type = discriminator
-    ret += mcgen('''
-        visit_type_%(name)sKind(m, &(*obj)->kind, "%(type)s", &err);
-        if (!err) {
-            switch ((*obj)->kind) {
-''',
-                 name=name, type=desc_type)
-
-    for key in members:
-        if not discriminator:
-            fmt = 'visit_type_%(c_type)s(m, &(*obj)->%(c_name)s, "data", &err);'
-        else:
-            fmt = '''visit_start_implicit_struct(m, (void**) &(*obj)->%(c_name)s, sizeof(%(c_type)s), &err);
-                if (!err) {
-                    visit_type_%(c_type)s_fields(m, &(*obj)->%(c_name)s, &err);
-                    error_propagate(errp, err);
-                    err = NULL;
-                    visit_end_implicit_struct(m, &err);
-                }'''
-
-        ret += mcgen('''
-            case %(abbrev)s_KIND_%(enum)s:
-                ''' + fmt + '''
-                break;
-''',
-                abbrev = de_camel_case(name).upper(),
-                enum = c_fun(de_camel_case(key),False).upper(),
-                c_type=type_name(members[key]),
-                c_name=c_fun(key))
-
-    ret += mcgen('''
-            default:
-                abort();
-            }
-        }
-        error_propagate(errp, err);
-        err = NULL;
+    visit_start_struct(v, name, (void **)obj, sizeof(%(c_name)s), &err);
+    if (err) {
+        goto out;
     }
-''')
-    pop_indent()
-    ret += mcgen('''
-        /* Always call end_struct if start_struct succeeded.  */
-        visit_end_struct(m, &err);
+    if (!*obj) {
+        goto out_obj;
     }
+    visit_type_%(c_name)s_members(v, *obj, &err);
+    error_propagate(errp, err);
+    err = NULL;
+out_obj:
+    visit_end_struct(v, &err);
+out:
     error_propagate(errp, err);
 }
-''')
-
-    pop_indent();
-    ret += mcgen('''
-}
-''')
-
-    return ret
-
-def generate_declaration(name, members, genlist=True, builtin_type=False):
-    ret = ""
-    if not builtin_type:
-        ret += mcgen('''
-
-void visit_type_%(name)s(Visitor *m, %(name)s ** obj, const char *name, Error **errp);
 ''',
-                    name=name)
+                 c_name=c_name(name))
 
-    if genlist:
-        ret += mcgen('''
-void visit_type_%(name)sList(Visitor *m, %(name)sList ** obj, const char *name, Error **errp);
-''',
-                 name=name)
 
-    return ret
+class QAPISchemaGenVisitVisitor(QAPISchemaVisitor):
+    def __init__(self):
+        self.decl = None
+        self.defn = None
+        self._btin = None
 
-def generate_enum_declaration(name, members, genlist=True):
-    ret = ""
-    if genlist:
-        ret += mcgen('''
-void visit_type_%(name)sList(Visitor *m, %(name)sList ** obj, const char *name, Error **errp);
-''',
-                     name=name)
+    def visit_begin(self, schema):
+        self.decl = ''
+        self.defn = ''
+        self._btin = guardstart('QAPI_VISIT_BUILTIN')
 
-    return ret
+    def visit_end(self):
+        # To avoid header dependency hell, we always generate
+        # declarations for built-in types in our header files and
+        # simply guard them.  See also do_builtins (command line
+        # option -b).
+        self._btin += guardend('QAPI_VISIT_BUILTIN')
+        self.decl = self._btin + self.decl
+        self._btin = None
 
-def generate_decl_enum(name, members, genlist=True):
-    return mcgen('''
+    def visit_enum_type(self, name, info, values, prefix):
+        # Special case for our lone builtin enum type
+        # TODO use something cleaner than existence of info
+        if not info:
+            self._btin += gen_visit_decl(name, scalar=True)
+            if do_builtins:
+                self.defn += gen_visit_enum(name)
+        else:
+            self.decl += gen_visit_decl(name, scalar=True)
+            self.defn += gen_visit_enum(name)
 
-void visit_type_%(name)s(Visitor *m, %(name)s * obj, const char *name, Error **errp);
-''',
-                name=name)
+    def visit_array_type(self, name, info, element_type):
+        decl = gen_visit_decl(name)
+        defn = gen_visit_list(name, element_type)
+        if isinstance(element_type, QAPISchemaBuiltinType):
+            self._btin += decl
+            if do_builtins:
+                self.defn += defn
+        else:
+            self.decl += decl
+            self.defn += defn
 
-try:
-    opts, args = getopt.gnu_getopt(sys.argv[1:], "chbp:o:",
-                                   ["source", "header", "builtins", "prefix=",
-                                    "output-dir="])
-except getopt.GetoptError, err:
-    print str(err)
-    sys.exit(1)
+    def visit_object_type(self, name, info, base, members, variants):
+        # Nothing to do for the special empty builtin
+        if name == 'q_empty':
+            return
+        self.decl += gen_visit_members_decl(name)
+        self.defn += gen_visit_object_members(name, base, members, variants)
+        # TODO Worth changing the visitor signature, so we could
+        # directly use rather than repeat type.is_implicit()?
+        if not name.startswith('q_'):
+            # only explicit types need an allocating visit
+            self.decl += gen_visit_decl(name)
+            self.defn += gen_visit_object(name, base, members, variants)
 
-output_dir = ""
-prefix = ""
-c_file = 'qapi-visit.c'
-h_file = 'qapi-visit.h'
+    def visit_alternate_type(self, name, info, variants):
+        self.decl += gen_visit_decl(name)
+        self.defn += gen_visit_alternate(name, variants)
 
-do_c = False
-do_h = False
+# If you link code generated from multiple schemata, you want only one
+# instance of the code for built-in types.  Generate it only when
+# do_builtins, enabled by command line option -b.  See also
+# QAPISchemaGenVisitVisitor.visit_end().
 do_builtins = False
 
+(input_file, output_dir, do_c, do_h, prefix, opts) = \
+    parse_command_line("b", ["builtins"])
+
 for o, a in opts:
-    if o in ("-p", "--prefix"):
-        prefix = a
-    elif o in ("-o", "--output-dir"):
-        output_dir = a + "/"
-    elif o in ("-c", "--source"):
-        do_c = True
-    elif o in ("-h", "--header"):
-        do_h = True
-    elif o in ("-b", "--builtins"):
+    if o in ("-b", "--builtins"):
         do_builtins = True
 
-if not do_c and not do_h:
-    do_c = True
-    do_h = True
-
-c_file = output_dir + prefix + c_file
-h_file = output_dir + prefix + h_file
-
-try:
-    os.makedirs(output_dir)
-except os.error, e:
-    if e.errno != errno.EEXIST:
-        raise
-
-def maybe_open(really, name, opt):
-    if really:
-        return open(name, opt)
-    else:
-        import StringIO
-        return StringIO.StringIO()
-
-fdef = maybe_open(do_c, c_file, 'w')
-fdecl = maybe_open(do_h, h_file, 'w')
-
-fdef.write(mcgen('''
-/* THIS FILE IS AUTOMATICALLY GENERATED, DO NOT MODIFY */
-
+c_comment = '''
 /*
  * schema-defined QAPI visitor functions
  *
@@ -449,17 +332,10 @@ fdef.write(mcgen('''
  * See the COPYING.LIB file in the top-level directory.
  *
  */
-
-#include "qemu-common.h"
-#include "%(header)s"
-''',
-                 header=basename(h_file)))
-
-fdecl.write(mcgen('''
-/* THIS FILE IS AUTOMATICALLY GENERATED, DO NOT MODIFY */
-
+'''
+h_comment = '''
 /*
- * schema-defined QAPI visitor function
+ * schema-defined QAPI visitor functions
  *
  * Copyright IBM, Corp. 2011
  *
@@ -470,66 +346,32 @@ fdecl.write(mcgen('''
  * See the COPYING.LIB file in the top-level directory.
  *
  */
+'''
 
-#ifndef %(guard)s
-#define %(guard)s
+(fdef, fdecl) = open_output(output_dir, do_c, do_h, prefix,
+                            'qapi-visit.c', 'qapi-visit.h',
+                            c_comment, h_comment)
 
+fdef.write(mcgen('''
+#include "qemu/osdep.h"
+#include "qemu-common.h"
+#include "qapi/error.h"
+#include "%(prefix)sqapi-visit.h"
+''',
+                 prefix=prefix))
+
+fdecl.write(mcgen('''
 #include "qapi/visitor.h"
+#include "qapi/qmp/qerror.h"
 #include "%(prefix)sqapi-types.h"
 
 ''',
-                  prefix=prefix, guard=guardname(h_file)))
+                  prefix=prefix))
 
-exprs = parse_schema(sys.stdin)
+schema = QAPISchema(input_file)
+gen = QAPISchemaGenVisitVisitor()
+schema.visit(gen)
+fdef.write(gen.defn)
+fdecl.write(gen.decl)
 
-# to avoid header dependency hell, we always generate declarations
-# for built-in types in our header files and simply guard them
-fdecl.write(guardstart("QAPI_VISIT_BUILTIN_VISITOR_DECL"))
-for typename in builtin_types:
-    fdecl.write(generate_declaration(typename, None, genlist=True,
-                                     builtin_type=True))
-fdecl.write(guardend("QAPI_VISIT_BUILTIN_VISITOR_DECL"))
-
-# ...this doesn't work for cases where we link in multiple objects that
-# have the functions defined, so we use -b option to provide control
-# over these cases
-if do_builtins:
-    fdef.write(guardstart("QAPI_VISIT_BUILTIN_VISITOR_DEF"))
-    for typename in builtin_types:
-        fdef.write(generate_visit_list(typename, None))
-    fdef.write(guardend("QAPI_VISIT_BUILTIN_VISITOR_DEF"))
-
-for expr in exprs:
-    if expr.has_key('type'):
-        ret = generate_visit_struct(expr)
-        ret += generate_visit_list(expr['type'], expr['data'])
-        fdef.write(ret)
-
-        ret = generate_declaration(expr['type'], expr['data'])
-        fdecl.write(ret)
-    elif expr.has_key('union'):
-        ret = generate_visit_union(expr)
-        ret += generate_visit_list(expr['union'], expr['data'])
-        fdef.write(ret)
-
-        ret = generate_decl_enum('%sKind' % expr['union'], expr['data'].keys())
-        ret += generate_declaration(expr['union'], expr['data'])
-        fdecl.write(ret)
-    elif expr.has_key('enum'):
-        ret = generate_visit_list(expr['enum'], expr['data'])
-        ret += generate_visit_enum(expr['enum'], expr['data'])
-        fdef.write(ret)
-
-        ret = generate_decl_enum(expr['enum'], expr['data'])
-        ret += generate_enum_declaration(expr['enum'], expr['data'])
-        fdecl.write(ret)
-
-fdecl.write('''
-#endif
-''')
-
-fdecl.flush()
-fdecl.close()
-
-fdef.flush()
-fdef.close()
+close_output(fdef, fdecl)

@@ -31,206 +31,161 @@
 #include <unistd.h>
 
 #include "tcg-op.h"
-#include "exec/def-helper.h"
 #include "tcg-plugin.h"
 
-#ifndef CONFIG_CAPSTONE
-void tpi_init(TCGPluginInterface *tpi)
-{
-    TPI_INIT_VERSION_GENERIC(*tpi);
-    fprintf(tpi->output,
-            "# WARNING: dyncount plugin disabled.\n"
-            "#          capstone was not found or forced no at qemu configure time.\n");
-}
-#else
-
+#ifdef CONFIG_CAPSTONE
 #include <capstone.h>
-
 /* Check compatibility with capstone 3.x. */
 #if CS_API_MAJOR < 3
 #error "dyncount plugin required capstone library >= 3.x. Please install from http://www.capstone-engine.org/."
 #endif
 
-/* Undef this for DEBUGGING plugin. */
-/*#define DEBUG_PLUGIN 1*/
+#if defined(TARGET_I386)
+#define CS_ARCH CS_ARCH_X86
+#define CS_MODE CS_MODE_32
+#define CS_GROUPS_NAME "x86"
+#elif defined(TARGET_X86_64)
+#define CS_ARCH CS_ARCH_X86
+#define CS_MODE CS_MODE_64
+#define CS_GROUPS_NAME "x86"
+#else
+#define CS_GROUPS_NAME ""
+#endif
 
-#define MAX_GROUPS_COUNT 512
+#endif /* CONFIG_CAPSTONE */
+
+#if !defined(CONFIG_CAPSTONE) || !defined(CS_ARCH)
+void tpi_init(TCGPluginInterface *tpi)
+{
+    TPI_INIT_VERSION_GENERIC(tpi);
+#if !defined(CONFIG_CAPSTONE)
+    fprintf(tpi->output,
+            "# WARNING: dyncount plugin disabled.\n"
+            "#          capstone library >= 3.x was not found when configuring QEMU.\n"
+            "#          Install capstone from http://www.capstone-engine.org/\n"
+            "#          and reconfigure/recompile QEMU.\n"
+        );
+#elsif !defined(CS_ARCH)
+    fprintf(tpi->output,
+            "# WARNING: dyncount plugin disabled.\n"
+            "           This plugin is not available for target " TARGET_NAME ".\n"
+        );
+#endif
+}
+#else
+
+#define MAX_GROUPS_COUNT 16384
 #define MAX_OPS_COUNT 16384
 
 static csh cs_handle;
 static uint64_t *group_count;
 static uint64_t *op_count;
-static uint64_t *icount_total;
-
-static void pre_tb_helper_code(const TCGPluginInterface *tpi,
-                               TPIHelperInfo info, uint64_t address,
-                               uint64_t data1, uint64_t data2)
-{
-    icount_total[info.cpu_index] += info.icount;
-}
+static uint64_t icount_total;
 
 static void cpus_stopped(const TCGPluginInterface *tpi)
 {
-    uint64_t total = 0;
     unsigned int i;
 
-    fprintf(tpi->output, "\nInstructions per mnemonic:\n");
+    fprintf(tpi->output, "\nmnemonics_count:\n");
     for (i = 0; i < MAX_OPS_COUNT; i++) {
         if (op_count[i] > 0) {
-            const char *op_name;
-            op_name = cs_insn_name(cs_handle, i);
             fprintf(tpi->output,
                     "  %s: %"PRIu64"\n",
-                    op_name,
+                    cs_insn_name(cs_handle, i),
                     op_count[i]);
         }
     }
-    fprintf(tpi->output, "\nInstructions per group:\n");
+    fprintf(tpi->output, "\ngroups_count:\n");
     for (i = 0; i < MAX_GROUPS_COUNT; i++) {
         if (group_count[i] > 0) {
-            const char *group_name;
-            group_name = i == 0 ? "unclassified":
-                cs_group_name(cs_handle, i);
-            fprintf(tpi->output,
-                    "  %s: %"PRIu64"\n",
-                    group_name,
-                    group_count[i]);
+            if (i == 0) {
+                fprintf(tpi->output,
+                        "  nogroup: %"PRIu64"\n",
+                        group_count[i]);
+            } else {
+                fprintf(tpi->output,
+                        "  cs.grp.%s.%s: %"PRIu64"\n",
+                        i < 128 ? "gen": CS_GROUPS_NAME,
+                        cs_group_name(cs_handle, i),
+                        group_count[i]);
+            }
         }
     }
-    for (i = 0; i < tpi->nb_cpus; i++) {
-        total += icount_total[i];
-    }
-    fprintf(tpi->output, "\nInstructions count: %"PRIu64"\n", total);
+    fprintf(tpi->output, "\ninstructions_total: %"PRIu64"\n", icount_total);
 }
 
-static void update_group_count(uint32_t group, uint32_t count)
+static void update_counters(uint64_t counter_ptr, uint64_t count,
+                            uint64_t counter_ptr2)
 {
-    group_count[group] += count;
+    *((uint64_t *)counter_ptr) += count;
+    if (counter_ptr2 != 0) *((uint64_t *)counter_ptr2) += count;
 }
 
-static void update_op_count(uint32_t op, uint32_t count)
+static void gen_update_counters(const TCGPluginInterface *tpi, uint64_t *counter_ptr, uint64_t count, uint64_t *counter_ptr2)
 {
-    op_count[op] += count;
+    TCGArg args[3];
+    TCGv_i64 tcgv_counter_ptr;
+    TCGv_i64 tcgv_count;
+    TCGv_i64 tcgv_counter_ptr2;
+
+    tcgv_counter_ptr = tcg_const_i64((uint64_t)(intptr_t)counter_ptr);
+    tcgv_count = tcg_const_i64(1);
+    tcgv_counter_ptr2 = tcg_const_i64((uint64_t)(intptr_t)counter_ptr2);
+
+    args[0] = GET_TCGV_I64(tcgv_counter_ptr);
+    args[1] = GET_TCGV_I64(tcgv_count);
+    args[2] = GET_TCGV_I64(tcgv_counter_ptr2);
+
+    tcg_gen_callN(tpi->tcg_ctx, update_counters, TCG_CALL_DUMMY_ARG, 3, args);
+
+    tcg_temp_free_i64(tcgv_counter_ptr2);
+    tcg_temp_free_i64(tcgv_counter_ptr);
+    tcg_temp_free_i64(tcgv_count);
 }
 
-static void gen_update_group_helper(const TCGPluginInterface *tpi, uint32_t group, uint32_t count)
-{
-    int sizemask = 0;
-    TCGArg args[2];
-
-    TCGv_i32 tcgv_group;
-    TCGv_i32 tcgv_count;
-
-    if (group >= MAX_GROUPS_COUNT)
-        return;
-
-    tcgv_group = tcg_const_i32(group);
-    tcgv_count = tcg_const_i32(1);
-
-    args[0] = GET_TCGV_I32(tcgv_group);
-    args[1] = GET_TCGV_I32(tcgv_count);
-
-    dh_sizemask(void, 0);
-    dh_sizemask(i32, 1);
-    dh_sizemask(i32, 2);
-
-    tcg_gen_helperN(update_group_count, 0, sizemask, TCG_CALL_DUMMY_ARG, 2, args);
-
-    tcg_temp_free_i32(tcgv_group);
-    tcg_temp_free_i32(tcgv_count);
-}
-
-static void gen_update_op_helper(const TCGPluginInterface *tpi, uint32_t op, uint32_t count)
-{
-    int sizemask = 0;
-    TCGArg args[2];
-
-    TCGv_i32 tcgv_op;
-    TCGv_i32 tcgv_count;
-
-    if (op >= MAX_OPS_COUNT)
-        return;
-
-    tcgv_op = tcg_const_i32(op);
-    tcgv_count = tcg_const_i32(1);
-
-    args[0] = GET_TCGV_I32(tcgv_op);
-    args[1] = GET_TCGV_I32(tcgv_count);
-
-    dh_sizemask(void, 0);
-    dh_sizemask(i32, 1);
-    dh_sizemask(i32, 2);
-
-    tcg_gen_helperN(update_op_count, 0, sizemask, TCG_CALL_DUMMY_ARG, 2, args);
-
-    tcg_temp_free_i32(tcgv_op);
-    tcg_temp_free_i32(tcgv_count);
-}
-
-static void decode_instr(const TCGPluginInterface *tpi, uint64_t pc)
+static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_opcode)
 {
     size_t count;
     cs_insn *insns;
 
-    count = cs_disasm(cs_handle, (void *)(intptr_t)pc, 16,
-                      pc, 1, &insns);
+    if (tpi_opcode->operator != INDEX_op_insn_start) return;
+
+    count = cs_disasm(cs_handle, (void *)(intptr_t)tpi_opcode->pc, 16,
+                      tpi_opcode->pc, 1, &insns);
     if (count > 0) {
         cs_insn *insn = &insns[0];
         cs_detail *detail = insn->detail;
-#ifdef DEBUG_PLUGIN
-        fprintf(tpi->output, "0x%"PRIx64":\t%s\t\t%s",
-                insn->address,
-                insn->mnemonic,
-                insn->op_str);
-#endif
-        gen_update_op_helper(tpi, insn->id, 1);
+        assert(insn->id < MAX_OPS_COUNT);
+        gen_update_counters(tpi, &op_count[insn->id], 1, &icount_total);
         if (detail->groups_count > 0) {
             int n;
-            int group;
-#ifdef DEBUG_PLUGIN
-            fprintf(tpi->output, "\tgroups:");
-#endif
             for (n = 0; n < detail->groups_count; n++) {
-                group = detail->groups[n];
-#ifdef DEBUG_PLUGIN
-                fprintf(tpi->output, " %s", cs_group_name(cs_handle, group));
-#endif
-                gen_update_group_helper(tpi, group, 1);
+                int group = detail->groups[n];
+                assert(group < MAX_GROUPS_COUNT);
+                gen_update_counters(tpi, &group_count[group], 1, NULL);
             }
-
         } else {
-            gen_update_group_helper(tpi, 0, 1);
+            gen_update_counters(tpi, &group_count[0], 1, NULL);
         }
-#ifdef DEBUG_PLUGIN
-        fprintf(tpi->output, "\n");
-#endif
         cs_free(insn, count);
     } else {
-        fprintf(tpi->output, "tcg/plugins/dyncount: unable to disassnble instruction at PC 0x%"PRIx64"\n", pc);
+        fprintf(tpi->output, "tcg/plugins/dyncount: unable to disassnble instruction at PC 0x%"PRIx64"\n", tpi_opcode->pc);
     }
 }
 
 void tpi_init(TCGPluginInterface *tpi)
 {
-    TPI_INIT_VERSION_GENERIC(*tpi);
+    TPI_INIT_VERSION_GENERIC(tpi);
+    TPI_DECL_FUNC_3(tpi, update_counters, void, i64, i64, i64);
 
-#if defined(TARGET_X86_64)
-    if (cs_open(CS_ARCH_X86, CS_MODE_64, &cs_handle) != CS_ERR_OK)
+    if (cs_open(CS_ARCH, CS_MODE, &cs_handle) != CS_ERR_OK)
         abort();
-#elif defined(TARGET_I386)
-    if (cs_open(CS_ARCH_X86, CS_MODE_32, &cs_handle) != CS_ERR_OK)
-        abort();
-#else
-#error "dyncount plugin currently works only for: TARGET_x86_64/TARGET_i386"
-#endif
 
     cs_option(cs_handle, CS_OPT_DETAIL, CS_OPT_ON);
     
-    tpi->pre_tb_helper_code = pre_tb_helper_code;
     tpi->cpus_stopped = cpus_stopped;
-    tpi->decode_instr  = decode_instr;
+    tpi->after_gen_opc = after_gen_opc;
 
-    icount_total = g_malloc0(tpi->nb_cpus * sizeof(uint64_t));
     group_count = g_malloc0(MAX_GROUPS_COUNT * sizeof(uint64_t));
     op_count = g_malloc0(MAX_OPS_COUNT * sizeof(uint64_t));
 }

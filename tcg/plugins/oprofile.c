@@ -223,7 +223,7 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
 
 void tpi_init(TCGPluginInterface *tpi)
 {
-    TPI_INIT_VERSION_GENERIC(*tpi);
+    TPI_INIT_VERSION_GENERIC(tpi);
     tpi->pre_tb_helper_code = tb_helper_func;
     tpi->pre_tb_helper_data = tb_helper_data;
     tpi->cpus_stopped = cpus_stopped;

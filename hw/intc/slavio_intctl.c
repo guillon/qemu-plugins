@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "hw/sparc/sun4m.h"
 #include "monitor/monitor.h"
 #include "hw/sysbus.h"
@@ -272,7 +273,7 @@ static void slavio_check_interrupts(SLAVIO_INTCTLState *s, int set_irqs)
             CPU_IRQ_TIMER_IN;
         if (i == s->target_cpu) {
             for (j = 0; j < 32; j++) {
-                if ((s->intregm_pending & (1 << j)) && intbit_to_level[j]) {
+                if ((s->intregm_pending & (1U << j)) && intbit_to_level[j]) {
                     s->slaves[i].intreg_pending |= 1 << intbit_to_level[j];
                 }
             }
@@ -381,8 +382,7 @@ static const VMStateDescription vmstate_intctl_cpu = {
     .name ="slavio_intctl_cpu",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT32(intreg_pending, SLAVIO_CPUINTCTLState),
         VMSTATE_END_OF_LIST()
     }
@@ -392,9 +392,8 @@ static const VMStateDescription vmstate_intctl = {
     .name ="slavio_intctl",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .post_load = vmstate_intctl_post_load,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_STRUCT_ARRAY(slaves, SLAVIO_INTCTLState, MAX_CPUS, 1,
                              vmstate_intctl_cpu, SLAVIO_CPUINTCTLState),
         VMSTATE_UINT32(intregm_pending, SLAVIO_INTCTLState),

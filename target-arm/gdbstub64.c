@@ -16,7 +16,7 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
-#include "config.h"
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "exec/gdbstub.h"
 
@@ -32,12 +32,10 @@ int aarch64_cpu_gdb_read_register(CPUState *cs, uint8_t *mem_buf, int n)
     switch (n) {
     case 31:
         return gdb_get_reg64(mem_buf, env->xregs[31]);
-        break;
     case 32:
         return gdb_get_reg64(mem_buf, env->pc);
-        break;
     case 33:
-        return gdb_get_reg32(mem_buf, env->pstate);
+        return gdb_get_reg32(mem_buf, pstate_read(env));
     }
     /* Unknown register.  */
     return 0;
@@ -65,7 +63,7 @@ int aarch64_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
         return 8;
     case 33:
         /* CPSR */
-        env->pstate = tmp;
+        pstate_write(env, tmp);
         return 4;
     }
     /* Unknown register.  */

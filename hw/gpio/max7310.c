@@ -7,10 +7,15 @@
  * This file is licensed under GNU GPL.
  */
 
+#include "qemu/osdep.h"
 #include "hw/i2c/i2c.h"
 
-typedef struct {
-    I2CSlave i2c;
+#define TYPE_MAX7310 "max7310"
+#define MAX7310(obj) OBJECT_CHECK(MAX7310State, (obj), TYPE_MAX7310)
+
+typedef struct MAX7310State {
+    I2CSlave parent_obj;
+
     int i2c_command_byte;
     int len;
 
@@ -25,7 +30,8 @@ typedef struct {
 
 static void max7310_reset(DeviceState *dev)
 {
-    MAX7310State *s = FROM_I2C_SLAVE(MAX7310State, I2C_SLAVE(dev));
+    MAX7310State *s = MAX7310(dev);
+
     s->level &= s->direction;
     s->direction = 0xff;
     s->polarity = 0xf0;
@@ -35,7 +41,7 @@ static void max7310_reset(DeviceState *dev)
 
 static int max7310_rx(I2CSlave *i2c)
 {
-    MAX7310State *s = (MAX7310State *) i2c;
+    MAX7310State *s = MAX7310(i2c);
 
     switch (s->command) {
     case 0x00:	/* Input port */
@@ -70,7 +76,7 @@ static int max7310_rx(I2CSlave *i2c)
 
 static int max7310_tx(I2CSlave *i2c, uint8_t data)
 {
-    MAX7310State *s = (MAX7310State *) i2c;
+    MAX7310State *s = MAX7310(i2c);
     uint8_t diff;
     int line;
 
@@ -91,7 +97,7 @@ static int max7310_tx(I2CSlave *i2c, uint8_t data)
     case 0x01:	/* Output port */
         for (diff = (data ^ s->level) & ~s->direction; diff;
                         diff &= ~(1 << line)) {
-            line = ffs(diff) - 1;
+            line = ctz32(diff);
             if (s->handler[line])
                 qemu_set_irq(s->handler[line], (data >> line) & 1);
         }
@@ -125,7 +131,7 @@ static int max7310_tx(I2CSlave *i2c, uint8_t data)
 
 static void max7310_event(I2CSlave *i2c, enum i2c_event event)
 {
-    MAX7310State *s = (MAX7310State *) i2c;
+    MAX7310State *s = MAX7310(i2c);
     s->len = 0;
 
     switch (event) {
@@ -147,8 +153,7 @@ static const VMStateDescription vmstate_max7310 = {
     .name = "max7310",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_INT32(i2c_command_byte, MAX7310State),
         VMSTATE_INT32(len, MAX7310State),
         VMSTATE_UINT8(level, MAX7310State),
@@ -156,7 +161,7 @@ static const VMStateDescription vmstate_max7310 = {
         VMSTATE_UINT8(polarity, MAX7310State),
         VMSTATE_UINT8(status, MAX7310State),
         VMSTATE_UINT8(command, MAX7310State),
-        VMSTATE_I2C_SLAVE(i2c, MAX7310State),
+        VMSTATE_I2C_SLAVE(parent_obj, MAX7310State),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -177,7 +182,7 @@ static void max7310_gpio_set(void *opaque, int line, int level)
  * but also accepts sequences that are not SMBus so return an I2C device.  */
 static int max7310_init(I2CSlave *i2c)
 {
-    MAX7310State *s = FROM_I2C_SLAVE(MAX7310State, i2c);
+    MAX7310State *s = MAX7310(i2c);
 
     qdev_init_gpio_in(&i2c->qdev, max7310_gpio_set, 8);
     qdev_init_gpio_out(&i2c->qdev, s->handler, 8);
@@ -199,7 +204,7 @@ static void max7310_class_init(ObjectClass *klass, void *data)
 }
 
 static const TypeInfo max7310_info = {
-    .name          = "max7310",
+    .name          = TYPE_MAX7310,
     .parent        = TYPE_I2C_SLAVE,
     .instance_size = sizeof(MAX7310State),
     .class_init    = max7310_class_init,

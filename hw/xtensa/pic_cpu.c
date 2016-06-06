@@ -25,20 +25,21 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "qemu/log.h"
 #include "qemu/timer.h"
 
 void xtensa_advance_ccount(CPUXtensaState *env, uint32_t d)
 {
-    uint32_t old_ccount = env->sregs[CCOUNT];
+    uint32_t old_ccount = env->sregs[CCOUNT] + 1;
 
     env->sregs[CCOUNT] += d;
 
     if (xtensa_option_enabled(env->config, XTENSA_OPTION_TIMER_INTERRUPT)) {
         int i;
         for (i = 0; i < env->config->nccompare; ++i) {
-            if (env->sregs[CCOMPARE + i] - old_ccount <= d) {
+            if (env->sregs[CCOMPARE + i] - old_ccount < d) {
                 xtensa_timer_irq(env, i, 1);
             }
         }

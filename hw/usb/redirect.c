@@ -25,20 +25,23 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu-common.h"
 #include "qemu/timer.h"
-#include "monitor/monitor.h"
 #include "sysemu/sysemu.h"
+#include "qapi/qmp/qerror.h"
+#include "qemu/error-report.h"
 #include "qemu/iov.h"
 #include "sysemu/char.h"
 
-#include <dirent.h>
-#include <sys/ioctl.h>
-#include <signal.h>
 #include <usbredirparser.h>
 #include <usbredirfilter.h>
 
 #include "hw/usb.h"
+
+/* ERROR is defined below. Remove any previous definition. */
+#undef ERROR
 
 #define MAX_ENDPOINTS 32
 #define NO_INTERFACE_INFO 255 /* Valid interface_count always <= 32 */
@@ -49,6 +52,10 @@
 #define I2USBEP(d, i) (usb_ep_get(&(d)->dev, \
                        ((i) & 0x10) ? USB_TOKEN_IN : USB_TOKEN_OUT, \
                        (i) & 0x0f))
+
+#ifndef USBREDIR_VERSION /* This is not defined in older usbredir versions */
+#define USBREDIR_VERSION 0
+#endif
 
 typedef struct USBRedirDevice USBRedirDevice;
 
@@ -68,6 +75,7 @@ struct endp_data {
     uint8_t interval;
     uint8_t interface; /* bInterfaceNumber this ep belongs to */
     uint16_t max_packet_size; /* In bytes, not wMaxPacketSize format !! */
+    uint32_t max_streams;
     uint8_t iso_started;
     uint8_t iso_error; /* For reporting iso errors to the HC */
     uint8_t interrupt_started;
@@ -106,8 +114,9 @@ struct USBRedirDevice {
     int read_buf_size;
     /* Active chardev-watch-tag */
     guint watch;
-    /* For async handling of close */
+    /* For async handling of close / reject */
     QEMUBH *chardev_close_bh;
+    QEMUBH *device_reject_bh;
     /* To delay the usb attach in case of quick chardev close + open */
     QEMUTimer *attach_timer;
     int64_t next_attach_time;
@@ -123,6 +132,9 @@ struct USBRedirDevice {
     int filter_rules_count;
     int compatible_speedmask;
 };
+
+#define TYPE_USB_REDIR "usb-redir"
+#define USB_REDIRECT(obj) OBJECT_CHECK(USBRedirDevice, (obj), TYPE_USB_REDIR)
 
 static void usbredir_hello(void *priv, struct usb_redir_hello_header *h);
 static void usbredir_device_connect(void *priv,
@@ -284,7 +296,7 @@ static int usbredir_write(void *priv, uint8_t *data, int count)
     r = qemu_chr_fe_write(dev->cs, data, count);
     if (r < count) {
         if (!dev->watch) {
-            dev->watch = qemu_chr_fe_add_watch(dev->cs, G_IO_OUT,
+            dev->watch = qemu_chr_fe_add_watch(dev->cs, G_IO_OUT|G_IO_HUP,
                                                usbredir_write_unblocked, dev);
         }
         if (r < 0) {
@@ -314,7 +326,7 @@ static void packet_id_queue_add(struct PacketIdQueue *q, uint64_t id)
 
     DPRINTF("adding packet id %"PRIu64" to %s queue\n", id, q->name);
 
-    e = g_malloc0(sizeof(struct PacketIdQueueEntry));
+    e = g_new0(struct PacketIdQueueEntry, 1);
     e->id = id;
     QTAILQ_INSERT_TAIL(&q->head, e, next);
     q->size++;
@@ -354,7 +366,7 @@ static void packet_id_queue_empty(struct PacketIdQueue *q)
 
 static void usbredir_cancel_packet(USBDevice *udev, USBPacket *p)
 {
-    USBRedirDevice *dev = DO_UPCAST(USBRedirDevice, dev, udev);
+    USBRedirDevice *dev = USB_REDIRECT(udev);
     int i = USBEP2I(p->ep);
 
     if (p->combined) {
@@ -438,7 +450,7 @@ static USBPacket *usbredir_find_packet_by_id(USBRedirDevice *dev,
     return p;
 }
 
-static void bufp_alloc(USBRedirDevice *dev, uint8_t *data, uint16_t len,
+static int bufp_alloc(USBRedirDevice *dev, uint8_t *data, uint16_t len,
     uint8_t status, uint8_t ep, void *free_on_destroy)
 {
     struct buf_packet *bufp;
@@ -455,12 +467,12 @@ static void bufp_alloc(USBRedirDevice *dev, uint8_t *data, uint16_t len,
         if (dev->endpoint[EP2I(ep)].bufpq_size >
                 dev->endpoint[EP2I(ep)].bufpq_target_size) {
             free(data);
-            return;
+            return -1;
         }
         dev->endpoint[EP2I(ep)].bufpq_dropping_packets = 0;
     }
 
-    bufp = g_malloc(sizeof(struct buf_packet));
+    bufp = g_new(struct buf_packet, 1);
     bufp->data   = data;
     bufp->len    = len;
     bufp->offset = 0;
@@ -468,6 +480,7 @@ static void bufp_alloc(USBRedirDevice *dev, uint8_t *data, uint16_t len,
     bufp->free_on_destroy = free_on_destroy;
     QTAILQ_INSERT_TAIL(&dev->endpoint[EP2I(ep)].bufpq, bufp, next);
     dev->endpoint[EP2I(ep)].bufpq_size++;
+    return 0;
 }
 
 static void bufp_free(USBRedirDevice *dev, struct buf_packet *bufp,
@@ -494,7 +507,7 @@ static void usbredir_free_bufpq(USBRedirDevice *dev, uint8_t ep)
 
 static void usbredir_handle_reset(USBDevice *udev)
 {
-    USBRedirDevice *dev = DO_UPCAST(USBRedirDevice, dev, udev);
+    USBRedirDevice *dev = USB_REDIRECT(udev);
 
     DPRINTF("reset device\n");
     usbredirparser_send_reset(dev->parser);
@@ -780,11 +793,12 @@ static void usbredir_handle_bulk_data(USBRedirDevice *dev, USBPacket *p,
         dev->endpoint[EP2I(ep)].bulk_receiving_enabled = 0;
     }
 
-    DPRINTF("bulk-out ep %02X len %zd id %"PRIu64"\n", ep, size, p->id);
+    DPRINTF("bulk-out ep %02X stream %u len %zd id %"PRIu64"\n",
+            ep, p->stream, size, p->id);
 
     bulk_packet.endpoint  = ep;
     bulk_packet.length    = size;
-    bulk_packet.stream_id = 0;
+    bulk_packet.stream_id = p->stream;
     bulk_packet.length_high = size >> 16;
     assert(bulk_packet.length_high == 0 ||
            usbredirparser_peer_has_cap(dev->parser,
@@ -900,7 +914,7 @@ static void usbredir_stop_interrupt_receiving(USBRedirDevice *dev,
 
 static void usbredir_handle_data(USBDevice *udev, USBPacket *p)
 {
-    USBRedirDevice *dev = DO_UPCAST(USBRedirDevice, dev, udev);
+    USBRedirDevice *dev = USB_REDIRECT(udev);
     uint8_t ep;
 
     ep = p->ep->nr;
@@ -969,7 +983,7 @@ static void usbredir_stop_ep(USBRedirDevice *dev, int i)
 
 static void usbredir_ep_stopped(USBDevice *udev, USBEndpoint *uep)
 {
-    USBRedirDevice *dev = DO_UPCAST(USBRedirDevice, dev, udev);
+    USBRedirDevice *dev = USB_REDIRECT(udev);
 
     usbredir_stop_ep(dev, USBEP2I(uep));
     usbredirparser_do_write(dev->parser);
@@ -1039,7 +1053,7 @@ static void usbredir_get_interface(USBRedirDevice *dev, USBPacket *p,
 static void usbredir_handle_control(USBDevice *udev, USBPacket *p,
         int request, int value, int index, int length, uint8_t *data)
 {
-    USBRedirDevice *dev = DO_UPCAST(USBRedirDevice, dev, udev);
+    USBRedirDevice *dev = USB_REDIRECT(udev);
     struct usb_redir_control_packet_header control_packet;
 
     if (usbredir_already_in_flight(dev, p->id)) {
@@ -1091,6 +1105,66 @@ static void usbredir_handle_control(USBDevice *udev, USBPacket *p,
     p->status = USB_RET_ASYNC;
 }
 
+static int usbredir_alloc_streams(USBDevice *udev, USBEndpoint **eps,
+                                  int nr_eps, int streams)
+{
+    USBRedirDevice *dev = USB_REDIRECT(udev);
+#if USBREDIR_VERSION >= 0x000700
+    struct usb_redir_alloc_bulk_streams_header alloc_streams;
+    int i;
+
+    if (!usbredirparser_peer_has_cap(dev->parser,
+                                     usb_redir_cap_bulk_streams)) {
+        ERROR("peer does not support streams\n");
+        goto reject;
+    }
+
+    if (streams == 0) {
+        ERROR("request to allocate 0 streams\n");
+        return -1;
+    }
+
+    alloc_streams.no_streams = streams;
+    alloc_streams.endpoints = 0;
+    for (i = 0; i < nr_eps; i++) {
+        alloc_streams.endpoints |= 1 << USBEP2I(eps[i]);
+    }
+    usbredirparser_send_alloc_bulk_streams(dev->parser, 0, &alloc_streams);
+    usbredirparser_do_write(dev->parser);
+
+    return 0;
+#else
+    ERROR("usbredir_alloc_streams not implemented\n");
+    goto reject;
+#endif
+reject:
+    ERROR("streams are not available, disconnecting\n");
+    qemu_bh_schedule(dev->device_reject_bh);
+    return -1;
+}
+
+static void usbredir_free_streams(USBDevice *udev, USBEndpoint **eps,
+                                  int nr_eps)
+{
+#if USBREDIR_VERSION >= 0x000700
+    USBRedirDevice *dev = USB_REDIRECT(udev);
+    struct usb_redir_free_bulk_streams_header free_streams;
+    int i;
+
+    if (!usbredirparser_peer_has_cap(dev->parser,
+                                     usb_redir_cap_bulk_streams)) {
+        return;
+    }
+
+    free_streams.endpoints = 0;
+    for (i = 0; i < nr_eps; i++) {
+        free_streams.endpoints |= 1 << USBEP2I(eps[i]);
+    }
+    usbredirparser_send_free_bulk_streams(dev->parser, 0, &free_streams);
+    usbredirparser_do_write(dev->parser);
+#endif
+}
+
 /*
  * Close events can be triggered by usbredirparser_do_write which gets called
  * from within the USBDevice data / control packet callbacks and doing a
@@ -1102,6 +1176,7 @@ static void usbredir_chardev_close_bh(void *opaque)
 {
     USBRedirDevice *dev = opaque;
 
+    qemu_bh_cancel(dev->device_reject_bh);
     usbredir_device_disconnect(dev);
 
     if (dev->parser) {
@@ -1153,6 +1228,9 @@ static void usbredir_create_parser(USBRedirDevice *dev)
     usbredirparser_caps_set_cap(caps, usb_redir_cap_64bits_ids);
     usbredirparser_caps_set_cap(caps, usb_redir_cap_32bits_bulk_length);
     usbredirparser_caps_set_cap(caps, usb_redir_cap_bulk_receiving);
+#if USBREDIR_VERSION >= 0x000700
+    usbredirparser_caps_set_cap(caps, usb_redir_cap_bulk_streams);
+#endif
 
     if (runstate_check(RUN_STATE_INMIGRATE)) {
         flags |= usbredirparser_fl_no_hello;
@@ -1171,9 +1249,21 @@ static void usbredir_reject_device(USBRedirDevice *dev)
     }
 }
 
+/*
+ * We may need to reject the device when the hcd calls alloc_streams, doing
+ * an usb_detach from within a hcd call is not a good idea, hence this bh.
+ */
+static void usbredir_device_reject_bh(void *opaque)
+{
+    USBRedirDevice *dev = opaque;
+
+    usbredir_reject_device(dev);
+}
+
 static void usbredir_do_attach(void *opaque)
 {
     USBRedirDevice *dev = opaque;
+    Error *local_err = NULL;
 
     /* In order to work properly with XHCI controllers we need these caps */
     if ((dev->dev.port->speedmask & USB_SPEED_MASK_SUPER) && !(
@@ -1188,7 +1278,9 @@ static void usbredir_do_attach(void *opaque)
         return;
     }
 
-    if (usb_device_attach(&dev->dev) != 0) {
+    usb_device_attach(&dev->dev, &local_err);
+    if (local_err) {
+        error_report_err(local_err);
         WARNING("rejecting device due to speed mismatch\n");
         usbredir_reject_device(dev);
     }
@@ -1275,14 +1367,14 @@ static void usbredir_init_endpoints(USBRedirDevice *dev)
     }
 }
 
-static int usbredir_initfn(USBDevice *udev)
+static void usbredir_realize(USBDevice *udev, Error **errp)
 {
-    USBRedirDevice *dev = DO_UPCAST(USBRedirDevice, dev, udev);
+    USBRedirDevice *dev = USB_REDIRECT(udev);
     int i;
 
     if (dev->cs == NULL) {
-        qerror_report(QERR_MISSING_PARAMETER, "chardev");
-        return -1;
+        error_setg(errp, QERR_MISSING_PARAMETER, "chardev");
+        return;
     }
 
     if (dev->filter_str) {
@@ -1290,13 +1382,14 @@ static int usbredir_initfn(USBDevice *udev)
                                            &dev->filter_rules,
                                            &dev->filter_rules_count);
         if (i) {
-            qerror_report(QERR_INVALID_PARAMETER_VALUE, "filter",
-                          "a usb device filter string");
-            return -1;
+            error_setg(errp, QERR_INVALID_PARAMETER_VALUE, "filter",
+                       "a usb device filter string");
+            return;
         }
     }
 
     dev->chardev_close_bh = qemu_bh_new(usbredir_chardev_close_bh, dev);
+    dev->device_reject_bh = qemu_bh_new(usbredir_device_reject_bh, dev);
     dev->attach_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, usbredir_do_attach, dev);
 
     packet_id_queue_init(&dev->cancelled, dev, "cancelled");
@@ -1314,8 +1407,6 @@ static int usbredir_initfn(USBDevice *udev)
                           usbredir_chardev_read, usbredir_chardev_event, dev);
 
     qemu_add_vm_change_state_handler(usbredir_vm_state_change, dev);
-    add_boot_device_path(dev->bootindex, &udev->qdev, NULL);
-    return 0;
 }
 
 static void usbredir_cleanup_device_queues(USBRedirDevice *dev)
@@ -1331,12 +1422,13 @@ static void usbredir_cleanup_device_queues(USBRedirDevice *dev)
 
 static void usbredir_handle_destroy(USBDevice *udev)
 {
-    USBRedirDevice *dev = DO_UPCAST(USBRedirDevice, dev, udev);
+    USBRedirDevice *dev = USB_REDIRECT(udev);
 
     qemu_chr_delete(dev->cs);
     dev->cs = NULL;
     /* Note must be done after qemu_chr_close, as that causes a close event */
     qemu_bh_delete(dev->chardev_close_bh);
+    qemu_bh_delete(dev->device_reject_bh);
 
     timer_del(dev->attach_timer);
     timer_free(dev->attach_timer);
@@ -1628,6 +1720,7 @@ static void usbredir_setup_usb_eps(USBRedirDevice *dev)
         usb_ep->type = dev->endpoint[i].type;
         usb_ep->ifnum = dev->endpoint[i].interface;
         usb_ep->max_packet_size = dev->endpoint[i].max_packet_size;
+        usb_ep->max_streams = dev->endpoint[i].max_streams;
         usbredir_set_pipeline(dev, usb_ep);
     }
 }
@@ -1646,6 +1739,12 @@ static void usbredir_ep_info(void *priv,
                                      usb_redir_cap_ep_info_max_packet_size)) {
             dev->endpoint[i].max_packet_size = ep_info->max_packet_size[i];
         }
+#if USBREDIR_VERSION >= 0x000700
+        if (usbredirparser_peer_has_cap(dev->parser,
+                                        usb_redir_cap_bulk_streams)) {
+            dev->endpoint[i].max_streams = ep_info->max_streams[i];
+        }
+#endif
         switch (dev->endpoint[i].type) {
         case usb_redir_type_invalid:
             break;
@@ -1779,6 +1878,20 @@ static void usbredir_interrupt_receiving_status(void *priv, uint64_t id,
 static void usbredir_bulk_streams_status(void *priv, uint64_t id,
     struct usb_redir_bulk_streams_status_header *bulk_streams_status)
 {
+#if USBREDIR_VERSION >= 0x000700
+    USBRedirDevice *dev = priv;
+
+    if (bulk_streams_status->status == usb_redir_success) {
+        DPRINTF("bulk streams status %d eps %08x\n",
+                bulk_streams_status->status, bulk_streams_status->endpoints);
+    } else {
+        ERROR("bulk streams %s failed status %d eps %08x\n",
+              (bulk_streams_status->no_streams == 0) ? "free" : "alloc",
+              bulk_streams_status->status, bulk_streams_status->endpoints);
+        ERROR("usb-redir-host does not provide streams, disconnecting\n");
+        usbredir_reject_device(dev);
+    }
+#endif
 }
 
 static void usbredir_bulk_receiving_status(void *priv, uint64_t id,
@@ -1850,8 +1963,8 @@ static void usbredir_bulk_packet(void *priv, uint64_t id,
     int len = (bulk_packet->length_high << 16) | bulk_packet->length;
     USBPacket *p;
 
-    DPRINTF("bulk-in status %d ep %02X len %d id %"PRIu64"\n",
-            bulk_packet->status, ep, len, id);
+    DPRINTF("bulk-in status %d ep %02X stream %u len %d id %"PRIu64"\n",
+            bulk_packet->status, ep, bulk_packet->stream_id, len, id);
 
     p = usbredir_find_packet_by_id(dev, ep, id);
     if (p) {
@@ -1973,13 +2086,17 @@ static void usbredir_buffered_bulk_packet(void *priv, uint64_t id,
     status = usb_redir_success;
     free_on_destroy = NULL;
     for (i = 0; i < data_len; i += len) {
+        int r;
         if (len >= (data_len - i)) {
             len = data_len - i;
             status = buffered_bulk_packet->status;
             free_on_destroy = data;
         }
         /* bufp_alloc also adds the packet to the ep queue */
-        bufp_alloc(dev, data + i, len, status, ep, free_on_destroy);
+        r = bufp_alloc(dev, data + i, len, status, ep, free_on_destroy);
+        if (r) {
+            break;
+        }
     }
 
     if (dev->endpoint[EP2I(ep)].pending_async_packet) {
@@ -2126,7 +2243,7 @@ static int usbredir_get_bufpq(QEMUFile *f, void *priv, size_t unused)
 
     endp->bufpq_size = qemu_get_be32(f);
     for (i = 0; i < endp->bufpq_size; i++) {
-        bufp = g_malloc(sizeof(struct buf_packet));
+        bufp = g_new(struct buf_packet, 1);
         bufp->len = qemu_get_be32(f);
         bufp->status = qemu_get_be32(f);
         bufp->offset = 0;
@@ -2148,22 +2265,41 @@ static const VMStateInfo usbredir_ep_bufpq_vmstate_info = {
 
 
 /* For endp_data migration */
-static const VMStateDescription usbredir_bulk_receiving_vmstate = {
-    .name = "usb-redir-ep/bulk-receiving",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
-        VMSTATE_UINT8(bulk_receiving_started, struct endp_data),
-        VMSTATE_END_OF_LIST()
-    }
-};
-
 static bool usbredir_bulk_receiving_needed(void *priv)
 {
     struct endp_data *endp = priv;
 
     return endp->bulk_receiving_started;
 }
+
+static const VMStateDescription usbredir_bulk_receiving_vmstate = {
+    .name = "usb-redir-ep/bulk-receiving",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = usbredir_bulk_receiving_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT8(bulk_receiving_started, struct endp_data),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool usbredir_stream_needed(void *priv)
+{
+    struct endp_data *endp = priv;
+
+    return endp->max_streams;
+}
+
+static const VMStateDescription usbredir_stream_vmstate = {
+    .name = "usb-redir-ep/stream-state",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = usbredir_stream_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32(max_streams, struct endp_data),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static const VMStateDescription usbredir_ep_vmstate = {
     .name = "usb-redir-ep",
@@ -2192,13 +2328,10 @@ static const VMStateDescription usbredir_ep_vmstate = {
         VMSTATE_INT32(bufpq_target_size, struct endp_data),
         VMSTATE_END_OF_LIST()
     },
-    .subsections = (VMStateSubsection[]) {
-        {
-            .vmsd = &usbredir_bulk_receiving_vmstate,
-            .needed = usbredir_bulk_receiving_needed,
-        }, {
-            /* empty */
-        }
+    .subsections = (const VMStateDescription*[]) {
+        &usbredir_bulk_receiving_vmstate,
+        &usbredir_stream_vmstate,
+        NULL
     }
 };
 
@@ -2311,7 +2444,7 @@ static const VMStateDescription usbredir_vmstate = {
     .post_load = usbredir_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_USB_DEVICE(dev, USBRedirDevice),
-        VMSTATE_TIMER(attach_timer, USBRedirDevice),
+        VMSTATE_TIMER_PTR(attach_timer, USBRedirDevice),
         {
             .name         = "parser",
             .version_id   = 0,
@@ -2343,7 +2476,6 @@ static Property usbredir_properties[] = {
     DEFINE_PROP_CHR("chardev", USBRedirDevice, cs),
     DEFINE_PROP_UINT8("debug", USBRedirDevice, debug, usbredirparser_warning),
     DEFINE_PROP_STRING("filter", USBRedirDevice, filter_str),
-    DEFINE_PROP_INT32("bootindex", USBRedirDevice, bootindex, -1),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -2352,7 +2484,7 @@ static void usbredir_class_initfn(ObjectClass *klass, void *data)
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    uc->init           = usbredir_initfn;
+    uc->realize        = usbredir_realize;
     uc->product_desc   = "USB Redirection Device";
     uc->handle_destroy = usbredir_handle_destroy;
     uc->cancel_packet  = usbredir_cancel_packet;
@@ -2361,16 +2493,29 @@ static void usbredir_class_initfn(ObjectClass *klass, void *data)
     uc->handle_control = usbredir_handle_control;
     uc->flush_ep_queue = usbredir_flush_ep_queue;
     uc->ep_stopped     = usbredir_ep_stopped;
+    uc->alloc_streams  = usbredir_alloc_streams;
+    uc->free_streams   = usbredir_free_streams;
     dc->vmsd           = &usbredir_vmstate;
     dc->props          = usbredir_properties;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 }
 
+static void usbredir_instance_init(Object *obj)
+{
+    USBDevice *udev = USB_DEVICE(obj);
+    USBRedirDevice *dev = USB_REDIRECT(udev);
+
+    device_add_bootindex_property(obj, &dev->bootindex,
+                                  "bootindex", NULL,
+                                  &udev->qdev, NULL);
+}
+
 static const TypeInfo usbredir_dev_info = {
-    .name          = "usb-redir",
+    .name          = TYPE_USB_REDIR,
     .parent        = TYPE_USB_DEVICE,
     .instance_size = sizeof(USBRedirDevice),
     .class_init    = usbredir_class_initfn,
+    .instance_init = usbredir_instance_init,
 };
 
 static void usbredir_register_types(void)

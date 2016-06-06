@@ -10,6 +10,7 @@
  * GNU GPL, version 2 or (at your option) any later version.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "ui/console.h"
 #include "hw/arm/pxa.h"
@@ -35,6 +36,7 @@ struct DMAChannel {
 struct PXA2xxLCDState {
     MemoryRegion *sysmem;
     MemoryRegion iomem;
+    MemoryRegionSection fbsection;
     qemu_irq irq;
     int irqlevel;
 
@@ -279,14 +281,6 @@ static inline void pxa2xx_dma_ber_set(PXA2xxLCDState *s, int ch)
         s->liidr = s->dma_ch[ch].id;
 }
 
-/* Set Read Status interrupt high and poke associated registers */
-static inline void pxa2xx_dma_rdst_set(PXA2xxLCDState *s)
-{
-    s->status[0] |= LCSR0_RDST;
-    if (s->irqlevel && !(s->control[0] & LCCR0_RDSTM))
-        s->status[0] |= LCSR0_SINT;
-}
-
 /* Load new Frame Descriptors from DMA */
 static void pxa2xx_descriptor_load(PXA2xxLCDState *s)
 {
@@ -316,10 +310,10 @@ static void pxa2xx_descriptor_load(PXA2xxLCDState *s)
         }
 
         cpu_physical_memory_read(descptr, &desc, sizeof(desc));
-        s->dma_ch[i].descriptor = tswap32(desc.fdaddr);
-        s->dma_ch[i].source = tswap32(desc.fsaddr);
-        s->dma_ch[i].id = tswap32(desc.fidr);
-        s->dma_ch[i].command = tswap32(desc.ldcmd);
+        s->dma_ch[i].descriptor = le32_to_cpu(desc.fdaddr);
+        s->dma_ch[i].source = le32_to_cpu(desc.fsaddr);
+        s->dma_ch[i].id = le32_to_cpu(desc.fidr);
+        s->dma_ch[i].command = le32_to_cpu(desc.ldcmd);
     }
 }
 
@@ -620,17 +614,6 @@ static void pxa2xx_palette_parse(PXA2xxLCDState *s, int ch, int bpp)
             src += 2;
             break;
         case 1: /* 16 bpp plus transparency */
-            alpha = *(uint16_t *) src & (1 << 24);
-            if (s->control[0] & LCCR0_CMS)
-                r = g = b = *(uint16_t *) src & 0xff;
-            else {
-                r = (*(uint16_t *) src & 0xf800) >> 8;
-                g = (*(uint16_t *) src & 0x07e0) >> 3;
-                b = (*(uint16_t *) src & 0x001f) << 3;
-            }
-            src += 2;
-            break;
-        case 2: /* 18 bpp plus transparency */
             alpha = *(uint32_t *) src & (1 << 24);
             if (s->control[0] & LCCR0_CMS)
                 r = g = b = *(uint32_t *) src & 0xff;
@@ -638,6 +621,17 @@ static void pxa2xx_palette_parse(PXA2xxLCDState *s, int ch, int bpp)
                 r = (*(uint32_t *) src & 0xf80000) >> 16;
                 g = (*(uint32_t *) src & 0x00fc00) >> 8;
                 b = (*(uint32_t *) src & 0x0000f8);
+            }
+            src += 4;
+            break;
+        case 2: /* 18 bpp plus transparency */
+            alpha = *(uint32_t *) src & (1 << 24);
+            if (s->control[0] & LCCR0_CMS)
+                r = g = b = *(uint32_t *) src & 0xff;
+            else {
+                r = (*(uint32_t *) src & 0xfc0000) >> 16;
+                g = (*(uint32_t *) src & 0x00fc00) >> 8;
+                b = (*(uint32_t *) src & 0x0000fc);
             }
             src += 4;
             break;
@@ -695,8 +689,11 @@ static void pxa2xx_lcdc_dma0_redraw_rot0(PXA2xxLCDState *s,
 
     dest_width = s->xres * s->dest_width;
     *miny = 0;
-    framebuffer_update_display(surface, s->sysmem,
-                               addr, s->xres, s->yres,
+    if (s->invalidated) {
+        framebuffer_update_memory_section(&s->fbsection, s->sysmem,
+                                          addr, s->yres, src_width);
+    }
+    framebuffer_update_display(surface, &s->fbsection, s->xres, s->yres,
                                src_width, dest_width, s->dest_width,
                                s->invalidated,
                                fn, s->dma_ch[0].palette, miny, maxy);
@@ -723,8 +720,11 @@ static void pxa2xx_lcdc_dma0_redraw_rot90(PXA2xxLCDState *s,
 
     dest_width = s->yres * s->dest_width;
     *miny = 0;
-    framebuffer_update_display(surface, s->sysmem,
-                               addr, s->xres, s->yres,
+    if (s->invalidated) {
+        framebuffer_update_memory_section(&s->fbsection, s->sysmem,
+                                          addr, s->yres, src_width);
+    }
+    framebuffer_update_display(surface, &s->fbsection, s->xres, s->yres,
                                src_width, s->dest_width, -dest_width,
                                s->invalidated,
                                fn, s->dma_ch[0].palette,
@@ -755,8 +755,11 @@ static void pxa2xx_lcdc_dma0_redraw_rot180(PXA2xxLCDState *s,
 
     dest_width = s->xres * s->dest_width;
     *miny = 0;
-    framebuffer_update_display(surface, s->sysmem,
-                               addr, s->xres, s->yres,
+    if (s->invalidated) {
+        framebuffer_update_memory_section(&s->fbsection, s->sysmem,
+                                          addr, s->yres, src_width);
+    }
+    framebuffer_update_display(surface, &s->fbsection, s->xres, s->yres,
                                src_width, -dest_width, -s->dest_width,
                                s->invalidated,
                                fn, s->dma_ch[0].palette, miny, maxy);
@@ -786,8 +789,11 @@ static void pxa2xx_lcdc_dma0_redraw_rot270(PXA2xxLCDState *s,
 
     dest_width = s->yres * s->dest_width;
     *miny = 0;
-    framebuffer_update_display(surface, s->sysmem,
-                               addr, s->xres, s->yres,
+    if (s->invalidated) {
+        framebuffer_update_memory_section(&s->fbsection, s->sysmem,
+                                          addr, s->yres, src_width);
+    }
+    framebuffer_update_display(surface, &s->fbsection, s->xres, s->yres,
                                src_width, -s->dest_width, dest_width,
                                s->invalidated,
                                fn, s->dma_ch[0].palette,
@@ -932,8 +938,7 @@ static const VMStateDescription vmstate_dma_channel = {
     .name = "dma_channel",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT32(branch, struct DMAChannel),
         VMSTATE_UINT8(up, struct DMAChannel),
         VMSTATE_BUFFER(pbuffer, struct DMAChannel),
@@ -959,9 +964,8 @@ static const VMStateDescription vmstate_pxa2xx_lcdc = {
     .name = "pxa2xx_lcdc",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
     .post_load = pxa2xx_lcdc_post_load,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_INT32(irqlevel, PXA2xxLCDState),
         VMSTATE_INT32(transp, PXA2xxLCDState),
         VMSTATE_UINT32_ARRAY(control, PXA2xxLCDState, 6),
@@ -1013,7 +1017,7 @@ PXA2xxLCDState *pxa2xx_lcdc_init(MemoryRegion *sysmem,
                           "pxa2xx-lcd-controller", 0x00100000);
     memory_region_add_subregion(sysmem, base, &s->iomem);
 
-    s->con = graphic_console_init(NULL, &pxa2xx_ops, s);
+    s->con = graphic_console_init(NULL, 0, &pxa2xx_ops, s);
     surface = qemu_console_surface(s->con);
 
     switch (surface_bits_per_pixel(surface)) {

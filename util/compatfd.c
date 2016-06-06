@@ -13,6 +13,7 @@
  * GNU GPL, version 2 or (at your option) any later version.
  */
 
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu/compatfd.h"
 #include "qemu/thread.h"
@@ -88,7 +89,8 @@ static int qemu_signalfd_compat(const sigset_t *mask)
     memcpy(&info->mask, mask, sizeof(*mask));
     info->fd = fds[1];
 
-    qemu_thread_create(&thread, sigwait_compat, info, QEMU_THREAD_DETACHED);
+    qemu_thread_create(&thread, "signalfd_compat", sigwait_compat, info,
+                       QEMU_THREAD_DETACHED);
 
     return fds[0];
 }
@@ -106,23 +108,4 @@ int qemu_signalfd(const sigset_t *mask)
 #endif
 
     return qemu_signalfd_compat(mask);
-}
-
-bool qemu_signalfd_available(void)
-{
-#ifdef CONFIG_SIGNALFD
-    sigset_t mask;
-    int fd;
-    bool ok;
-    sigemptyset(&mask);
-    errno = 0;
-    fd = syscall(SYS_signalfd, -1, &mask, _NSIG / 8);
-    ok = (errno != ENOSYS);
-    if (fd >= 0) {
-        close(fd);
-    }
-    return ok;
-#else
-    return false;
-#endif
 }

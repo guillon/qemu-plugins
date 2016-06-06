@@ -38,93 +38,87 @@
 #include <inttypes.h>
 
 #include "tcg-op.h"
-#include "exec/def-helper.h"
 #include "tcg-plugin.h"
 
-const char *quote = "Real programmers can write assembly code in any language.  :-)\n\t-- Larry Wall";
+static const char *quote = "Real programmers can write assembly code in any language.  :-)\n\t-- Larry Wall";
 #define BASE 0xCAFE0000
 
-static uint64_t after_exec_opc(uint64_t address, uint64_t value, uint32_t max_size)
+static uint64_t extend64(uint64_t val, int bits, int is_signed)
 {
+    uint64_t one_mask = ~(uint64_t)0;
+    if (bits >= 64) return val;
+    if (bits <= 0) return is_signed ? one_mask: 0;
+    if (!is_signed || (val & (1 << (bits-1))) == 0) {
+        val &= one_mask >> (64 - bits);
+    } else {
+        val |= one_mask << bits;
+    }
+    return val;
+}
+
+static uint64_t after_exec_opc(uint64_t value, uint64_t address, int32_t signed_size)
+{
+    int ld_size = signed_size < 0 ? -signed_size: signed_size;
     size_t max_index = strlen(quote);
     size_t index     = address - BASE;
-    size_t size      = MIN(max_size, max_index - index + 1);
+    size_t size      = MIN(ld_size, max_index - index + 1);
 
     if (address < BASE || address > BASE + max_index)
         return value;
 
     memcpy(&value, &quote[index], size);
+
+    extend64(value, ld_size * 8, signed_size < 0);
+
     return value;
 }
 
 static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_opcode)
 {
-    uint32_t size;
-
-    switch (*tpi_opcode->opcode) {
-    case INDEX_op_qemu_ld8s:
-    case INDEX_op_qemu_ld8u:
-        size = 1;
-        break;
-
-    case INDEX_op_qemu_ld16s:
-    case INDEX_op_qemu_ld16u:
-        size = 2;
-        break;
-
+    int size;
+    int sign;
+    switch (tpi_opcode->operator) {
     case INDEX_op_qemu_ld_i32:
-    case INDEX_op_qemu_ld32:
-#if TCG_TARGET_REG_BITS == 64
-    case INDEX_op_qemu_ld32s:
-    case INDEX_op_qemu_ld32u:
-#endif
-        size = 4;
-        break;
-
     case INDEX_op_qemu_ld_i64:
-    case INDEX_op_qemu_ld64:
-        size = 8;
         break;
-
     default:
         return;
     }
 
-    int sizemask = 0;
+    TCGMemOp opc = get_memop(tpi_opcode->opargs[2]);
+    size = 1 << (opc & MO_SIZE);
+    sign = (opc & MO_SIGN) != 0 ? -1: 1;
+
     TCGArg args[3];
+    TCGv_i64 tcgv_ret = tcg_temp_new_i64();
+    TCGv_i32 tcgv_size = tcg_const_i32(size * sign);
 
-    TCGv_i64 tcgv_ret  = tcg_temp_new_i64();
-    TCGv_i32 tcgv_size = tcg_const_i32(size);
+    args[0] = tpi_opcode->opargs[0]; /* value loaded */
+    args[1] = tpi_opcode->opargs[1]; /* address */
+    args[2] = GET_TCGV_I32(tcgv_size); /* sign * size constant */
 
-    args[0] = tpi_opcode->opargs[1];
-    args[1] = tpi_opcode->opargs[0];
-    args[2] = GET_TCGV_I32(tcgv_size);
-
-    dh_sizemask(i64, 0);
-    dh_sizemask(i64, 1);
-    dh_sizemask(i64, 2);
-    dh_sizemask(i32, 3);
-
-    tcg_gen_helperN(after_exec_opc, 0, sizemask, GET_TCGV_I64(tcgv_ret), 3, args);
-
-#if TCG_TARGET_REG_BITS == 64
-    tcg_gen_mov_i64(MAKE_TCGV_I64(tpi_opcode->opargs[0]), tcgv_ret);
-#else
-    if (size == 8) {
-        tcg_gen_mov_i64(MAKE_TCGV_I64(tpi_opcode->opargs[0]), tcgv_ret);
-    }
-    else {
-        tcg_gen_trunc_i64_i32(MAKE_TCGV_I32(tpi_opcode->opargs[0]), tcgv_ret);
-    }
-#endif
-
+    /* get possibly modified value in tcgv_ret. */
+    tcg_gen_callN(tpi->tcg_ctx, after_exec_opc,
+                  GET_TCGV_I64(tcgv_ret),
+                  3, args); 
     tcg_temp_free_i32(tcgv_size);
+
+    /* overwrite destination register. */
+    tcg_gen_mov_i64(MAKE_TCGV_I64(tpi_opcode->opargs[0]), tcgv_ret);
     tcg_temp_free_i64(tcgv_ret);
+
 }
 
 
 void tpi_init(TCGPluginInterface *tpi)
 {
-    TPI_INIT_VERSION(*tpi);
+    TPI_INIT_VERSION_GENERIC(tpi);
+
+    TPI_DECL_FUNC_3(tpi, after_exec_opc, i64, i64, i64, i32);
+
+    /* Sorry, for simplicity works on 64 bits hosts only. */
+    assert(TCG_TARGET_REG_BITS == TARGET_LONG_BITS);
+    assert(TCG_TARGET_REG_BITS == 64);
+
     tpi->after_gen_opc = after_gen_opc;
 }

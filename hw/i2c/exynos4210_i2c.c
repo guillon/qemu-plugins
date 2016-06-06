@@ -20,6 +20,7 @@
  *
  */
 
+#include "qemu/osdep.h"
 #include "qemu/timer.h"
 #include "hw/sysbus.h"
 #include "hw/i2c/i2c.h"
@@ -83,7 +84,7 @@ typedef struct Exynos4210I2CState {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
-    i2c_bus *bus;
+    I2CBus *bus;
     qemu_irq irq;
 
     uint8_t i2ccon;

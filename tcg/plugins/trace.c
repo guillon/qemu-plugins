@@ -44,25 +44,26 @@ static void pre_tb_helper_code(const TCGPluginInterface *tpi,
 
     fprintf(tpi->output, "%s (%d): CPU #%" PRIu32 " - 0x%016" PRIx64 " [%" PRIu32 "]: %" PRIu32 " instruction(s) in '%s:%s'\n",
             tcg_plugin_get_filename(), getpid(), info.cpu_index, address, info.size, info.icount,
-            filename[0] != '\0' ? filename : "<unknown>",
-            symbol[0] != '\0' ? symbol : "<unknown>");
+            filename != NULL && filename[0] != '\0' ? filename : "<unknown>",
+            symbol != NULL && symbol[0] != '\0' ? symbol : "<unknown>");
 }
 
 static void pre_tb_helper_data(const TCGPluginInterface *tpi,
                                TPIHelperInfo info, uint64_t address,
                                uint64_t *data1, uint64_t *data2)
 {
-    const char *symbol;
-    const char *filename;
+    const char *symbol = NULL;
+    const char *filename = NULL;
 
     lookup_symbol2(address, &symbol, &filename);
+
     *data1 = (uintptr_t)symbol;
     *data2 = (uintptr_t)filename;
 }
 
 void tpi_init(TCGPluginInterface *tpi)
 {
-    TPI_INIT_VERSION_GENERIC(*tpi);
+    TPI_INIT_VERSION_GENERIC(tpi);
     tpi->pre_tb_helper_code = pre_tb_helper_code;
     tpi->pre_tb_helper_data = pre_tb_helper_data;
 }

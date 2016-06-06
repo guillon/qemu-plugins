@@ -21,6 +21,8 @@
  * <http://www.gnu.org/licenses/lgpl-2.1.html>
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "cpu.h"
 #include "qemu-common.h"
 #include "mmu.h"
@@ -31,6 +33,11 @@ static void cris_cpu_set_pc(CPUState *cs, vaddr value)
     CRISCPU *cpu = CRIS_CPU(cs);
 
     cpu->env.pc = value;
+}
+
+static bool cris_cpu_has_work(CPUState *cs)
+{
+    return cs->interrupt_request & (CPU_INTERRUPT_HARD | CPU_INTERRUPT_NMI);
 }
 
 /* CPUClass::reset() */
@@ -44,9 +51,9 @@ static void cris_cpu_reset(CPUState *s)
     ccc->parent_reset(s);
 
     vr = env->pregs[PR_VR];
-    memset(env, 0, offsetof(CPUCRISState, breakpoints));
+    memset(env, 0, offsetof(CPUCRISState, load_info));
     env->pregs[PR_VR] = vr;
-    tlb_flush(env, 1);
+    tlb_flush(s, 1);
 
 #if defined(CONFIG_USER_ONLY)
     /* start in user mode with interrupts enabled.  */
@@ -66,6 +73,12 @@ static ObjectClass *cris_cpu_class_by_name(const char *cpu_model)
         return NULL;
     }
 
+#if defined(CONFIG_USER_ONLY)
+    if (strcasecmp(cpu_model, "any") == 0) {
+        return object_class_by_name("crisv32-" TYPE_CRIS_CPU);
+    }
+#endif
+
     typename = g_strdup_printf("%s-" TYPE_CRIS_CPU, cpu_model);
     oc = object_class_by_name(typename);
     g_free(typename);
@@ -78,18 +91,7 @@ static ObjectClass *cris_cpu_class_by_name(const char *cpu_model)
 
 CRISCPU *cpu_cris_init(const char *cpu_model)
 {
-    CRISCPU *cpu;
-    ObjectClass *oc;
-
-    oc = cris_cpu_class_by_name(cpu_model);
-    if (oc == NULL) {
-        return NULL;
-    }
-    cpu = CRIS_CPU(object_new(object_class_get_name(oc)));
-
-    object_property_set_bool(OBJECT(cpu), true, "realized", NULL);
-
-    return cpu;
+    return CRIS_CPU(cpu_generic_init(TYPE_CRIS_CPU, cpu_model));
 }
 
 /* Sort alphabetically by VR. */
@@ -146,6 +148,35 @@ static void cris_cpu_realizefn(DeviceState *dev, Error **errp)
     ccc->parent_realize(dev, errp);
 }
 
+#ifndef CONFIG_USER_ONLY
+static void cris_cpu_set_irq(void *opaque, int irq, int level)
+{
+    CRISCPU *cpu = opaque;
+    CPUState *cs = CPU(cpu);
+    int type = irq == CRIS_CPU_IRQ ? CPU_INTERRUPT_HARD : CPU_INTERRUPT_NMI;
+
+    if (level) {
+        cpu_interrupt(cs, type);
+    } else {
+        cpu_reset_interrupt(cs, type);
+    }
+}
+#endif
+
+static void cris_disas_set_info(CPUState *cpu, disassemble_info *info)
+{
+    CRISCPU *cc = CRIS_CPU(cpu);
+    CPUCRISState *env = &cc->env;
+
+    if (env->pregs[PR_VR] != 32) {
+        info->mach = bfd_mach_cris_v0_v10;
+        info->print_insn = print_insn_crisv10;
+    } else {
+        info->mach = bfd_mach_cris_v32;
+        info->print_insn = print_insn_crisv32;
+    }
+}
+
 static void cris_cpu_initfn(Object *obj)
 {
     CPUState *cs = CPU(obj);
@@ -155,9 +186,14 @@ static void cris_cpu_initfn(Object *obj)
     static bool tcg_initialized;
 
     cs->env_ptr = env;
-    cpu_exec_init(env);
+    cpu_exec_init(cs, &error_abort);
 
     env->pregs[PR_VR] = ccc->vr;
+
+#ifndef CONFIG_USER_ONLY
+    /* IRQ and NMI lines.  */
+    qdev_init_gpio_in(DEVICE(cpu), cris_cpu_set_irq, 2);
+#endif
 
     if (tcg_enabled() && !tcg_initialized) {
         tcg_initialized = true;
@@ -257,16 +293,31 @@ static void cris_cpu_class_init(ObjectClass *oc, void *data)
     cc->reset = cris_cpu_reset;
 
     cc->class_by_name = cris_cpu_class_by_name;
+    cc->has_work = cris_cpu_has_work;
     cc->do_interrupt = cris_cpu_do_interrupt;
+    cc->cpu_exec_interrupt = cris_cpu_exec_interrupt;
     cc->dump_state = cris_cpu_dump_state;
     cc->set_pc = cris_cpu_set_pc;
     cc->gdb_read_register = cris_cpu_gdb_read_register;
     cc->gdb_write_register = cris_cpu_gdb_write_register;
-#ifndef CONFIG_USER_ONLY
+#ifdef CONFIG_USER_ONLY
+    cc->handle_mmu_fault = cris_cpu_handle_mmu_fault;
+#else
     cc->get_phys_page_debug = cris_cpu_get_phys_page_debug;
+    dc->vmsd = &vmstate_cris_cpu;
 #endif
 
     cc->gdb_num_core_regs = 49;
+    cc->gdb_stop_before_watchpoint = true;
+
+    cc->disas_set_info = cris_disas_set_info;
+
+    /*
+     * Reason: cris_cpu_initfn() calls cpu_exec_init(), which saves
+     * the object in cpus -> dangling pointer after final
+     * object_unref().
+     */
+    dc->cannot_destroy_with_object_finalize_yet = true;
 }
 
 static const TypeInfo cris_cpu_type_info = {

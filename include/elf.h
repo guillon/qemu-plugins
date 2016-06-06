@@ -1,7 +1,6 @@
 #ifndef _QEMU_ELF_H
 #define _QEMU_ELF_H
 
-#include <inttypes.h>
 
 /* 32-bit ELF base types. */
 typedef uint32_t Elf32_Addr;
@@ -92,6 +91,8 @@ typedef int64_t  Elf64_Sxword;
 
 #define EM_SPARCV9     43	/* SPARC v9 64-bit */
 
+#define EM_TRICORE      44      /* Infineon TriCore */
+
 #define EM_IA_64	50	/* HP/Intel IA-64 */
 
 #define EM_X86_64	62	/* AMD x86-64 */
@@ -130,6 +131,11 @@ typedef int64_t  Elf64_Sxword;
 #define EM_XTENSA   94      /* Tensilica Xtensa */
 
 #define EM_AARCH64  183
+
+#define EM_TILEGX   191 /* TILE-Gx */
+
+#define EM_MOXIE           223     /* Moxie processor family */
+#define EM_MOXIE_OLD       0xFEED
 
 /* This is the info that is needed to parse the dynamic section of the file */
 #define DT_NULL		0
@@ -254,6 +260,7 @@ typedef int64_t  Elf64_Sxword;
 #define AT_SECURE	23	/* boolean, was exec suid-like? */
 #define AT_BASE_PLATFORM 24	/* string identifying real platforms */
 #define AT_RANDOM	25	/* address of 16 random bytes */
+#define AT_HWCAP2       26      /* extension of AT_HWCAP */
 #define AT_EXECFN	31	/* filename of the executable */
 #define AT_SYSINFO	32	/* address of kernel entry point */
 #define AT_SYSINFO_EHDR	33	/* address of kernel vdso */
@@ -411,14 +418,108 @@ typedef struct {
 #define R_SPARC_5		44
 #define R_SPARC_6		45
 
-/* Bits present in AT_HWCAP, primarily for Sparc32.  */
+/* Bits present in AT_HWCAP for ARM.  */
 
-#define HWCAP_SPARC_FLUSH       1    /* CPU supports flush instruction. */
-#define HWCAP_SPARC_STBAR       2
-#define HWCAP_SPARC_SWAP        4
-#define HWCAP_SPARC_MULDIV      8
-#define HWCAP_SPARC_V9		16
-#define HWCAP_SPARC_ULTRA3	32
+#define HWCAP_ARM_SWP           (1 << 0)
+#define HWCAP_ARM_HALF          (1 << 1)
+#define HWCAP_ARM_THUMB         (1 << 2)
+#define HWCAP_ARM_26BIT         (1 << 3)
+#define HWCAP_ARM_FAST_MULT     (1 << 4)
+#define HWCAP_ARM_FPA           (1 << 5)
+#define HWCAP_ARM_VFP           (1 << 6)
+#define HWCAP_ARM_EDSP          (1 << 7)
+#define HWCAP_ARM_JAVA          (1 << 8)
+#define HWCAP_ARM_IWMMXT        (1 << 9)
+#define HWCAP_ARM_CRUNCH        (1 << 10)
+#define HWCAP_ARM_THUMBEE       (1 << 11)
+#define HWCAP_ARM_NEON          (1 << 12)
+#define HWCAP_ARM_VFPv3         (1 << 13)
+#define HWCAP_ARM_VFPv3D16      (1 << 14)       /* also set for VFPv4-D16 */
+#define HWCAP_ARM_TLS           (1 << 15)
+#define HWCAP_ARM_VFPv4         (1 << 16)
+#define HWCAP_ARM_IDIVA         (1 << 17)
+#define HWCAP_ARM_IDIVT         (1 << 18)
+#define HWCAP_IDIV              (HWCAP_IDIVA | HWCAP_IDIVT)
+#define HWCAP_VFPD32            (1 << 19)       /* set if VFP has 32 regs */
+#define HWCAP_LPAE              (1 << 20)
+
+/* Bits present in AT_HWCAP for PowerPC.  */
+
+#define PPC_FEATURE_32                  0x80000000
+#define PPC_FEATURE_64                  0x40000000
+#define PPC_FEATURE_601_INSTR           0x20000000
+#define PPC_FEATURE_HAS_ALTIVEC         0x10000000
+#define PPC_FEATURE_HAS_FPU             0x08000000
+#define PPC_FEATURE_HAS_MMU             0x04000000
+#define PPC_FEATURE_HAS_4xxMAC          0x02000000
+#define PPC_FEATURE_UNIFIED_CACHE       0x01000000
+#define PPC_FEATURE_HAS_SPE             0x00800000
+#define PPC_FEATURE_HAS_EFP_SINGLE      0x00400000
+#define PPC_FEATURE_HAS_EFP_DOUBLE      0x00200000
+#define PPC_FEATURE_NO_TB               0x00100000
+#define PPC_FEATURE_POWER4              0x00080000
+#define PPC_FEATURE_POWER5              0x00040000
+#define PPC_FEATURE_POWER5_PLUS         0x00020000
+#define PPC_FEATURE_CELL                0x00010000
+#define PPC_FEATURE_BOOKE               0x00008000
+#define PPC_FEATURE_SMT                 0x00004000
+#define PPC_FEATURE_ICACHE_SNOOP        0x00002000
+#define PPC_FEATURE_ARCH_2_05           0x00001000
+#define PPC_FEATURE_PA6T                0x00000800
+#define PPC_FEATURE_HAS_DFP             0x00000400
+#define PPC_FEATURE_POWER6_EXT          0x00000200
+#define PPC_FEATURE_ARCH_2_06           0x00000100
+#define PPC_FEATURE_HAS_VSX             0x00000080
+
+#define PPC_FEATURE_PSERIES_PERFMON_COMPAT \
+                                        0x00000040
+
+#define PPC_FEATURE_TRUE_LE             0x00000002
+#define PPC_FEATURE_PPC_LE              0x00000001
+
+/* Bits present in AT_HWCAP for Sparc.  */
+
+#define HWCAP_SPARC_FLUSH               0x00000001
+#define HWCAP_SPARC_STBAR               0x00000002
+#define HWCAP_SPARC_SWAP                0x00000004
+#define HWCAP_SPARC_MULDIV              0x00000008
+#define HWCAP_SPARC_V9                  0x00000010
+#define HWCAP_SPARC_ULTRA3              0x00000020
+#define HWCAP_SPARC_BLKINIT             0x00000040
+#define HWCAP_SPARC_N2                  0x00000080
+#define HWCAP_SPARC_MUL32               0x00000100
+#define HWCAP_SPARC_DIV32               0x00000200
+#define HWCAP_SPARC_FSMULD              0x00000400
+#define HWCAP_SPARC_V8PLUS              0x00000800
+#define HWCAP_SPARC_POPC                0x00001000
+#define HWCAP_SPARC_VIS                 0x00002000
+#define HWCAP_SPARC_VIS2                0x00004000
+#define HWCAP_SPARC_ASI_BLK_INIT        0x00008000
+#define HWCAP_SPARC_FMAF                0x00010000
+#define HWCAP_SPARC_VIS3                0x00020000
+#define HWCAP_SPARC_HPC                 0x00040000
+#define HWCAP_SPARC_RANDOM              0x00080000
+#define HWCAP_SPARC_TRANS               0x00100000
+#define HWCAP_SPARC_FJFMAU              0x00200000
+#define HWCAP_SPARC_IMA                 0x00400000
+#define HWCAP_SPARC_ASI_CACHE_SPARING   0x00800000
+#define HWCAP_SPARC_PAUSE               0x01000000
+#define HWCAP_SPARC_CBCOND              0x02000000
+#define HWCAP_SPARC_CRYPTO              0x04000000
+
+/* Bits present in AT_HWCAP for s390.  */
+
+#define HWCAP_S390_ESAN3        1
+#define HWCAP_S390_ZARCH        2
+#define HWCAP_S390_STFLE        4
+#define HWCAP_S390_MSA          8
+#define HWCAP_S390_LDISP        16
+#define HWCAP_S390_EIMM         32
+#define HWCAP_S390_DFP          64
+#define HWCAP_S390_HPAGE        128
+#define HWCAP_S390_ETF3EH       256
+#define HWCAP_S390_HIGH_GPRS    512
+#define HWCAP_S390_TE           1024
 
 /*
  * 68k ELF relocation types
@@ -486,6 +587,11 @@ typedef struct {
 
 #define SHF_ALPHA_GPREL		0x10000000
 
+
+/* PowerPC specific definitions.  */
+
+/* Processor specific flags for the ELF header e_flags field.  */
+#define EF_PPC64_ABI           0x3
 
 /* PowerPC relocations defined by the ABIs */
 #define R_PPC_NONE		0
@@ -1354,6 +1460,8 @@ typedef struct elf64_shdr {
 #define NT_TASKSTRUCT	4
 #define NT_AUXV		6
 #define NT_PRXFPREG     0x46e62b7f      /* copied from gdb5.1/include/elf/common.h */
+#define NT_S390_VXRS_HIGH 0x30a         /* s390 vector registers 16-31 */
+#define NT_S390_VXRS_LOW  0x309         /* s390 vector registers 0-15 (lower half) */
 #define NT_S390_PREFIX  0x305           /* s390 prefix register */
 #define NT_S390_CTRS    0x304           /* s390 control registers */
 #define NT_S390_TODPREG 0x303           /* s390 TOD programmable register */
@@ -1362,6 +1470,11 @@ typedef struct elf64_shdr {
 #define NT_PPC_VMX       0x100          /* PowerPC Altivec/VMX registers */
 #define NT_PPC_SPE       0x101          /* PowerPC SPE/EVR registers */
 #define NT_PPC_VSX       0x102          /* PowerPC VSX registers */
+#define NT_ARM_VFP      0x400           /* ARM VFP/NEON registers */
+#define NT_ARM_TLS      0x401           /* ARM TLS register */
+#define NT_ARM_HW_BREAK 0x402           /* ARM hardware breakpoint registers */
+#define NT_ARM_HW_WATCH 0x403           /* ARM hardware watchpoint registers */
+#define NT_ARM_SYSTEM_CALL      0x404   /* ARM system call number */
 
 
 /* Note header in a PT_NOTE section */
@@ -1406,6 +1519,7 @@ struct elf32_fdpic_loadmap {
 #define elf_shdr	elf32_shdr
 #define elf_sym		elf32_sym
 #define elf_addr_t	Elf32_Off
+#define elf_rela  elf32_rela
 
 #ifdef ELF_USES_RELOCA
 # define ELF_RELOC      Elf32_Rela
@@ -1421,6 +1535,7 @@ struct elf32_fdpic_loadmap {
 #define elf_shdr	elf64_shdr
 #define elf_sym		elf64_sym
 #define elf_addr_t	Elf64_Off
+#define elf_rela  elf64_rela
 
 #ifdef ELF_USES_RELOCA
 # define ELF_RELOC      Elf64_Rela

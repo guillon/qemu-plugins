@@ -19,9 +19,74 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
+#include "monitor/monitor.h"
 #include "hw/i386/ioapic.h"
 #include "hw/i386/ioapic_internal.h"
 #include "hw/sysbus.h"
+
+/* ioapic_no count start from 0 to MAX_IOAPICS,
+ * remove as static variable from ioapic_common_init.
+ * now as a global variable, let child to increase the counter
+ * then we can drop the 'instance_no' argument
+ * and convert to our QOM's realize function
+ */
+int ioapic_no;
+
+static void ioapic_irr_dump(Monitor *mon, const char *name, uint32_t bitmap)
+{
+    int i;
+
+    monitor_printf(mon, "%-10s ", name);
+    if (bitmap == 0) {
+        monitor_printf(mon, "(none)\n");
+        return;
+    }
+    for (i = 0; i < IOAPIC_NUM_PINS; i++) {
+        if (bitmap & (1 << i)) {
+            monitor_printf(mon, "%-2u ", i);
+        }
+    }
+    monitor_printf(mon, "\n");
+}
+
+void ioapic_print_redtbl(Monitor *mon, IOAPICCommonState *s)
+{
+    static const char *delm_str[] = {
+        "fixed", "lowest", "SMI", "...", "NMI", "INIT", "...", "extINT"};
+    uint32_t remote_irr = 0;
+    int i;
+
+    monitor_printf(mon, "ioapic id=0x%02x sel=0x%02x", s->id, s->ioregsel);
+    if (s->ioregsel) {
+        monitor_printf(mon, " (redir[%u])\n",
+                       (s->ioregsel - IOAPIC_REG_REDTBL_BASE) >> 1);
+    } else {
+        monitor_printf(mon, "\n");
+    }
+    for (i = 0; i < IOAPIC_NUM_PINS; i++) {
+        uint64_t entry = s->ioredtbl[i];
+        uint32_t delm = (uint32_t)((entry & IOAPIC_LVT_DELIV_MODE) >>
+                                   IOAPIC_LVT_DELIV_MODE_SHIFT);
+        monitor_printf(mon, "pin %-2u 0x%016"PRIx64" dest=%"PRIx64
+                       " vec=%-3"PRIu64" %s %-5s %-6s %-6s %s\n",
+                       i, entry,
+                       (entry >> IOAPIC_LVT_DEST_SHIFT) &
+                            (entry & IOAPIC_LVT_DEST_MODE ? 0xff : 0xf),
+                       entry & IOAPIC_VECTOR_MASK,
+                       entry & IOAPIC_LVT_POLARITY ? "active-lo" : "active-hi",
+                       entry & IOAPIC_LVT_TRIGGER_MODE ? "level" : "edge",
+                       entry & IOAPIC_LVT_MASKED ? "masked" : "",
+                       delm_str[delm],
+                       entry & IOAPIC_LVT_DEST_MODE ? "logical" : "physical");
+
+        remote_irr |= entry & IOAPIC_LVT_TRIGGER_MODE ?
+                        (entry & IOAPIC_LVT_REMOTE_IRR ? (1 << i) : 0) : 0;
+    }
+    ioapic_irr_dump(mon, "IRR", s->irr);
+    ioapic_irr_dump(mon, "Remote IRR", remote_irr);
+}
 
 void ioapic_reset_common(DeviceState *dev)
 {
@@ -61,7 +126,6 @@ static void ioapic_common_realize(DeviceState *dev, Error **errp)
 {
     IOAPICCommonState *s = IOAPIC_COMMON(dev);
     IOAPICCommonClass *info;
-    static int ioapic_no;
 
     if (ioapic_no >= MAX_IOAPICS) {
         error_setg(errp, "Only %d ioapics allowed", MAX_IOAPICS);
@@ -69,7 +133,7 @@ static void ioapic_common_realize(DeviceState *dev, Error **errp)
     }
 
     info = IOAPIC_COMMON_GET_CLASS(s);
-    info->init(s, ioapic_no);
+    info->realize(dev, errp);
 
     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->io_memory);
     ioapic_no++;
@@ -79,7 +143,6 @@ static const VMStateDescription vmstate_ioapic_common = {
     .name = "ioapic",
     .version_id = 3,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .pre_save = ioapic_dispatch_pre_save,
     .post_load = ioapic_dispatch_post_load,
     .fields = (VMStateField[]) {
@@ -98,7 +161,6 @@ static void ioapic_common_class_init(ObjectClass *klass, void *data)
 
     dc->realize = ioapic_common_realize;
     dc->vmsd = &vmstate_ioapic_common;
-    dc->no_user = 1;
 }
 
 static const TypeInfo ioapic_common_type = {
@@ -110,9 +172,9 @@ static const TypeInfo ioapic_common_type = {
     .abstract = true,
 };
 
-static void register_types(void)
+static void ioapic_common_register_types(void)
 {
     type_register_static(&ioapic_common_type);
 }
 
-type_init(register_types)
+type_init(ioapic_common_register_types)

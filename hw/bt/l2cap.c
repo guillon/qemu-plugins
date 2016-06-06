@@ -17,6 +17,7 @@
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu/timer.h"
 #include "hw/bt.h"
@@ -429,7 +430,7 @@ static struct l2cap_chan_s *l2cap_channel_open(struct l2cap_instance_s *l2cap,
                 status = L2CAP_CS_NO_INFO;
             } else {
                 g_free(ch);
-
+                ch = NULL;
                 result = L2CAP_CR_NO_MEM;
                 status = L2CAP_CS_NO_INFO;
             }

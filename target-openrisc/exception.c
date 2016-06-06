@@ -17,11 +17,14 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "cpu.h"
 #include "exception.h"
 
 void QEMU_NORETURN raise_exception(OpenRISCCPU *cpu, uint32_t excp)
 {
-    cpu->env.exception_index = excp;
-    cpu_loop_exit(&cpu->env);
+    CPUState *cs = CPU(cpu);
+
+    cs->exception_index = excp;
+    cpu_loop_exit(cs);
 }

@@ -46,8 +46,8 @@ struct XenDevice {
     int                remote_port;
     int                local_port;
 
-    XenEvtchn          evtchndev;
-    XenGnttab          gnttabdev;
+    xenevtchn_handle   *evtchndev;
+    xengnttab_handle   *gnttabdev;
 
     struct XenDevOps   *ops;
     QTAILQ_ENTRY(XenDevice) next;
@@ -56,7 +56,8 @@ struct XenDevice {
 /* ------------------------------------------------------------- */
 
 /* variables */
-extern XenXC xen_xc;
+extern xc_interface *xen_xc;
+extern xenforeignmemory_handle *xen_fmem;
 extern struct xs_handle *xenstore;
 extern const char *xen_protocol;
 
@@ -74,6 +75,8 @@ char *xenstore_read_be_str(struct XenDevice *xendev, const char *node);
 int xenstore_read_be_int(struct XenDevice *xendev, const char *node, int *ival);
 char *xenstore_read_fe_str(struct XenDevice *xendev, const char *node);
 int xenstore_read_fe_int(struct XenDevice *xendev, const char *node, int *ival);
+int xenstore_read_uint64(const char *base, const char *node, uint64_t *uval);
+int xenstore_read_fe_uint64(struct XenDevice *xendev, const char *node, uint64_t *uval);
 
 const char *xenbus_strstate(enum xenbus_state state);
 struct XenDevice *xen_be_find_xendev(const char *type, int dom, int dev);

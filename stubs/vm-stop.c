@@ -1,7 +1,13 @@
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "sysemu/sysemu.h"
 
-int vm_stop(RunState state)
+void qemu_system_vmstop_request_prepare(void)
+{
+    abort();
+}
+
+void qemu_system_vmstop_request(RunState state)
 {
     abort();
 }

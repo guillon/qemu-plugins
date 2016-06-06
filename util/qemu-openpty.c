@@ -32,7 +32,7 @@
  * linked with -lutil.
  */
 
-#include "config-host.h"
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 
 #if defined(__GLIBC__)
@@ -47,6 +47,8 @@
 #elif defined CONFIG_SOLARIS
 # include <termios.h>
 # include <stropts.h>
+#else
+# include <termios.h>
 #endif
 
 #ifdef __sun__

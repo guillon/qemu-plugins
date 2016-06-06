@@ -30,34 +30,53 @@
 #include <inttypes.h>
 #include <unistd.h>
 
-#include "tcg-op.h"
-#include "exec/def-helper.h"
 #include "tcg-plugin.h"
 
-#ifndef CONFIG_CAPSTONE
-void tpi_init(TCGPluginInterface *tpi)
-{
-    TPI_INIT_VERSION(*tpi);
-    fprintf(tpi->output,
-            "# WARNING: dyncount plugin disabled.\n"
-            "#          capstone was not found or forced no at qemu configure time.\n");
-}
-#else
-
+#ifdef CONFIG_CAPSTONE
 #include <capstone.h>
-
 /* Check compatibility with capstone 3.x. */
 #if CS_API_MAJOR < 3
 #error "dyncount plugin required capstone library >= 3.x. Please install from http://www.capstone-engine.org/."
 #endif
 
-/* Undef this for DEBUGGING plugin. */
-/*#define DEBUG_PLUGIN 1*/
+#if defined(TARGET_I386)
+#define CS_ARCH CS_ARCH_X86
+#define CS_MODE CS_MODE_32
+#define CS_GROUPS_NAME "x86"
+#elif defined(TARGET_X86_64)
+#define CS_ARCH CS_ARCH_X86
+#define CS_MODE CS_MODE_64
+#define CS_GROUPS_NAME "x86"
+#else
+#define CS_GROUPS_NAME ""
+#endif
+
+#endif /* CONFIG_CAPSTONE */
+
+#if !defined(CONFIG_CAPSTONE) || !defined(CS_ARCH)
+void tpi_init(TCGPluginInterface *tpi)
+{
+    TPI_INIT_VERSION_GENERIC(tpi);
+#if !defined(CONFIG_CAPSTONE)
+    fprintf(tpi->output,
+            "# WARNING: dyncount plugin disabled.\n"
+            "#          capstone library >= 3.x was not found when configuring QEMU.\n"
+            "#          Install capstone from http://www.capstone-engine.org/\n"
+            "#          and reconfigure/recompile QEMU.\n"
+        );
+#elsif !defined(CS_ARCH)
+    fprintf(tpi->output,
+            "# WARNING: dyncount plugin disabled.\n"
+            "           This plugin is not available for target " TARGET_NAME ".\n"
+        );
+#endif
+}
+#else
 
 #define MAX_PRINT_SIZE 128
 
 static csh cs_handle;
-static FILE * output;
+static FILE *output;
 static cs_insn *insn;
 
 static void write_str(uint64_t str_intptr)
@@ -65,16 +84,12 @@ static void write_str(uint64_t str_intptr)
     char *str = (char *)(intptr_t)str_intptr;
 
     fwrite(str, sizeof(char), strlen(str), output);
-    fflush(output);
 }
 
 static void gen_printf_insn(const TCGPluginInterface *tpi, cs_insn *insn)
 {
-    int sizemask = 0;
     TCGArg args[1];
-
     TCGv_i64 tcgv_str;
-
     size_t size = MAX_PRINT_SIZE*sizeof(char);
     size_t left;
     char *str = g_malloc(size);
@@ -105,46 +120,40 @@ static void gen_printf_insn(const TCGPluginInterface *tpi, cs_insn *insn)
 
     args[0] = GET_TCGV_I64(tcgv_str);
 
-    dh_sizemask(void, 0);
-    dh_sizemask(i64, 1);
-
-    tcg_gen_helperN(write_str, 0, sizemask, TCG_CALL_DUMMY_ARG, 1, args);
+    tcg_gen_callN(tpi->tcg_ctx, write_str, TCG_CALL_DUMMY_ARG, 1, args);
 
     tcg_temp_free_i64(tcgv_str);
 }
 
-static void decode_instr(const TCGPluginInterface *tpi, uint64_t pc)
+
+static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_opcode)
 {
     int decoded;
-    const uint8_t *code = (const uint8_t *)(intptr_t)pc;
+    const uint8_t *code = (const uint8_t *)(intptr_t)tpi_opcode->pc;
     size_t size = 4096;
-    uint64_t address = pc;
+    uint64_t address = tpi_opcode->pc;
+
+    if (tpi_opcode->operator != INDEX_op_insn_start) return;
     
     decoded = cs_disasm_iter(cs_handle,
                              &code, &size, &address, insn);
     if (decoded) {
-#ifdef DEBUG_PLUGIN
-        fprintf(output, "Decode: 0x%"PRIx64":\t%s\t\t%s\n",
-                insn->address,
-                insn->mnemonic,
-                insn->op_str);
-#endif
         gen_printf_insn(tpi, insn);
     } else {
-        fprintf(output, "tcg/plugins/dyntrace: unable to disassemble instruction at PC 0x%"PRIx64"\n", pc);
+        fprintf(output, "tcg/plugins/dyntrace: unable to disassemble instruction at PC 0x%"PRIx64"\n", tpi_opcode->pc);
     }
 }
 
 static void cpus_stopped(const TCGPluginInterface *tpi)
 {
-    fflush(output);
     cs_free(insn, 1);
     cs_close(&cs_handle);
 }
 
 void tpi_init(TCGPluginInterface *tpi)
 {
-    TPI_INIT_VERSION(*tpi);
+    TPI_INIT_VERSION_GENERIC(tpi);
+    TPI_DECL_FUNC_1(tpi, write_str, void, i64);
 
 #if defined(TARGET_X86_64)
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &cs_handle) != CS_ERR_OK)
@@ -161,7 +170,7 @@ void tpi_init(TCGPluginInterface *tpi)
     output = tpi->output;
     insn = cs_malloc(cs_handle);
 
-    tpi->decode_instr  = decode_instr;
+    tpi->after_gen_opc  = after_gen_opc;
     tpi->cpus_stopped  = cpus_stopped;
 }
 

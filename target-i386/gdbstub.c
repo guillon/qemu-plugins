@@ -17,7 +17,7 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
-#include "config.h"
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "exec/gdbstub.h"
 
@@ -61,8 +61,8 @@ int x86_cpu_gdb_read_register(CPUState *cs, uint8_t *mem_buf, int n)
         n -= IDX_XMM_REGS;
         if (n < CPU_NB_REGS32 ||
             (TARGET_LONG_BITS == 64 && env->hflags & HF_CS64_MASK)) {
-            stq_p(mem_buf, env->xmm_regs[n].XMM_Q(0));
-            stq_p(mem_buf + 8, env->xmm_regs[n].XMM_Q(1));
+            stq_p(mem_buf, env->xmm_regs[n].ZMM_Q(0));
+            stq_p(mem_buf + 8, env->xmm_regs[n].ZMM_Q(1));
             return 16;
         }
     } else {
@@ -127,9 +127,11 @@ static int x86_cpu_gdb_load_seg(X86CPU *cpu, int sreg, uint8_t *mem_buf)
         target_ulong base;
 
         if (!(env->cr[0] & CR0_PE_MASK) || (env->eflags & VM_MASK)) {
+            int dpl = (env->eflags & VM_MASK) ? 3 : 0;
             base = selector << 4;
             limit = 0xffff;
-            flags = 0;
+            flags = DESC_P_MASK | DESC_S_MASK | DESC_W_MASK |
+                    DESC_A_MASK | (dpl << DESC_DPL_SHIFT);
         } else {
             if (!cpu_x86_get_descr_debug(env, selector, &base, &limit,
                                          &flags)) {
@@ -168,8 +170,8 @@ int x86_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
         n -= IDX_XMM_REGS;
         if (n < CPU_NB_REGS32 ||
             (TARGET_LONG_BITS == 64 && env->hflags & HF_CS64_MASK)) {
-            env->xmm_regs[n].XMM_Q(0) = ldq_p(mem_buf);
-            env->xmm_regs[n].XMM_Q(1) = ldq_p(mem_buf + 8);
+            env->xmm_regs[n].ZMM_Q(0) = ldq_p(mem_buf);
+            env->xmm_regs[n].ZMM_Q(1) = ldq_p(mem_buf + 8);
             return 16;
         }
     } else {
@@ -201,7 +203,7 @@ int x86_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
             return x86_cpu_gdb_load_seg(cpu, R_GS, mem_buf);
 
         case IDX_FP_REGS + 8:
-            env->fpuc = ldl_p(mem_buf);
+            cpu_set_fpuc(env, ldl_p(mem_buf));
             return 4;
         case IDX_FP_REGS + 9:
             tmp = ldl_p(mem_buf);
@@ -222,7 +224,7 @@ int x86_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
             return 4;
 
         case IDX_MXCSR_REG:
-            env->mxcsr = ldl_p(mem_buf);
+            cpu_set_mxcsr(env, ldl_p(mem_buf));
             return 4;
         }
     }

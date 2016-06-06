@@ -23,15 +23,18 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "qemu-common.h"
 #include "hw/usb.h"
 #include "hw/usb/desc.h"
 #include "net/net.h"
-#include "qapi/qmp/qerror.h"
+#include "qemu/error-report.h"
 #include "qemu/queue.h"
 #include "qemu/config-file.h"
 #include "sysemu/sysemu.h"
 #include "qemu/iov.h"
+#include "qemu/cutils.h"
 
 /*#define TRAFFIC_DEBUG*/
 /* Thanks to NetChip Technologies for donating this product ID.
@@ -266,7 +269,7 @@ static const USBDescDevice desc_device_net = {
             .bNumInterfaces        = 2,
             .bConfigurationValue   = DEV_RNDIS_CONFIG_VALUE,
             .iConfiguration        = STRING_RNDIS,
-            .bmAttributes          = 0xc0,
+            .bmAttributes          = USB_CFG_ATT_ONE | USB_CFG_ATT_SELFPOWER,
             .bMaxPower             = 0x32,
             .nif = ARRAY_SIZE(desc_iface_rndis),
             .ifs = desc_iface_rndis,
@@ -274,7 +277,7 @@ static const USBDescDevice desc_device_net = {
             .bNumInterfaces        = 2,
             .bConfigurationValue   = DEV_CONFIG_VALUE,
             .iConfiguration        = STRING_CDC,
-            .bmAttributes          = 0xc0,
+            .bmAttributes          = USB_CFG_ATT_ONE | USB_CFG_ATT_SELFPOWER,
             .bMaxPower             = 0x32,
             .nif = ARRAY_SIZE(desc_iface_cdc),
             .ifs = desc_iface_cdc,
@@ -648,9 +651,13 @@ typedef struct USBNetState {
     QTAILQ_HEAD(rndis_resp_head, rndis_response) rndis_resp;
 } USBNetState;
 
+#define TYPE_USB_NET "usb-net"
+#define USB_NET(obj) OBJECT_CHECK(USBNetState, (obj), TYPE_USB_NET)
+
 static int is_rndis(USBNetState *s)
 {
-    return s->dev.config->bConfigurationValue == DEV_RNDIS_CONFIG_VALUE;
+    return s->dev.config ?
+            s->dev.config->bConfigurationValue == DEV_RNDIS_CONFIG_VALUE : 0;
 }
 
 static int ndis_query(USBNetState *s, uint32_t oid,
@@ -911,8 +918,9 @@ static int rndis_query_response(USBNetState *s,
 
     bufoffs = le32_to_cpu(buf->InformationBufferOffset) + 8;
     buflen = le32_to_cpu(buf->InformationBufferLength);
-    if (bufoffs + buflen > length)
+    if (buflen > length || bufoffs >= length || bufoffs + buflen > length) {
         return USB_RET_STALL;
+    }
 
     infobuflen = ndis_query(s, le32_to_cpu(buf->OID),
                             bufoffs + (uint8_t *) buf, buflen, infobuf,
@@ -957,8 +965,9 @@ static int rndis_set_response(USBNetState *s,
 
     bufoffs = le32_to_cpu(buf->InformationBufferOffset) + 8;
     buflen = le32_to_cpu(buf->InformationBufferLength);
-    if (bufoffs + buflen > length)
+    if (buflen > length || bufoffs >= length || bufoffs + buflen > length) {
         return USB_RET_STALL;
+    }
 
     ret = ndis_set(s, le32_to_cpu(buf->OID),
                     bufoffs + (uint8_t *) buf, buflen);
@@ -1208,8 +1217,9 @@ static void usb_net_handle_dataout(USBNetState *s, USBPacket *p)
     if (le32_to_cpu(msg->MessageType) == RNDIS_PACKET_MSG) {
         uint32_t offs = 8 + le32_to_cpu(msg->DataOffset);
         uint32_t size = le32_to_cpu(msg->DataLength);
-        if (offs + size <= len)
+        if (offs < len && size < len && offs + size <= len) {
             qemu_send_packet(qemu_get_queue(s->nic), s->out_buf + offs, size);
+        }
     }
     s->out_ptr -= len;
     memmove(s->out_buf, &s->out_buf[len], s->out_ptr);
@@ -1265,6 +1275,10 @@ static ssize_t usbnet_receive(NetClientState *nc, const uint8_t *buf, size_t siz
     uint8_t *in_buf = s->in_buf;
     size_t total_size = size;
 
+    if (!s->dev.config) {
+        return -1;
+    }
+
     if (is_rndis(s)) {
         if (s->rndis_state != RNDIS_DATA_INITIALIZED) {
             return -1;
@@ -1306,17 +1320,6 @@ static ssize_t usbnet_receive(NetClientState *nc, const uint8_t *buf, size_t siz
     return size;
 }
 
-static int usbnet_can_receive(NetClientState *nc)
-{
-    USBNetState *s = qemu_get_nic_opaque(nc);
-
-    if (is_rndis(s) && s->rndis_state != RNDIS_DATA_INITIALIZED) {
-        return 1;
-    }
-
-    return !s->in_len;
-}
-
 static void usbnet_cleanup(NetClientState *nc)
 {
     USBNetState *s = qemu_get_nic_opaque(nc);
@@ -1336,14 +1339,13 @@ static void usb_net_handle_destroy(USBDevice *dev)
 static NetClientInfo net_usbnet_info = {
     .type = NET_CLIENT_OPTIONS_KIND_NIC,
     .size = sizeof(NICState),
-    .can_receive = usbnet_can_receive,
     .receive = usbnet_receive,
     .cleanup = usbnet_cleanup,
 };
 
-static int usb_net_initfn(USBDevice *dev)
+static void usb_net_realize(USBDevice *dev, Error **errrp)
 {
-    USBNetState *s = DO_UPCAST(USBNetState, dev, dev);
+    USBNetState *s = USB_NET(dev);
 
     usb_desc_create_serial(dev);
     usb_desc_init(dev);
@@ -1371,9 +1373,16 @@ static int usb_net_initfn(USBDevice *dev)
              s->conf.macaddr.a[4],
              s->conf.macaddr.a[5]);
     usb_desc_set_string(dev, STRING_ETHADDR, s->usbstring_mac);
+}
 
-    add_boot_device_path(s->conf.bootindex, &dev->qdev, "/ethernet@0");
-    return 0;
+static void usb_net_instance_init(Object *obj)
+{
+    USBDevice *dev = USB_DEVICE(obj);
+    USBNetState *s = USB_NET(dev);
+
+    device_add_bootindex_property(obj, &s->conf.bootindex,
+                                  "bootindex", "/ethernet-phy@0",
+                                  &dev->qdev, NULL);
 }
 
 static USBDevice *usb_net_init(USBBus *bus, const char *cmdline)
@@ -1383,26 +1392,21 @@ static USBDevice *usb_net_init(USBBus *bus, const char *cmdline)
     QemuOpts *opts;
     int idx;
 
-    opts = qemu_opts_parse(qemu_find_opts("net"), cmdline, 0);
+    opts = qemu_opts_parse_noisily(qemu_find_opts("net"), cmdline, false);
     if (!opts) {
         return NULL;
     }
-    qemu_opt_set(opts, "type", "nic");
-    qemu_opt_set(opts, "model", "usb");
+    qemu_opt_set(opts, "type", "nic", &error_abort);
+    qemu_opt_set(opts, "model", "usb", &error_abort);
 
     idx = net_client_init(opts, 0, &local_err);
-    if (error_is_set(&local_err)) {
-        qerror_report_err(local_err);
-        error_free(local_err);
+    if (local_err) {
+        error_report_err(local_err);
         return NULL;
     }
 
     dev = usb_create(bus, "usb-net");
-    if (!dev) {
-        return NULL;
-    }
     qdev_set_nic_properties(&dev->qdev, &nd_table[idx]);
-    qdev_init_nofail(&dev->qdev);
     return dev;
 }
 
@@ -1421,7 +1425,7 @@ static void usb_net_class_initfn(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
-    uc->init           = usb_net_initfn;
+    uc->realize        = usb_net_realize;
     uc->product_desc   = "QEMU USB Network Interface";
     uc->usb_desc       = &desc_net;
     uc->handle_reset   = usb_net_handle_reset;
@@ -1435,16 +1439,17 @@ static void usb_net_class_initfn(ObjectClass *klass, void *data)
 }
 
 static const TypeInfo net_info = {
-    .name          = "usb-net",
+    .name          = TYPE_USB_NET,
     .parent        = TYPE_USB_DEVICE,
     .instance_size = sizeof(USBNetState),
     .class_init    = usb_net_class_initfn,
+    .instance_init = usb_net_instance_init,
 };
 
 static void usb_net_register_types(void)
 {
     type_register_static(&net_info);
-    usb_legacy_register("usb-net", "net", usb_net_init);
+    usb_legacy_register(TYPE_USB_NET, "net", usb_net_init);
 }
 
 type_init(usb_net_register_types)

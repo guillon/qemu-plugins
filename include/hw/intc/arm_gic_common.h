@@ -27,8 +27,15 @@
 #define GIC_MAXIRQ 1020
 /* First 32 are private to each CPU (SGIs and PPIs). */
 #define GIC_INTERNAL 32
+#define GIC_NR_SGIS 16
 /* Maximum number of possible CPU interfaces, determined by GIC architecture */
 #define GIC_NCPU 8
+
+#define MAX_NR_GROUP_PRIO 128
+#define GIC_NR_APRS (MAX_NR_GROUP_PRIO / 32)
+
+#define GIC_MIN_BPR 0
+#define GIC_MIN_ABPR (GIC_MIN_BPR + 1)
 
 typedef struct gic_irq_state {
     /* The enable bits are only banked for per-cpu interrupts.  */
@@ -37,7 +44,8 @@ typedef struct gic_irq_state {
     uint8_t active;
     uint8_t level;
     bool model; /* 0 = N:N, 1 = 1:N */
-    bool trigger; /* nonzero = edge triggered.  */
+    bool edge_trigger; /* true: edge-triggered, false: level-triggered  */
+    uint8_t group;
 } gic_irq_state;
 
 typedef struct GICState {
@@ -46,19 +54,49 @@ typedef struct GICState {
     /*< public >*/
 
     qemu_irq parent_irq[GIC_NCPU];
-    bool enabled;
-    bool cpu_enabled[GIC_NCPU];
+    qemu_irq parent_fiq[GIC_NCPU];
+    /* GICD_CTLR; for a GIC with the security extensions the NS banked version
+     * of this register is just an alias of bit 1 of the S banked version.
+     */
+    uint32_t ctlr;
+    /* GICC_CTLR; again, the NS banked version is just aliases of bits of
+     * the S banked register, so our state only needs to store the S version.
+     */
+    uint32_t cpu_ctlr[GIC_NCPU];
 
     gic_irq_state irq_state[GIC_MAXIRQ];
     uint8_t irq_target[GIC_MAXIRQ];
     uint8_t priority1[GIC_INTERNAL][GIC_NCPU];
     uint8_t priority2[GIC_MAXIRQ - GIC_INTERNAL];
-    uint16_t last_active[GIC_MAXIRQ][GIC_NCPU];
+    /* For each SGI on the target CPU, we store 8 bits
+     * indicating which source CPUs have made this SGI
+     * pending on the target CPU. These correspond to
+     * the bytes in the GIC_SPENDSGIR* registers as
+     * read by the target CPU.
+     */
+    uint8_t sgi_pending[GIC_NR_SGIS][GIC_NCPU];
 
     uint16_t priority_mask[GIC_NCPU];
-    uint16_t running_irq[GIC_NCPU];
     uint16_t running_priority[GIC_NCPU];
     uint16_t current_pending[GIC_NCPU];
+
+    /* If we present the GICv2 without security extensions to a guest,
+     * the guest can configure the GICC_CTLR to configure group 1 binary point
+     * in the abpr.
+     * For a GIC with Security Extensions we use use bpr for the
+     * secure copy and abpr as storage for the non-secure copy of the register.
+     */
+    uint8_t  bpr[GIC_NCPU];
+    uint8_t  abpr[GIC_NCPU];
+
+    /* The APR is implementation defined, so we choose a layout identical to
+     * the KVM ABI layout for QEMU's implementation of the gic:
+     * If an interrupt for preemption level X is active, then
+     *   APRn[X mod 32] == 0b1,  where n = X / 32
+     * otherwise the bit is clear.
+     */
+    uint32_t apr[GIC_NR_APRS][GIC_NCPU];
+    uint32_t nsapr[GIC_NR_APRS][GIC_NCPU];
 
     uint32_t num_cpu;
 
@@ -70,6 +108,10 @@ typedef struct GICState {
     MemoryRegion cpuiomem[GIC_NCPU + 1]; /* CPU interfaces */
     uint32_t num_irq;
     uint32_t revision;
+    bool security_extn;
+    bool irq_reset_nonsecure; /* configure IRQs as group 1 (NS) on reset? */
+    int dev_fd; /* kvm device fd if backed by kvm vgic support */
+    Error *migration_blocker;
 } GICState;
 
 #define TYPE_ARM_GIC_COMMON "arm_gic_common"
@@ -88,5 +130,8 @@ typedef struct ARMGICCommonClass {
     void (*pre_save)(GICState *s);
     void (*post_load)(GICState *s);
 } ARMGICCommonClass;
+
+void gic_init_irqs_and_mmio(GICState *s, qemu_irq_handler handler,
+                            const MemoryRegionOps *ops);
 
 #endif

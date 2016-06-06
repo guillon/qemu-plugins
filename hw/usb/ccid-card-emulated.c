@@ -26,6 +26,7 @@
  * the db parameter.
  */
 
+#include "qemu/osdep.h"
 #include <eventt.h>
 #include <vevent.h>
 #include <vreader.h>
@@ -33,7 +34,6 @@
 
 #include "qemu/thread.h"
 #include "sysemu/char.h"
-#include "monitor/monitor.h"
 #include "ccid.h"
 
 #define DPRINTF(card, lvl, fmt, ...) \
@@ -43,7 +43,10 @@ do {\
     } \
 } while (0)
 
-#define EMULATED_DEV_NAME "ccid-card-emulated"
+
+#define TYPE_EMULATED_CCID "ccid-card-emulated"
+#define EMULATED_CCID_CARD(obj) \
+    OBJECT_CHECK(EmulatedState, (obj), TYPE_EMULATED_CCID)
 
 #define BACKEND_NSS_EMULATED_NAME "nss-emulated"
 #define BACKEND_CERTIFICATES_NAME "certificates"
@@ -126,7 +129,7 @@ struct EmulatedState {
     QemuMutex vreader_mutex; /* and guest_apdu_list mutex */
     QemuMutex handle_apdu_mutex;
     QemuCond handle_apdu_cond;
-    int      pipe[2];
+    EventNotifier notifier;
     int      quit_apdu_thread;
     QemuThread apdu_thread_id;
 };
@@ -134,7 +137,7 @@ struct EmulatedState {
 static void emulated_apdu_from_guest(CCIDCardState *base,
     const uint8_t *apdu, uint32_t len)
 {
-    EmulatedState *card = DO_UPCAST(EmulatedState, base, base);
+    EmulatedState *card = EMULATED_CCID_CARD(base);
     EmulEvent *event = (EmulEvent *)g_malloc(sizeof(EmulEvent) + len);
 
     assert(event);
@@ -151,7 +154,7 @@ static void emulated_apdu_from_guest(CCIDCardState *base,
 
 static const uint8_t *emulated_get_atr(CCIDCardState *base, uint32_t *len)
 {
-    EmulatedState *card = DO_UPCAST(EmulatedState, base, base);
+    EmulatedState *card = EMULATED_CCID_CARD(base);
 
     *len = card->atr_length;
     return card->atr;
@@ -162,14 +165,12 @@ static void emulated_push_event(EmulatedState *card, EmulEvent *event)
     qemu_mutex_lock(&card->event_list_mutex);
     QSIMPLEQ_INSERT_TAIL(&(card->event_list), event, entry);
     qemu_mutex_unlock(&card->event_list_mutex);
-    if (write(card->pipe[1], card, 1) != 1) {
-        DPRINTF(card, 1, "write to pipe failed\n");
-    }
+    event_notifier_set(&card->notifier);
 }
 
 static void emulated_push_type(EmulatedState *card, uint32_t type)
 {
-    EmulEvent *event = (EmulEvent *)g_malloc(sizeof(EmulEvent));
+    EmulEvent *event = g_new(EmulEvent, 1);
 
     assert(event);
     event->p.gen.type = type;
@@ -178,7 +179,7 @@ static void emulated_push_type(EmulatedState *card, uint32_t type)
 
 static void emulated_push_error(EmulatedState *card, uint64_t code)
 {
-    EmulEvent *event = (EmulEvent *)g_malloc(sizeof(EmulEvent));
+    EmulEvent *event = g_new(EmulEvent, 1);
 
     assert(event);
     event->p.error.type = EMUL_ERROR;
@@ -358,16 +359,12 @@ static void *event_thread(void *arg)
     return NULL;
 }
 
-static void pipe_read(void *opaque)
+static void card_event_handler(EventNotifier *notifier)
 {
-    EmulatedState *card = opaque;
+    EmulatedState *card = container_of(notifier, EmulatedState, notifier);
     EmulEvent *event, *next;
-    char dummy;
-    int len;
 
-    do {
-        len = read(card->pipe[0], &dummy, sizeof(dummy));
-    } while (len == sizeof(dummy));
+    event_notifier_test_and_clear(&card->notifier);
     qemu_mutex_lock(&card->event_list_mutex);
     QSIMPLEQ_FOREACH_SAFE(event, &card->event_list, entry, next) {
         DPRINTF(card, 2, "event %s\n", emul_event_to_string(event->p.gen.type));
@@ -404,16 +401,13 @@ static void pipe_read(void *opaque)
     qemu_mutex_unlock(&card->event_list_mutex);
 }
 
-static int init_pipe_signaling(EmulatedState *card)
+static int init_event_notifier(EmulatedState *card)
 {
-    if (pipe(card->pipe) < 0) {
-        DPRINTF(card, 2, "pipe creation failed\n");
+    if (event_notifier_init(&card->notifier, false) < 0) {
+        DPRINTF(card, 2, "event notifier creation failed\n");
         return -1;
     }
-    fcntl(card->pipe[0], F_SETFL, O_NONBLOCK);
-    fcntl(card->pipe[1], F_SETFL, O_NONBLOCK);
-    fcntl(card->pipe[0], F_SETOWN, getpid());
-    qemu_set_fd_handler(card->pipe[0], pipe_read, NULL, card);
+    event_notifier_set_handler(&card->notifier, false, card_event_handler);
     return 0;
 }
 
@@ -488,7 +482,7 @@ static uint32_t parse_enumeration(char *str,
 
 static int emulated_initfn(CCIDCardState *base)
 {
-    EmulatedState *card = DO_UPCAST(EmulatedState, base, base);
+    EmulatedState *card = EMULATED_CCID_CARD(base);
     VCardEmulError ret;
     const EnumTable *ptable;
 
@@ -500,7 +494,7 @@ static int emulated_initfn(CCIDCardState *base)
     qemu_cond_init(&card->handle_apdu_cond);
     card->reader = NULL;
     card->quit_apdu_thread = 0;
-    if (init_pipe_signaling(card) < 0) {
+    if (init_event_notifier(card) < 0) {
         return -1;
     }
 
@@ -524,38 +518,38 @@ static int emulated_initfn(CCIDCardState *base)
             ret = emulated_initialize_vcard_from_certificates(card);
         } else {
             printf("%s: you must provide all three certs for"
-                   " certificates backend\n", EMULATED_DEV_NAME);
+                   " certificates backend\n", TYPE_EMULATED_CCID);
             return -1;
         }
     } else {
         if (card->backend != BACKEND_NSS_EMULATED) {
             printf("%s: bad backend specified. The options are:\n%s (default),"
-                " %s.\n", EMULATED_DEV_NAME, BACKEND_NSS_EMULATED_NAME,
+                " %s.\n", TYPE_EMULATED_CCID, BACKEND_NSS_EMULATED_NAME,
                 BACKEND_CERTIFICATES_NAME);
             return -1;
         }
         if (card->cert1 != NULL || card->cert2 != NULL || card->cert3 != NULL) {
             printf("%s: unexpected cert parameters to nss emulated backend\n",
-                   EMULATED_DEV_NAME);
+                   TYPE_EMULATED_CCID);
             return -1;
         }
         /* default to mirroring the local hardware readers */
         ret = wrap_vcard_emul_init(NULL);
     }
     if (ret != VCARD_EMUL_OK) {
-        printf("%s: failed to initialize vcard\n", EMULATED_DEV_NAME);
+        printf("%s: failed to initialize vcard\n", TYPE_EMULATED_CCID);
         return -1;
     }
-    qemu_thread_create(&card->event_thread_id, event_thread, card,
-                       QEMU_THREAD_JOINABLE);
-    qemu_thread_create(&card->apdu_thread_id, handle_apdu_thread, card,
-                       QEMU_THREAD_JOINABLE);
+    qemu_thread_create(&card->event_thread_id, "ccid/event", event_thread,
+                       card, QEMU_THREAD_JOINABLE);
+    qemu_thread_create(&card->apdu_thread_id, "ccid/apdu", handle_apdu_thread,
+                       card, QEMU_THREAD_JOINABLE);
     return 0;
 }
 
 static int emulated_exitfn(CCIDCardState *base)
 {
-    EmulatedState *card = DO_UPCAST(EmulatedState, base, base);
+    EmulatedState *card = EMULATED_CCID_CARD(base);
     VEvent *vevent = vevent_new(VEVENT_LAST, NULL, NULL);
 
     vevent_queue_vevent(vevent); /* stop vevent thread */
@@ -598,7 +592,7 @@ static void emulated_class_initfn(ObjectClass *klass, void *data)
 }
 
 static const TypeInfo emulated_card_info = {
-    .name          = EMULATED_DEV_NAME,
+    .name          = TYPE_EMULATED_CCID,
     .parent        = TYPE_CCID_CARD,
     .instance_size = sizeof(EmulatedState),
     .class_init    = emulated_class_initfn,

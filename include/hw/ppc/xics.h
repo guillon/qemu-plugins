@@ -109,6 +109,7 @@ struct ICPState {
     uint8_t pending_priority;
     uint8_t mfrr;
     qemu_irq output;
+    bool cap_irq_xics_enabled;
 };
 
 #define TYPE_ICS "ics"
@@ -136,7 +137,6 @@ struct ICSState {
     uint32_t nr_irqs;
     uint32_t offset;
     qemu_irq *qirqs;
-    bool *islsi;
     ICSIRQState *irqs;
     XICSState *icp;
 };
@@ -150,10 +150,21 @@ struct ICSIRQState {
 #define XICS_STATUS_REJECTED           0x4
 #define XICS_STATUS_MASKED_PENDING     0x8
     uint8_t status;
+/* (flags & XICS_FLAGS_IRQ_MASK) == 0 means the interrupt is not allocated */
+#define XICS_FLAGS_IRQ_LSI             0x1
+#define XICS_FLAGS_IRQ_MSI             0x2
+#define XICS_FLAGS_IRQ_MASK            0x3
+    uint8_t flags;
 };
+
+#define XICS_IRQS               1024
 
 qemu_irq xics_get_qirq(XICSState *icp, int irq);
 void xics_set_irq_type(XICSState *icp, int irq, bool lsi);
+int xics_alloc(XICSState *icp, int src, int irq_hint, bool lsi, Error **errp);
+int xics_alloc_block(XICSState *icp, int src, int num, bool lsi, bool align,
+                     Error **errp);
+void xics_free(XICSState *icp, int irq, int num);
 
 void xics_cpu_setup(XICSState *icp, PowerPCCPU *cpu);
 

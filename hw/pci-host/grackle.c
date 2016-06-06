@@ -23,6 +23,7 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "hw/pci/pci_host.h"
 #include "hw/ppc/mac.h"
 #include "hw/pci/pci.h"
@@ -82,7 +83,7 @@ PCIBus *pci_grackle_init(uint32_t base, qemu_irq *pic,
     memory_region_add_subregion(address_space_mem, 0x80000000ULL,
                                 &d->pci_hole);
 
-    phb->bus = pci_register_bus(dev, "pci",
+    phb->bus = pci_register_bus(dev, NULL,
                                 pci_grackle_set_irq,
                                 pci_grackle_map_irq,
                                 pic,
@@ -114,10 +115,9 @@ static int pci_grackle_init_device(SysBusDevice *dev)
     return 0;
 }
 
-static int grackle_pci_host_init(PCIDevice *d)
+static void grackle_pci_host_realize(PCIDevice *d, Error **errp)
 {
     d->config[0x09] = 0x01;
-    return 0;
 }
 
 static void grackle_pci_class_init(ObjectClass *klass, void *data)
@@ -125,12 +125,16 @@ static void grackle_pci_class_init(ObjectClass *klass, void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    k->init      = grackle_pci_host_init;
+    k->realize   = grackle_pci_host_realize;
     k->vendor_id = PCI_VENDOR_ID_MOTOROLA;
     k->device_id = PCI_DEVICE_ID_MOTOROLA_MPC106;
     k->revision  = 0x00;
     k->class_id  = PCI_CLASS_BRIDGE_HOST;
-    dc->no_user = 1;
+    /*
+     * PCI-facing part of the host bridge, not usable without the
+     * host-facing part, which can't be device_add'ed, yet.
+     */
+    dc->cannot_instantiate_with_device_add_yet = true;
 }
 
 static const TypeInfo grackle_pci_info = {
@@ -146,7 +150,7 @@ static void pci_grackle_class_init(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     k->init = pci_grackle_init_device;
-    dc->no_user = 1;
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
 }
 
 static const TypeInfo grackle_pci_host_info = {

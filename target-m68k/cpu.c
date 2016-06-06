@@ -18,6 +18,8 @@
  * <http://www.gnu.org/licenses/lgpl-2.1.html>
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "cpu.h"
 #include "qemu-common.h"
 #include "migration/vmstate.h"
@@ -28,6 +30,11 @@ static void m68k_cpu_set_pc(CPUState *cs, vaddr value)
     M68kCPU *cpu = M68K_CPU(cs);
 
     cpu->env.pc = value;
+}
+
+static bool m68k_cpu_has_work(CPUState *cs)
+{
+    return cs->interrupt_request & CPU_INTERRUPT_HARD;
 }
 
 static void m68k_set_feature(CPUM68KState *env, int feature)
@@ -44,7 +51,7 @@ static void m68k_cpu_reset(CPUState *s)
 
     mcc->parent_reset(s);
 
-    memset(env, 0, offsetof(CPUM68KState, breakpoints));
+    memset(env, 0, offsetof(CPUM68KState, features));
 #if !defined(CONFIG_USER_ONLY)
     env->sr = 0x2700;
 #endif
@@ -53,7 +60,12 @@ static void m68k_cpu_reset(CPUState *s)
     env->cc_op = CC_OP_FLAGS;
     /* TODO: We should set PC from the interrupt vector.  */
     env->pc = 0;
-    tlb_flush(env, 1);
+    tlb_flush(s, 1);
+}
+
+static void m68k_cpu_disas_set_info(CPUState *cpu, disassemble_info *info)
+{
+    info->print_insn = print_insn_m68k;
 }
 
 /* CPU models */
@@ -163,7 +175,7 @@ static void m68k_cpu_initfn(Object *obj)
     static bool inited;
 
     cs->env_ptr = env;
-    cpu_exec_init(env);
+    cpu_exec_init(cs, &error_abort);
 
     if (tcg_enabled() && !inited) {
         inited = true;
@@ -189,17 +201,33 @@ static void m68k_cpu_class_init(ObjectClass *c, void *data)
     cc->reset = m68k_cpu_reset;
 
     cc->class_by_name = m68k_cpu_class_by_name;
+    cc->has_work = m68k_cpu_has_work;
     cc->do_interrupt = m68k_cpu_do_interrupt;
+    cc->cpu_exec_interrupt = m68k_cpu_exec_interrupt;
     cc->dump_state = m68k_cpu_dump_state;
     cc->set_pc = m68k_cpu_set_pc;
     cc->gdb_read_register = m68k_cpu_gdb_read_register;
     cc->gdb_write_register = m68k_cpu_gdb_write_register;
-#ifndef CONFIG_USER_ONLY
+#ifdef CONFIG_USER_ONLY
+    cc->handle_mmu_fault = m68k_cpu_handle_mmu_fault;
+#else
     cc->get_phys_page_debug = m68k_cpu_get_phys_page_debug;
 #endif
-    dc->vmsd = &vmstate_m68k_cpu;
+    cc->cpu_exec_enter = m68k_cpu_exec_enter;
+    cc->cpu_exec_exit = m68k_cpu_exec_exit;
+    cc->disas_set_info = m68k_cpu_disas_set_info;
+
     cc->gdb_num_core_regs = 18;
     cc->gdb_core_xml_file = "cf-core.xml";
+
+    dc->vmsd = &vmstate_m68k_cpu;
+
+    /*
+     * Reason: m68k_cpu_initfn() calls cpu_exec_init(), which saves
+     * the object in cpus -> dangling pointer after final
+     * object_unref().
+     */
+    dc->cannot_destroy_with_object_finalize_yet = true;
 }
 
 static void register_cpu_type(const M68kCPUInfo *info)

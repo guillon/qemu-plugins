@@ -22,7 +22,7 @@
 
 #include "qom/cpu.h"
 #include "cpu.h"
-#include "qapi/error.h"
+#include "qemu/notify.h"
 
 #ifdef TARGET_X86_64
 #define TYPE_X86_CPU "x86_64-cpu"
@@ -38,7 +38,17 @@
     OBJECT_GET_CLASS(X86CPUClass, (obj), TYPE_X86_CPU)
 
 /**
+ * X86CPUDefinition:
+ *
+ * CPU model definition data that was not converted to QOM per-subclass
+ * property defaults yet.
+ */
+typedef struct X86CPUDefinition X86CPUDefinition;
+
+/**
  * X86CPUClass:
+ * @cpu_def: CPU model definition
+ * @kvm_required: Whether CPU model requires KVM to be enabled.
  * @parent_realize: The parent class' realize handler.
  * @parent_reset: The parent class' reset handler.
  *
@@ -49,6 +59,11 @@ typedef struct X86CPUClass {
     CPUClass parent_class;
     /*< public >*/
 
+    /* Should be eventually replaced by subclass-specific property defaults. */
+    X86CPUDefinition *cpu_def;
+
+    bool kvm_required;
+
     DeviceRealize parent_realize;
     void (*parent_reset)(CPUState *cpu);
 } X86CPUClass;
@@ -56,6 +71,9 @@ typedef struct X86CPUClass {
 /**
  * X86CPU:
  * @env: #CPUX86State
+ * @migratable: If set, only migratable flags will be accepted when "enforce"
+ * mode is used, and only migratable flags will be included in the "host"
+ * CPU model.
  *
  * An x86 CPU.
  */
@@ -69,6 +87,20 @@ typedef struct X86CPU {
     bool hyperv_vapic;
     bool hyperv_relaxed_timing;
     int hyperv_spinlock_attempts;
+    char *hyperv_vendor_id;
+    bool hyperv_time;
+    bool hyperv_crash;
+    bool hyperv_reset;
+    bool hyperv_vpindex;
+    bool hyperv_runtime;
+    bool hyperv_synic;
+    bool hyperv_stimer;
+    bool check_cpuid;
+    bool enforce_cpuid;
+    bool expose_kvm;
+    bool migratable;
+    bool host_features;
+    int64_t apic_id;
 
     /* if true the CPUID code directly forward host cache leaves to the guest */
     bool cache_info_passthrough;
@@ -82,6 +114,12 @@ typedef struct X86CPU {
      * capabilities) directly to the guest.
      */
     bool enable_pmu;
+
+    /* in order to simplify APIC support, we leave this pointer to the
+       user */
+    struct DeviceState *apic_state;
+    struct MemoryRegion *cpu_as_root, *cpu_as_mem, *smram;
+    Notifier machine_done;
 } X86CPU;
 
 static inline X86CPU *x86_env_get_cpu(CPUX86State *env)
@@ -94,7 +132,7 @@ static inline X86CPU *x86_env_get_cpu(CPUX86State *env)
 #define ENV_OFFSET offsetof(X86CPU, env)
 
 #ifndef CONFIG_USER_ONLY
-extern const struct VMStateDescription vmstate_x86_cpu;
+extern struct VMStateDescription vmstate_x86_cpu;
 #endif
 
 /**
@@ -102,6 +140,7 @@ extern const struct VMStateDescription vmstate_x86_cpu;
  * @cpu: vCPU the interrupt is to be handled by.
  */
 void x86_cpu_do_interrupt(CPUState *cpu);
+bool x86_cpu_exec_interrupt(CPUState *cpu, int int_req);
 
 int x86_cpu_write_elf64_note(WriteCoreDumpFunction f, CPUState *cpu,
                              int cpuid, void *opaque);
@@ -122,5 +161,8 @@ hwaddr x86_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
 
 int x86_cpu_gdb_read_register(CPUState *cpu, uint8_t *buf, int reg);
 int x86_cpu_gdb_write_register(CPUState *cpu, uint8_t *buf, int reg);
+
+void x86_cpu_exec_enter(CPUState *cpu);
+void x86_cpu_exec_exit(CPUState *cpu);
 
 #endif

@@ -21,6 +21,7 @@
  *
  */
 
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "bitbang_i2c.h"
 
@@ -81,7 +82,7 @@ static int versatile_i2c_init(SysBusDevice *sbd)
 {
     DeviceState *dev = DEVICE(sbd);
     VersatileI2CState *s = VERSATILE_I2C(dev);
-    i2c_bus *bus;
+    I2CBus *bus;
 
     bus = i2c_init_bus(dev, "i2c");
     s->bitbang = bitbang_i2c_init(bus);

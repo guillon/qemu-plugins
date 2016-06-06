@@ -27,12 +27,12 @@
 #ifndef TCG_PLUGIN_H
 #define TCG_PLUGIN_H
 
+#include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qom/cpu.h"
 
-#ifndef TCG_TARGET_REG_BITS
 #include "tcg.h"
-#endif
+#include "tcg-op.h"
 
 #if TARGET_LONG_BITS == 32
 #define MAKE_TCGV MAKE_TCGV_I32
@@ -51,7 +51,7 @@
     void tcg_plugin_register_info(uint64_t pc, CPUState *env, TranslationBlock *tb);
     void tcg_plugin_before_gen_tb(CPUState *env, TranslationBlock *tb);
     void tcg_plugin_after_gen_tb(CPUState *env, TranslationBlock *tb);
-    void tcg_plugin_after_gen_opc(uint16_t *opcode, TCGArg *opargs, uint8_t nb_args);
+    void tcg_plugin_after_gen_opc(TCGOp *opcode, TCGArg *opargs, uint8_t nb_args);
     const char *tcg_plugin_get_filename(void);
 #else
 #   define tcg_plugin_enabled() false
@@ -85,8 +85,10 @@ typedef struct
 {
     uint64_t pc;
     uint8_t nb_args;
+    uint8_t operator;
+    uint16_t cpu_index;
 
-    uint16_t *opcode;
+    TCGOp *opcode;
     TCGArg *opargs;
 
     /* Should be used by the plugin only.  */
@@ -113,17 +115,23 @@ typedef void (* tpi_pre_tb_helper_data_t)(const TCGPluginInterface *tpi,
                                           TPIHelperInfo info, uint64_t address,
                                           uint64_t *data1, uint64_t *data2);
 
-#define TPI_VERSION 3
+#define TPI_VERSION 5
 struct TCGPluginInterface
 {
     /* Compatibility information.  */
-    int version;
+    int32_t version;
+    const char *name;
+    const char *path_name;
+    const char *instance_path_name;
+    void *instance_handle;
     const char *guest;
     const char *mode;
     size_t sizeof_CPUState;
     size_t sizeof_TranslationBlock;
+    size_t sizeof_TCGContext;
 
     /* Common parameters.  */
+    TCGContext *tcg_ctx;
     int nb_cpus;
     FILE *output;
     uint64_t low_pc;
@@ -135,7 +143,17 @@ struct TCGPluginInterface
     const CPUState *env;
     const TranslationBlock *tb;
 
+    /* Some private state. */
+    bool _in_gen_tpi_helper;
+    uint64_t _current_pc;
+    const CPUState *_current_env;
+    const TranslationBlock *_current_tb;
+    TCGArg *_tb_info;
+    TCGArg *_tb_data1;
+    TCGArg *_tb_data2;
+
     /* Plugin's callbacks.  */
+    void *data;
     tpi_cpus_stopped_t cpus_stopped;
     tpi_before_gen_tb_t before_gen_tb;
     tpi_after_gen_tb_t  after_gen_tb;
@@ -146,20 +164,111 @@ struct TCGPluginInterface
 };
 
 #define TPI_INIT_VERSION(tpi) do {                                     \
-        (tpi).version = TPI_VERSION;                                   \
-        (tpi).guest   = TARGET_NAME;                                   \
-        (tpi).mode    = EMULATION_MODE;                                \
-        (tpi).sizeof_CPUState = sizeof(CPUState);                      \
-        (tpi).sizeof_TranslationBlock = sizeof(TranslationBlock);      \
+        (tpi)->version = TPI_VERSION;                                   \
+        (tpi)->guest   = TARGET_NAME;                                   \
+        (tpi)->mode    = EMULATION_MODE;                                \
+        (tpi)->sizeof_CPUState = sizeof(CPUState);                      \
+        (tpi)->sizeof_TranslationBlock = sizeof(TranslationBlock);      \
+        (tpi)->sizeof_TCGContext = sizeof(TCGContext);                  \
     } while (0);
 
 #define TPI_INIT_VERSION_GENERIC(tpi) do {                             \
-        (tpi).version = TPI_VERSION;                                   \
-        (tpi).guest   = "any";                                         \
-        (tpi).mode    = "any";                                         \
-        (tpi).sizeof_CPUState = 0;                                     \
-        (tpi).sizeof_TranslationBlock = 0;                             \
+        (tpi)->version = TPI_VERSION;                                   \
+        (tpi)->guest   = "any";                                         \
+        (tpi)->mode    = "any";                                         \
+        (tpi)->sizeof_CPUState = 0;                                     \
+        (tpi)->sizeof_TranslationBlock = 0;                             \
+        (tpi)->sizeof_TCGContext = sizeof(TCGContext);                  \
     } while (0);
+
+/* Macros for declaration of plugin functions callable from target buffer.
+   The declared function can then be called with tcg_gen_callN().
+   For instance:
+   void tpi_init(TCGPluginInterface *tpi) {
+     TPI_INIT_VERSION_GENERIC(tpi);
+     TPI_DECL_FUNC_2(tpi, myfunction, i64, i64, i32);
+     ...
+   }
+   void after_gen_opc(TCGPluginInterface *tpi,...) {
+     ...
+     tcg_gen_callN(tpi->tcg_ctx, myfunction, GET_TCGV_I64(tcgv_ret), 2, args); 
+     ...
+   }
+   Implementation note: the structure defined in _TPI_TCGHelperInfo_struct
+   must match TCGHelperInfo in tcg.c.
+ */
+#define _TPI_TCGHelperInfo_struct { \
+    void *func;                     \
+    const char *name;               \
+    unsigned flags;                 \
+    unsigned sizemask;              \
+    }
+
+#define TPI_DECL_FUNC_0(tpi, NAME, ret) \
+    TPI_DECL_FUNC_FLAGS_0(tpi, NAME, 0, ret)
+#define TPI_DECL_FUNC_FLAGS_0(tpi, NAME, FLAGS, ret) do {               \
+        static const struct _TPI_TCGHelperInfo_struct _info =           \
+            { .func = NAME, .name = #NAME, .flags = FLAGS,              \
+              .sizemask = dh_sizemask(ret, 0) };                        \
+        g_hash_table_insert(tpi->tcg_ctx->helpers, (gpointer)_info.func, \
+                            (gpointer)&_info);                          \
+    } while(0)
+
+#define TPI_DECL_FUNC_1(tpi, NAME, ret, t1)             \
+    TPI_DECL_FUNC_FLAGS_1(tpi, NAME, 0, ret, t1)
+#define TPI_DECL_FUNC_FLAGS_1(tpi, NAME, FLAGS, ret, t1) do {           \
+        static const struct _TPI_TCGHelperInfo_struct _info =           \
+            { .func = NAME, .name = #NAME, .flags = FLAGS,              \
+              .sizemask = dh_sizemask(ret, 0) | dh_sizemask(t1, 1) };   \
+        g_hash_table_insert(tpi->tcg_ctx->helpers, (gpointer)_info.func, \
+                            (gpointer)&_info);                          \
+    } while(0)
+
+#define TPI_DECL_FUNC_2(tpi, NAME, ret, t1, t2)         \
+    TPI_DECL_FUNC_FLAGS_2(tpi, NAME, 0, ret, t1, t2)
+#define TPI_DECL_FUNC_FLAGS_2(tpi, NAME, FLAGS, ret, t1, t2) do {       \
+        static const struct _TPI_TCGHelperInfo_struct _info =           \
+            { .func = NAME, .name = #NAME, .flags = FLAGS,              \
+              .sizemask = dh_sizemask(ret, 0) | dh_sizemask(t1, 1)      \
+              | dh_sizemask(t2, 2) };                                   \
+        g_hash_table_insert(tpi->tcg_ctx->helpers, (gpointer)_info.func, \
+                            (gpointer)&_info);                          \
+    } while(0)
+
+#define TPI_DECL_FUNC_3(tpi, NAME, ret, t1, t2, t3) \
+    TPI_DECL_FUNC_FLAGS_3(tpi, NAME, 0, ret, t1, t2, t3)
+#define TPI_DECL_FUNC_FLAGS_3(tpi, NAME, FLAGS, ret, t1, t2, t3) do {   \
+        static const struct _TPI_TCGHelperInfo_struct _info =           \
+            { .func = NAME, .name = #NAME, .flags = FLAGS,              \
+              .sizemask = dh_sizemask(ret, 0) | dh_sizemask(t1, 1)      \
+              | dh_sizemask(t2, 2) | dh_sizemask(t3, 3) };              \
+        g_hash_table_insert(tpi->tcg_ctx->helpers, (gpointer)_info.func, \
+                            (gpointer)&_info);                          \
+    } while(0)
+
+#define TPI_DECL_FUNC_4(tpi, NAME, ret, t1, t2, t3, t4)                 \
+    TPI_DECL_FUNC_FLAGS_4(tpi, NAME, 0, ret, t1, t2, t3, t4)
+#define TPI_DECL_FUNC_FLAGS_4(tpi, NAME, FLAGS, ret, t1, t2, t3, t4) do { \
+        static const struct _TPI_TCGHelperInfo_struct _info =           \
+            { .func = NAME, .name = #NAME, .flags = FLAGS,              \
+              .sizemask = dh_sizemask(ret, 0) | dh_sizemask(t1, 1)      \
+              | dh_sizemask(t2, 2) | dh_sizemask(t3, 3) | dh_sizemask(t4, 4) }; \
+        g_hash_table_insert(tpi->tcg_ctx->helpers, (gpointer)_info.func, \
+                            (gpointer)&_info);                          \
+    } while(0)
+
+#define TPI_DECL_FUNC_5(tpi, NAME, ret, t1, t2, t3, t4, t5)             \
+    TPI_DECL_FUNC_FLAGS_5(tpi, NAME, 0, ret, t1, t2, t3, t4, t5)
+#define TPI_DECL_FUNC_FLAGS_5(tpi, NAME, FLAGS, ret, t1, t2, t3, t4, t5) do { \
+        static const struct _TPI_TCGHelperInfo_struct _info =           \
+            { .func = NAME, .name = #NAME, .flags = FLAGS,              \
+              .sizemask = dh_sizemask(ret, 0) | dh_sizemask(t1, 1)      \
+              | dh_sizemask(t2, 2) | dh_sizemask(t3, 3) | dh_sizemask(t4, 4) \
+              | dh_sizemask(t5, 5) };                                   \
+        g_hash_table_insert(tpi->tcg_ctx->helpers, (gpointer)_info.func, \
+                            (gpointer)&_info);                          \
+    } while(0)
+
 
 typedef void (* tpi_init_t)(TCGPluginInterface *tpi);
 void tpi_init(TCGPluginInterface *tpi);

@@ -1,8 +1,9 @@
 /*
  * virtio ccw target definitions
  *
- * Copyright 2012 IBM Corp.
+ * Copyright 2012,2015 IBM Corp.
  * Author(s): Cornelia Huck <cornelia.huck@de.ibm.com>
+ *            Pierre Morel <pmorel@linux.vnet.ibm.com>
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or (at
  * your option) any later version. See the COPYING file in the top-level
@@ -23,6 +24,8 @@
 #include <hw/virtio/virtio-rng.h>
 #include <hw/virtio/virtio-bus.h>
 
+#include "css.h"
+
 #define VIRTUAL_CSSID 0xfe
 
 #define VIRTIO_CCW_CU_TYPE 0x3832
@@ -38,6 +41,8 @@
 #define CCW_CMD_SET_IND      0x43
 #define CCW_CMD_SET_CONF_IND 0x53
 #define CCW_CMD_READ_VQ_CONF 0x32
+#define CCW_CMD_SET_IND_ADAPTER 0x73
+#define CCW_CMD_SET_VIRTIO_REV 0x83
 
 #define TYPE_VIRTIO_CCW_DEVICE "virtio-ccw-device"
 #define VIRTIO_CCW_DEVICE(obj) \
@@ -62,12 +67,9 @@ typedef struct VirtioCcwDevice VirtioCcwDevice;
 
 typedef struct VirtIOCCWDeviceClass {
     DeviceClass parent_class;
-    int (*init)(VirtioCcwDevice *dev);
+    void (*realize)(VirtioCcwDevice *dev, Error **errp);
     int (*exit)(VirtioCcwDevice *dev);
 } VirtIOCCWDeviceClass;
-
-/* Change here if we want to support more feature bits. */
-#define VIRTIO_CCW_FEATURE_SIZE 1
 
 /* Performance improves when virtqueue kick processing is decoupled from the
  * vcpu thread using ioeventfd for some devices. */
@@ -77,17 +79,28 @@ typedef struct VirtIOCCWDeviceClass {
 struct VirtioCcwDevice {
     DeviceState parent_obj;
     SubchDev *sch;
-    VirtIODevice *vdev;
     char *bus_id;
-    uint32_t host_features[VIRTIO_CCW_FEATURE_SIZE];
+    int revision;
+    uint32_t max_rev;
     VirtioBusState bus;
     bool ioeventfd_started;
     bool ioeventfd_disabled;
     uint32_t flags;
+    uint8_t thinint_isc;
+    AdapterRoutes routes;
     /* Guest provided values: */
-    hwaddr indicators;
-    hwaddr indicators2;
+    IndAddr *indicators;
+    IndAddr *indicators2;
+    IndAddr *summary_indicator;
+    uint64_t ind_bit;
 };
+
+/* The maximum virtio revision we support. */
+#define VIRTIO_CCW_MAX_REV 1
+static inline int virtio_ccw_rev_max(VirtioCcwDevice *dev)
+{
+    return dev->max_rev;
+}
 
 /* virtual css bus type */
 typedef struct VirtualCssBus {
@@ -131,7 +144,6 @@ typedef struct VHostSCSICcw {
 typedef struct VirtIOBlkCcw {
     VirtioCcwDevice parent_obj;
     VirtIOBlock vdev;
-    VirtIOBlkConf blk;
 } VirtIOBlkCcw;
 
 /* virtio-balloon-ccw */
@@ -181,4 +193,19 @@ typedef struct VirtIORNGCcw {
 VirtualCssBus *virtual_css_bus_init(void);
 void virtio_ccw_device_update_status(SubchDev *sch);
 VirtIODevice *virtio_ccw_get_vdev(SubchDev *sch);
+
+#ifdef CONFIG_VIRTFS
+#include "hw/9pfs/virtio-9p.h"
+
+#define TYPE_VIRTIO_9P_CCW "virtio-9p-ccw"
+#define VIRTIO_9P_CCW(obj) \
+    OBJECT_CHECK(V9fsCCWState, (obj), TYPE_VIRTIO_9P_CCW)
+
+typedef struct V9fsCCWState {
+    VirtioCcwDevice parent_obj;
+    V9fsVirtioState vdev;
+} V9fsCCWState;
+
+#endif /* CONFIG_VIRTFS */
+
 #endif

@@ -18,14 +18,18 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "cpu.h"
 #include "disas/disas.h"
 #include "tcg-op.h"
-#include "helper.h"
+#include "exec/helper-proto.h"
 #include "microblaze-decode.h"
+#include "exec/cpu_ldst.h"
+#include "exec/helper-gen.h"
 
-#define GEN_HELPER 1
-#include "helper.h"
+#include "trace-tcg.h"
+#include "exec/log.h"
+
 
 #define SIM_COMPAT 0
 #define DISAS_GNU 1
@@ -42,7 +46,7 @@
             (((src) >> start) & ((1 << (end - start + 1)) - 1))
 
 static TCGv env_debug;
-static TCGv_ptr cpu_env;
+static TCGv_env cpu_env;
 static TCGv cpu_R[32];
 static TCGv cpu_SR[18];
 static TCGv env_imm;
@@ -56,7 +60,7 @@ static TCGv env_res_val;
 
 /* This is the state at translation time.  */
 typedef struct DisasContext {
-    CPUMBState *env;
+    MicroBlazeCPU *cpu;
     target_ulong pc;
 
     /* Decoder.  */
@@ -99,19 +103,6 @@ static const char *special_regnames[] =
     "sr8", "sr9", "sr10", "sr11", "sr12", "sr13", "sr14", "sr15",
     "sr16", "sr17", "sr18"
 };
-
-/* Sign extend at translation time.  */
-static inline int sign_extend(unsigned int val, unsigned int width)
-{
-        int sval;
-
-        /* LSL.  */
-        val <<= 31 - width;
-        sval = val;
-        /* ASR.  */
-        sval >>= 31 - width;
-        return sval;
-}
 
 static inline void t_sync_flags(DisasContext *dc)
 {
@@ -324,11 +315,10 @@ static void dec_sub(DisasContext *dc)
 static void dec_pattern(DisasContext *dc)
 {
     unsigned int mode;
-    int l1;
 
     if ((dc->tb_flags & MSR_EE_FLAG)
-          && (dc->env->pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
-          && !((dc->env->pvr.regs[2] & PVR2_USE_PCMP_INSTR))) {
+          && (dc->cpu->env.pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
+          && !((dc->cpu->env.pvr.regs[2] & PVR2_USE_PCMP_INSTR))) {
         tcg_gen_movi_tl(cpu_SR[SR_ESR], ESR_EC_ILLEGAL_OP);
         t_gen_raise_exception(dc, EXCP_HW_EXCP);
     }
@@ -344,33 +334,19 @@ static void dec_pattern(DisasContext *dc)
         case 2:
             LOG_DIS("pcmpeq r%d r%d r%d\n", dc->rd, dc->ra, dc->rb);
             if (dc->rd) {
-                TCGv t0 = tcg_temp_local_new();
-                l1 = gen_new_label();
-                tcg_gen_movi_tl(t0, 1);
-                tcg_gen_brcond_tl(TCG_COND_EQ,
-                                  cpu_R[dc->ra], cpu_R[dc->rb], l1);
-                tcg_gen_movi_tl(t0, 0);
-                gen_set_label(l1);
-                tcg_gen_mov_tl(cpu_R[dc->rd], t0);
-                tcg_temp_free(t0);
+                tcg_gen_setcond_tl(TCG_COND_EQ, cpu_R[dc->rd],
+                                   cpu_R[dc->ra], cpu_R[dc->rb]);
             }
             break;
         case 3:
             LOG_DIS("pcmpne r%d r%d r%d\n", dc->rd, dc->ra, dc->rb);
-            l1 = gen_new_label();
             if (dc->rd) {
-                TCGv t0 = tcg_temp_local_new();
-                tcg_gen_movi_tl(t0, 1);
-                tcg_gen_brcond_tl(TCG_COND_NE,
-                                  cpu_R[dc->ra], cpu_R[dc->rb], l1);
-                tcg_gen_movi_tl(t0, 0);
-                gen_set_label(l1);
-                tcg_gen_mov_tl(cpu_R[dc->rd], t0);
-                tcg_temp_free(t0);
+                tcg_gen_setcond_tl(TCG_COND_NE, cpu_R[dc->rd],
+                                   cpu_R[dc->ra], cpu_R[dc->rb]);
             }
             break;
         default:
-            cpu_abort(dc->env,
+            cpu_abort(CPU(dc->cpu),
                       "unsupported pattern insn opcode=%x\n", dc->opcode);
             break;
     }
@@ -441,9 +417,10 @@ static inline void msr_write(DisasContext *dc, TCGv v)
 
 static void dec_msr(DisasContext *dc)
 {
+    CPUState *cs = CPU(dc->cpu);
     TCGv t0, t1;
     unsigned int sr, to, rn;
-    int mem_index = cpu_mmu_index(dc->env);
+    int mem_index = cpu_mmu_index(&dc->cpu->env, false);
 
     sr = dc->imm & ((1 << 14) - 1);
     to = dc->imm & (1 << 14);
@@ -458,7 +435,7 @@ static void dec_msr(DisasContext *dc)
         LOG_DIS("msr%s r%d imm=%x\n", clr ? "clr" : "set",
                 dc->rd, dc->imm);
 
-        if (!(dc->env->pvr.regs[2] & PVR2_USE_MSR_INSTR)) {
+        if (!(dc->cpu->env.pvr.regs[2] & PVR2_USE_MSR_INSTR)) {
             /* nop??? */
             return;
         }
@@ -537,7 +514,7 @@ static void dec_msr(DisasContext *dc)
                 tcg_gen_st_tl(cpu_R[dc->ra], cpu_env, offsetof(CPUMBState, shr));
                 break;
             default:
-                cpu_abort(dc->env, "unknown mts reg %x\n", sr);
+                cpu_abort(CPU(dc->cpu), "unknown mts reg %x\n", sr);
                 break;
         }
     } else {
@@ -586,7 +563,7 @@ static void dec_msr(DisasContext *dc)
                               cpu_env, offsetof(CPUMBState, pvr.regs[rn]));
                 break;
             default:
-                cpu_abort(dc->env, "unknown mfs reg %x\n", sr);
+                cpu_abort(cs, "unknown mfs reg %x\n", sr);
                 break;
         }
     }
@@ -608,9 +585,9 @@ static void t_gen_muls(TCGv d, TCGv d2, TCGv a, TCGv b)
     tcg_gen_ext_i32_i64(t1, b);
     tcg_gen_mul_i64(t0, t0, t1);
 
-    tcg_gen_trunc_i64_i32(d, t0);
+    tcg_gen_extrl_i64_i32(d, t0);
     tcg_gen_shri_i64(t0, t0, 32);
-    tcg_gen_trunc_i64_i32(d2, t0);
+    tcg_gen_extrl_i64_i32(d2, t0);
 
     tcg_temp_free_i64(t0);
     tcg_temp_free_i64(t1);
@@ -628,9 +605,9 @@ static void t_gen_mulu(TCGv d, TCGv d2, TCGv a, TCGv b)
     tcg_gen_extu_i32_i64(t1, b);
     tcg_gen_mul_i64(t0, t0, t1);
 
-    tcg_gen_trunc_i64_i32(d, t0);
+    tcg_gen_extrl_i64_i32(d, t0);
     tcg_gen_shri_i64(t0, t0, 32);
-    tcg_gen_trunc_i64_i32(d2, t0);
+    tcg_gen_extrl_i64_i32(d2, t0);
 
     tcg_temp_free_i64(t0);
     tcg_temp_free_i64(t1);
@@ -643,8 +620,8 @@ static void dec_mul(DisasContext *dc)
     unsigned int subcode;
 
     if ((dc->tb_flags & MSR_EE_FLAG)
-         && (dc->env->pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
-         && !(dc->env->pvr.regs[0] & PVR0_USE_HW_MUL_MASK)) {
+         && (dc->cpu->env.pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
+         && !(dc->cpu->env.pvr.regs[0] & PVR0_USE_HW_MUL_MASK)) {
         tcg_gen_movi_tl(cpu_SR[SR_ESR], ESR_EC_ILLEGAL_OP);
         t_gen_raise_exception(dc, EXCP_HW_EXCP);
         return;
@@ -662,7 +639,7 @@ static void dec_mul(DisasContext *dc)
 
     /* mulh, mulhsu and mulhu are not available if C_USE_HW_MUL is < 2.  */
     if (subcode >= 1 && subcode <= 3
-        && !((dc->env->pvr.regs[2] & PVR2_USE_MUL64_MASK))) {
+        && !((dc->cpu->env.pvr.regs[2] & PVR2_USE_MUL64_MASK))) {
         /* nop??? */
     }
 
@@ -684,7 +661,7 @@ static void dec_mul(DisasContext *dc)
             t_gen_mulu(d[0], cpu_R[dc->rd], cpu_R[dc->ra], cpu_R[dc->rb]);
             break;
         default:
-            cpu_abort(dc->env, "unknown MUL insn %x\n", subcode);
+            cpu_abort(CPU(dc->cpu), "unknown MUL insn %x\n", subcode);
             break;
     }
 done:
@@ -700,8 +677,8 @@ static void dec_div(DisasContext *dc)
     u = dc->imm & 2; 
     LOG_DIS("div\n");
 
-    if ((dc->env->pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
-          && !((dc->env->pvr.regs[0] & PVR0_USE_DIV_MASK))) {
+    if ((dc->cpu->env.pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
+          && !((dc->cpu->env.pvr.regs[0] & PVR0_USE_DIV_MASK))) {
         tcg_gen_movi_tl(cpu_SR[SR_ESR], ESR_EC_ILLEGAL_OP);
         t_gen_raise_exception(dc, EXCP_HW_EXCP);
     }
@@ -722,8 +699,8 @@ static void dec_barrel(DisasContext *dc)
     unsigned int s, t;
 
     if ((dc->tb_flags & MSR_EE_FLAG)
-          && (dc->env->pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
-          && !(dc->env->pvr.regs[0] & PVR0_USE_BARREL_MASK)) {
+          && (dc->cpu->env.pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
+          && !(dc->cpu->env.pvr.regs[0] & PVR0_USE_BARREL_MASK)) {
         tcg_gen_movi_tl(cpu_SR[SR_ESR], ESR_EC_ILLEGAL_OP);
         t_gen_raise_exception(dc, EXCP_HW_EXCP);
         return;
@@ -752,9 +729,10 @@ static void dec_barrel(DisasContext *dc)
 
 static void dec_bit(DisasContext *dc)
 {
+    CPUState *cs = CPU(dc->cpu);
     TCGv t0;
     unsigned int op;
-    int mem_index = cpu_mmu_index(dc->env);
+    int mem_index = cpu_mmu_index(&dc->cpu->env, false);
 
     op = dc->ir & ((1 << 9) - 1);
     switch (op) {
@@ -819,12 +797,12 @@ static void dec_bit(DisasContext *dc)
             break;
         case 0xe0:
             if ((dc->tb_flags & MSR_EE_FLAG)
-                && (dc->env->pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
-                && !((dc->env->pvr.regs[2] & PVR2_USE_PCMP_INSTR))) {
+                && (dc->cpu->env.pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
+                && !((dc->cpu->env.pvr.regs[2] & PVR2_USE_PCMP_INSTR))) {
                 tcg_gen_movi_tl(cpu_SR[SR_ESR], ESR_EC_ILLEGAL_OP);
                 t_gen_raise_exception(dc, EXCP_HW_EXCP);
             }
-            if (dc->env->pvr.regs[2] & PVR2_USE_PCMP_INSTR) {
+            if (dc->cpu->env.pvr.regs[2] & PVR2_USE_PCMP_INSTR) {
                 gen_helper_clz(cpu_R[dc->rd], cpu_R[dc->ra]);
             }
             break;
@@ -839,8 +817,8 @@ static void dec_bit(DisasContext *dc)
             tcg_gen_rotri_i32(cpu_R[dc->rd], cpu_R[dc->ra], 16);
             break;
         default:
-            cpu_abort(dc->env, "unknown bit oc=%x op=%x rd=%d ra=%d rb=%d\n",
-                     dc->pc, op, dc->rd, dc->ra, dc->rb);
+            cpu_abort(cs, "unknown bit oc=%x op=%x rd=%d ra=%d rb=%d\n",
+                      dc->pc, op, dc->rd, dc->ra, dc->rb);
             break;
     }
 }
@@ -864,26 +842,6 @@ static void dec_imm(DisasContext *dc)
     dc->clear_imm = 0;
 }
 
-static inline void gen_load(DisasContext *dc, TCGv dst, TCGv addr,
-                            unsigned int size, bool exclusive)
-{
-    int mem_index = cpu_mmu_index(dc->env);
-
-    if (size == 1) {
-        tcg_gen_qemu_ld8u(dst, addr, mem_index);
-    } else if (size == 2) {
-        tcg_gen_qemu_ld16u(dst, addr, mem_index);
-    } else if (size == 4) {
-        tcg_gen_qemu_ld32u(dst, addr, mem_index);
-    } else
-        cpu_abort(dc->env, "Incorrect load size %d\n", size);
-
-    if (exclusive) {
-        tcg_gen_mov_tl(env_res_addr, addr);
-        tcg_gen_mov_tl(env_res_val, dst);
-    }
-}
-
 static inline TCGv *compute_ldst_addr(DisasContext *dc, TCGv *t)
 {
     unsigned int extimm = dc->tb_flags & IMM_FLAG;
@@ -891,7 +849,7 @@ static inline TCGv *compute_ldst_addr(DisasContext *dc, TCGv *t)
     int stackprot = 0;
 
     /* All load/stores use ra.  */
-    if (dc->ra == 1) {
+    if (dc->ra == 1 && dc->cpu->cfg.stackprot) {
         stackprot = 1;
     }
 
@@ -904,7 +862,7 @@ static inline TCGv *compute_ldst_addr(DisasContext *dc, TCGv *t)
             return &cpu_R[dc->ra];
         }
 
-        if (dc->rb == 1) {
+        if (dc->rb == 1 && dc->cpu->cfg.stackprot) {
             stackprot = 1;
         }
 
@@ -935,38 +893,25 @@ static inline TCGv *compute_ldst_addr(DisasContext *dc, TCGv *t)
     return t;
 }
 
-static inline void dec_byteswap(DisasContext *dc, TCGv dst, TCGv src, int size)
-{
-    if (size == 4) {
-        tcg_gen_bswap32_tl(dst, src);
-    } else if (size == 2) {
-        TCGv t = tcg_temp_new();
-
-        /* bswap16 assumes the high bits are zero.  */
-        tcg_gen_andi_tl(t, src, 0xffff);
-        tcg_gen_bswap16_tl(dst, t);
-        tcg_temp_free(t);
-    } else {
-        /* Ignore.
-        cpu_abort(dc->env, "Invalid ldst byteswap size %d\n", size);
-        */
-    }
-}
-
 static void dec_load(DisasContext *dc)
 {
-    TCGv t, *addr;
+    TCGv t, v, *addr;
     unsigned int size, rev = 0, ex = 0;
+    TCGMemOp mop;
 
-    size = 1 << (dc->opcode & 3);
-
+    mop = dc->opcode & 3;
+    size = 1 << mop;
     if (!dc->type_b) {
         rev = (dc->ir >> 9) & 1;
         ex = (dc->ir >> 10) & 1;
     }
+    mop |= MO_TE;
+    if (rev) {
+        mop ^= MO_BSWAP;
+    }
 
     if (size > 4 && (dc->tb_flags & MSR_EE_FLAG)
-          && (dc->env->pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)) {
+          && (dc->cpu->env.pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)) {
         tcg_gen_movi_tl(cpu_SR[SR_ESR], ESR_EC_ILLEGAL_OP);
         t_gen_raise_exception(dc, EXCP_HW_EXCP);
         return;
@@ -1024,7 +969,7 @@ static void dec_load(DisasContext *dc)
                 }
                 break;
             default:
-                cpu_abort(dc->env, "Invalid reverse size\n");
+                cpu_abort(CPU(dc->cpu), "Invalid reverse size\n");
                 break;
         }
     }
@@ -1044,42 +989,32 @@ static void dec_load(DisasContext *dc)
     sync_jmpstate(dc);
 
     /* Verify alignment if needed.  */
-    if ((dc->env->pvr.regs[2] & PVR2_UNALIGNED_EXC_MASK) && size > 1) {
-        TCGv v = tcg_temp_new();
+    /*
+     * Microblaze gives MMU faults priority over faults due to
+     * unaligned addresses. That's why we speculatively do the load
+     * into v. If the load succeeds, we verify alignment of the
+     * address and if that succeeds we write into the destination reg.
+     */
+    v = tcg_temp_new();
+    tcg_gen_qemu_ld_tl(v, *addr, cpu_mmu_index(&dc->cpu->env, false), mop);
 
-        /*
-         * Microblaze gives MMU faults priority over faults due to
-         * unaligned addresses. That's why we speculatively do the load
-         * into v. If the load succeeds, we verify alignment of the
-         * address and if that succeeds we write into the destination reg.
-         */
-        gen_load(dc, v, *addr, size, ex);
-
+    if ((dc->cpu->env.pvr.regs[2] & PVR2_UNALIGNED_EXC_MASK) && size > 1) {
         tcg_gen_movi_tl(cpu_SR[SR_PC], dc->pc);
         gen_helper_memalign(cpu_env, *addr, tcg_const_tl(dc->rd),
                             tcg_const_tl(0), tcg_const_tl(size - 1));
-        if (dc->rd) {
-            if (rev) {
-                dec_byteswap(dc, cpu_R[dc->rd], v, size);
-            } else {
-                tcg_gen_mov_tl(cpu_R[dc->rd], v);
-            }
-        }
-        tcg_temp_free(v);
-    } else {
-        if (dc->rd) {
-            gen_load(dc, cpu_R[dc->rd], *addr, size, ex);
-            if (rev) {
-                dec_byteswap(dc, cpu_R[dc->rd], cpu_R[dc->rd], size);
-            }
-        } else {
-            /* We are loading into r0, no need to reverse.  */
-            gen_load(dc, env_imm, *addr, size, ex);
-        }
     }
 
+    if (ex) {
+        tcg_gen_mov_tl(env_res_addr, *addr);
+        tcg_gen_mov_tl(env_res_val, v);
+    }
+    if (dc->rd) {
+        tcg_gen_mov_tl(cpu_R[dc->rd], v);
+    }
+    tcg_temp_free(v);
+
     if (ex) { /* lwx */
-        /* no support for for AXI exclusive so always clear C */
+        /* no support for AXI exclusive so always clear C */
         write_carryi(dc, 0);
     }
 
@@ -1087,35 +1022,26 @@ static void dec_load(DisasContext *dc)
         tcg_temp_free(t);
 }
 
-static void gen_store(DisasContext *dc, TCGv addr, TCGv val,
-                      unsigned int size)
-{
-    int mem_index = cpu_mmu_index(dc->env);
-
-    if (size == 1)
-        tcg_gen_qemu_st8(val, addr, mem_index);
-    else if (size == 2) {
-        tcg_gen_qemu_st16(val, addr, mem_index);
-    } else if (size == 4) {
-        tcg_gen_qemu_st32(val, addr, mem_index);
-    } else
-        cpu_abort(dc->env, "Incorrect store size %d\n", size);
-}
-
 static void dec_store(DisasContext *dc)
 {
     TCGv t, *addr, swx_addr;
-    int swx_skip = 0;
+    TCGLabel *swx_skip = NULL;
     unsigned int size, rev = 0, ex = 0;
+    TCGMemOp mop;
 
-    size = 1 << (dc->opcode & 3);
+    mop = dc->opcode & 3;
+    size = 1 << mop;
     if (!dc->type_b) {
         rev = (dc->ir >> 9) & 1;
         ex = (dc->ir >> 10) & 1;
     }
+    mop |= MO_TE;
+    if (rev) {
+        mop ^= MO_BSWAP;
+    }
 
     if (size > 4 && (dc->tb_flags & MSR_EE_FLAG)
-          && (dc->env->pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)) {
+          && (dc->cpu->env.pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)) {
         tcg_gen_movi_tl(cpu_SR[SR_ESR], ESR_EC_ILLEGAL_OP);
         t_gen_raise_exception(dc, EXCP_HW_EXCP);
         return;
@@ -1148,7 +1074,8 @@ static void dec_store(DisasContext *dc)
            this compare and the following write to be atomic. For user
            emulation we need to add atomicity between threads.  */
         tval = tcg_temp_new();
-        gen_load(dc, tval, swx_addr, 4, false);
+        tcg_gen_qemu_ld_tl(tval, swx_addr, cpu_mmu_index(&dc->cpu->env, false),
+                           MO_TEUL);
         tcg_gen_brcond_tl(TCG_COND_NE, env_res_val, tval, swx_skip);
         write_carryi(dc, 0);
         tcg_temp_free(tval);
@@ -1194,31 +1121,14 @@ static void dec_store(DisasContext *dc)
                 }
                 break;
             default:
-                cpu_abort(dc->env, "Invalid reverse size\n");
+                cpu_abort(CPU(dc->cpu), "Invalid reverse size\n");
                 break;
         }
-
-        if (size != 1) {
-            TCGv bs_data = tcg_temp_new();
-            dec_byteswap(dc, bs_data, cpu_R[dc->rd], size);
-            gen_store(dc, *addr, bs_data, size);
-            tcg_temp_free(bs_data);
-        } else {
-            gen_store(dc, *addr, cpu_R[dc->rd], size);
-        }
-    } else {
-        if (rev) {
-            TCGv bs_data = tcg_temp_new();
-            dec_byteswap(dc, bs_data, cpu_R[dc->rd], size);
-            gen_store(dc, *addr, bs_data, size);
-            tcg_temp_free(bs_data);
-        } else {
-            gen_store(dc, *addr, cpu_R[dc->rd], size);
-        }
     }
+    tcg_gen_qemu_st_tl(cpu_R[dc->rd], *addr, cpu_mmu_index(&dc->cpu->env, false), mop);
 
     /* Verify alignment if needed.  */
-    if ((dc->env->pvr.regs[2] & PVR2_UNALIGNED_EXC_MASK) && size > 1) {
+    if ((dc->cpu->env.pvr.regs[2] & PVR2_UNALIGNED_EXC_MASK) && size > 1) {
         tcg_gen_movi_tl(cpu_SR[SR_PC], dc->pc);
         /* FIXME: if the alignment is wrong, we should restore the value
          *        in memory. One possible way to achieve this is to probe
@@ -1262,16 +1172,14 @@ static inline void eval_cc(DisasContext *dc, unsigned int cc,
             tcg_gen_setcond_tl(TCG_COND_GT, d, a, b);
             break;
         default:
-            cpu_abort(dc->env, "Unknown condition code %x.\n", cc);
+            cpu_abort(CPU(dc->cpu), "Unknown condition code %x.\n", cc);
             break;
     }
 }
 
 static void eval_cond_jmp(DisasContext *dc, TCGv pc_true, TCGv pc_false)
 {
-    int l1;
-
-    l1 = gen_new_label();
+    TCGLabel *l1 = gen_new_label();
     /* Conditional jmp.  */
     tcg_gen_mov_tl(cpu_SR[SR_PC], pc_false);
     tcg_gen_brcondi_tl(TCG_COND_EQ, env_btaken, 0, l1);
@@ -1313,7 +1221,7 @@ static void dec_bcc(DisasContext *dc)
 static void dec_br(DisasContext *dc)
 {
     unsigned int dslot, link, abs, mbar;
-    int mem_index = cpu_mmu_index(dc->env);
+    int mem_index = cpu_mmu_index(&dc->cpu->env, false);
 
     dslot = dc->ir & (1 << 20);
     abs = dc->ir & (1 << 19);
@@ -1445,7 +1353,7 @@ static inline void do_rte(DisasContext *dc)
 static void dec_rts(DisasContext *dc)
 {
     unsigned int b_bit, i_bit, e_bit;
-    int mem_index = cpu_mmu_index(dc->env);
+    int mem_index = cpu_mmu_index(&dc->cpu->env, false);
 
     i_bit = dc->ir & (1 << 21);
     b_bit = dc->ir & (1 << 22);
@@ -1490,15 +1398,11 @@ static void dec_rts(DisasContext *dc)
 
 static int dec_check_fpuv2(DisasContext *dc)
 {
-    int r;
-
-    r = dc->env->pvr.regs[2] & PVR2_USE_FPU2_MASK;
-
-    if (!r && (dc->tb_flags & MSR_EE_FLAG)) {
+    if ((dc->cpu->cfg.use_fpu != 2) && (dc->tb_flags & MSR_EE_FLAG)) {
         tcg_gen_movi_tl(cpu_SR[SR_ESR], ESR_EC_FPU);
         t_gen_raise_exception(dc, EXCP_HW_EXCP);
     }
-    return r;
+    return (dc->cpu->cfg.use_fpu == 2) ? 0 : PVR2_USE_FPU2_MASK;
 }
 
 static void dec_fpu(DisasContext *dc)
@@ -1506,8 +1410,8 @@ static void dec_fpu(DisasContext *dc)
     unsigned int fpu_insn;
 
     if ((dc->tb_flags & MSR_EE_FLAG)
-          && (dc->env->pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
-          && !((dc->env->pvr.regs[2] & PVR2_USE_FPU_MASK))) {
+          && (dc->cpu->env.pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
+          && (dc->cpu->cfg.use_fpu != 1)) {
         tcg_gen_movi_tl(cpu_SR[SR_ESR], ESR_EC_ILLEGAL_OP);
         t_gen_raise_exception(dc, EXCP_HW_EXCP);
         return;
@@ -1609,19 +1513,19 @@ static void dec_fpu(DisasContext *dc)
 static void dec_null(DisasContext *dc)
 {
     if ((dc->tb_flags & MSR_EE_FLAG)
-          && (dc->env->pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)) {
+          && (dc->cpu->env.pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)) {
         tcg_gen_movi_tl(cpu_SR[SR_ESR], ESR_EC_ILLEGAL_OP);
         t_gen_raise_exception(dc, EXCP_HW_EXCP);
         return;
     }
-    qemu_log ("unknown insn pc=%x opc=%x\n", dc->pc, dc->opcode);
+    qemu_log_mask(LOG_GUEST_ERROR, "unknown insn pc=%x opc=%x\n", dc->pc, dc->opcode);
     dc->abort_at_next_insn = 1;
 }
 
 /* Insns connected to FSL or AXI stream attached devices.  */
 static void dec_stream(DisasContext *dc)
 {
-    int mem_index = cpu_mmu_index(dc->env);
+    int mem_index = cpu_mmu_index(&dc->cpu->env, false);
     TCGv_i32 t_id, t_ctrl;
     int ctrl;
 
@@ -1686,10 +1590,6 @@ static inline void decode(DisasContext *dc, uint32_t ir)
 {
     int i;
 
-    if (unlikely(qemu_loglevel_mask(CPU_LOG_TB_OP | CPU_LOG_TB_OP_OPT))) {
-        tcg_gen_debug_insn_start(dc->pc);
-    }
-
     dc->ir = ir;
     LOG_DIS("%8.8x\t", dc->ir);
 
@@ -1697,8 +1597,8 @@ static inline void decode(DisasContext *dc, uint32_t ir)
         dc->nr_nops = 0;
     else {
         if ((dc->tb_flags & MSR_EE_FLAG)
-              && (dc->env->pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
-              && (dc->env->pvr.regs[2] & PVR2_OPCODE_0x0_ILL_MASK)) {
+              && (dc->cpu->env.pvr.regs[2] & PVR2_ILL_OPCODE_EXC_MASK)
+              && (dc->cpu->env.pvr.regs[2] & PVR2_OPCODE_0x0_ILL_MASK)) {
             tcg_gen_movi_tl(cpu_SR[SR_ESR], ESR_EC_ILLEGAL_OP);
             t_gen_raise_exception(dc, EXCP_HW_EXCP);
             return;
@@ -1706,8 +1606,9 @@ static inline void decode(DisasContext *dc, uint32_t ir)
 
         LOG_DIS("nr_nops=%d\t", dc->nr_nops);
         dc->nr_nops++;
-        if (dc->nr_nops > 4)
-            cpu_abort(dc->env, "fetching nop sequence\n");
+        if (dc->nr_nops > 4) {
+            cpu_abort(CPU(dc->cpu), "fetching nop sequence\n");
+        }
     }
     /* bit 2 seems to indicate insn type.  */
     dc->type_b = ir & (1 << 29);
@@ -1727,30 +1628,12 @@ static inline void decode(DisasContext *dc, uint32_t ir)
     }
 }
 
-static void check_breakpoint(CPUMBState *env, DisasContext *dc)
-{
-    CPUBreakpoint *bp;
-
-    if (unlikely(!QTAILQ_EMPTY(&env->breakpoints))) {
-        QTAILQ_FOREACH(bp, &env->breakpoints, entry) {
-            if (bp->pc == dc->pc) {
-                t_gen_raise_exception(dc, EXCP_DEBUG);
-                dc->is_jmp = DISAS_UPDATE;
-             }
-        }
-    }
-}
-
 /* generate intermediate code for basic block 'tb'.  */
-static inline void
-gen_intermediate_code_internal(MicroBlazeCPU *cpu, TranslationBlock *tb,
-                               bool search_pc)
+void gen_intermediate_code(CPUMBState *env, struct TranslationBlock *tb)
 {
+    MicroBlazeCPU *cpu = mb_env_get_cpu(env);
     CPUState *cs = CPU(cpu);
-    CPUMBState *env = &cpu->env;
-    uint16_t *gen_opc_end;
     uint32_t pc_start;
-    int j, lj;
     struct DisasContext ctx;
     struct DisasContext *dc = &ctx;
     uint32_t next_page_start, org_flags;
@@ -1759,11 +1642,9 @@ gen_intermediate_code_internal(MicroBlazeCPU *cpu, TranslationBlock *tb,
     int max_insns;
 
     pc_start = tb->pc;
-    dc->env = env;
+    dc->cpu = cpu;
     dc->tb = tb;
     org_flags = dc->synced_flags = dc->tb_flags = tb->flags;
-
-    gen_opc_end = tcg_ctx.gen_opc_buf + OPC_MAX_SIZE;
 
     dc->is_jmp = DISAS_NEXT;
     dc->jmp = 0;
@@ -1777,8 +1658,9 @@ gen_intermediate_code_internal(MicroBlazeCPU *cpu, TranslationBlock *tb,
     dc->abort_at_next_insn = 0;
     dc->nr_nops = 0;
 
-    if (pc_start & 3)
-        cpu_abort(env, "Microblaze: unaligned PC=%x\n", pc_start);
+    if (pc_start & 3) {
+        cpu_abort(cs, "Microblaze: unaligned PC=%x\n", pc_start);
+    }
 
     if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
 #if !SIM_COMPAT
@@ -1788,16 +1670,20 @@ gen_intermediate_code_internal(MicroBlazeCPU *cpu, TranslationBlock *tb,
     }
 
     next_page_start = (pc_start & TARGET_PAGE_MASK) + TARGET_PAGE_SIZE;
-    lj = -1;
     num_insns = 0;
     max_insns = tb->cflags & CF_COUNT_MASK;
-    if (max_insns == 0)
+    if (max_insns == 0) {
         max_insns = CF_COUNT_MASK;
+    }
+    if (max_insns > TCG_MAX_INSNS) {
+        max_insns = TCG_MAX_INSNS;
+    }
 
-    gen_tb_start();
+    gen_tb_start(tb);
     do
     {
-        tcg_plugin_register_info(dc->pc, cs, tb);
+        tcg_gen_insn_start(dc->pc);
+        num_insns++;
 
 #if SIM_COMPAT
         if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
@@ -1805,32 +1691,30 @@ gen_intermediate_code_internal(MicroBlazeCPU *cpu, TranslationBlock *tb,
             gen_helper_debug();
         }
 #endif
-        check_breakpoint(env, dc);
 
-        if (search_pc) {
-            j = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
-            if (lj < j) {
-                lj++;
-                while (lj < j)
-                    tcg_ctx.gen_opc_instr_start[lj++] = 0;
-            }
-            tcg_ctx.gen_opc_pc[lj] = dc->pc;
-            tcg_ctx.gen_opc_instr_start[lj] = 1;
-                        tcg_ctx.gen_opc_icount[lj] = num_insns;
+        if (unlikely(cpu_breakpoint_test(cs, dc->pc, BP_ANY))) {
+            t_gen_raise_exception(dc, EXCP_DEBUG);
+            dc->is_jmp = DISAS_UPDATE;
+            /* The address covered by the breakpoint must be included in
+               [tb->pc, tb->pc + tb->size) in order to for it to be
+               properly cleared -- thus we increment the PC here so that
+               the logic setting tb->size below does the right thing.  */
+            dc->pc += 4;
+            break;
         }
 
         /* Pretty disas.  */
         LOG_DIS("%8.8x:\t", dc->pc);
 
-        if (num_insns + 1 == max_insns && (tb->cflags & CF_LAST_IO))
+        if (num_insns == max_insns && (tb->cflags & CF_LAST_IO)) {
             gen_io_start();
+        }
 
         dc->clear_imm = 1;
         decode(dc, cpu_ldl_code(env, dc->pc));
         if (dc->clear_imm)
             dc->tb_flags &= ~IMM_FLAG;
         dc->pc += 4;
-        num_insns++;
 
         if (dc->delayed_branch) {
             dc->delayed_branch--;
@@ -1852,10 +1736,8 @@ gen_intermediate_code_internal(MicroBlazeCPU *cpu, TranslationBlock *tb,
                     gen_goto_tb(dc, 0, dc->jmp_pc);
                     dc->is_jmp = DISAS_TB_JUMP;
                 } else if (dc->jmp == JMP_DIRECT_CC) {
-                    int l1;
-
+                    TCGLabel *l1 = gen_new_label();
                     t_sync_flags(dc);
-                    l1 = gen_new_label();
                     /* Conditional jmp.  */
                     tcg_gen_brcondi_tl(TCG_COND_NE, env_btaken, 0, l1);
                     gen_goto_tb(dc, 1, dc->pc);
@@ -1871,10 +1753,10 @@ gen_intermediate_code_internal(MicroBlazeCPU *cpu, TranslationBlock *tb,
             break;
         }
     } while (!dc->is_jmp && !dc->cpustate_changed
-         && tcg_ctx.gen_opc_ptr < gen_opc_end
-                 && !singlestep
-         && (dc->pc < next_page_start)
-                 && num_insns < max_insns);
+             && !tcg_op_buf_full()
+             && !singlestep
+             && (dc->pc < next_page_start)
+             && num_insns < max_insns);
 
     npc = dc->pc;
     if (dc->jmp == JMP_DIRECT || dc->jmp == JMP_DIRECT_CC) {
@@ -1922,41 +1804,23 @@ gen_intermediate_code_internal(MicroBlazeCPU *cpu, TranslationBlock *tb,
         }
     }
     gen_tb_end(tb, num_insns);
-    *tcg_ctx.gen_opc_ptr = INDEX_op_end;
-    if (search_pc) {
-        j = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
-        lj++;
-        while (lj <= j)
-            tcg_ctx.gen_opc_instr_start[lj++] = 0;
-    } else {
-        tb->size = dc->pc - pc_start;
-                tb->icount = num_insns;
-    }
+
+    tb->size = dc->pc - pc_start;
+    tb->icount = num_insns;
 
 #ifdef DEBUG_DISAS
 #if !SIM_COMPAT
     if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
         qemu_log("\n");
 #if DISAS_GNU
-        log_target_disas(env, pc_start, dc->pc - pc_start, 0);
+        log_target_disas(cs, pc_start, dc->pc - pc_start, 0);
 #endif
-        qemu_log("\nisize=%d osize=%td\n",
-            dc->pc - pc_start, tcg_ctx.gen_opc_ptr -
-            tcg_ctx.gen_opc_buf);
+        qemu_log("\nisize=%d osize=%d\n",
+                 dc->pc - pc_start, tcg_op_buf_count());
     }
 #endif
 #endif
     assert(!dc->abort_at_next_insn);
-}
-
-void gen_intermediate_code (CPUMBState *env, struct TranslationBlock *tb)
-{
-    gen_intermediate_code_internal(mb_env_get_cpu(env), tb, false);
-}
-
-void gen_intermediate_code_pc (CPUMBState *env, struct TranslationBlock *tb)
-{
-    gen_intermediate_code_internal(mb_env_get_cpu(env), tb, true);
 }
 
 void mb_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
@@ -2006,40 +1870,41 @@ void mb_tcg_init(void)
 
     cpu_env = tcg_global_reg_new_ptr(TCG_AREG0, "env");
 
-    env_debug = tcg_global_mem_new(TCG_AREG0, 
+    env_debug = tcg_global_mem_new(cpu_env,
                     offsetof(CPUMBState, debug),
                     "debug0");
-    env_iflags = tcg_global_mem_new(TCG_AREG0, 
+    env_iflags = tcg_global_mem_new(cpu_env,
                     offsetof(CPUMBState, iflags),
                     "iflags");
-    env_imm = tcg_global_mem_new(TCG_AREG0, 
+    env_imm = tcg_global_mem_new(cpu_env,
                     offsetof(CPUMBState, imm),
                     "imm");
-    env_btarget = tcg_global_mem_new(TCG_AREG0,
+    env_btarget = tcg_global_mem_new(cpu_env,
                      offsetof(CPUMBState, btarget),
                      "btarget");
-    env_btaken = tcg_global_mem_new(TCG_AREG0,
+    env_btaken = tcg_global_mem_new(cpu_env,
                      offsetof(CPUMBState, btaken),
                      "btaken");
-    env_res_addr = tcg_global_mem_new(TCG_AREG0,
+    env_res_addr = tcg_global_mem_new(cpu_env,
                      offsetof(CPUMBState, res_addr),
                      "res_addr");
-    env_res_val = tcg_global_mem_new(TCG_AREG0,
+    env_res_val = tcg_global_mem_new(cpu_env,
                      offsetof(CPUMBState, res_val),
                      "res_val");
     for (i = 0; i < ARRAY_SIZE(cpu_R); i++) {
-        cpu_R[i] = tcg_global_mem_new(TCG_AREG0,
+        cpu_R[i] = tcg_global_mem_new(cpu_env,
                           offsetof(CPUMBState, regs[i]),
                           regnames[i]);
     }
     for (i = 0; i < ARRAY_SIZE(cpu_SR); i++) {
-        cpu_SR[i] = tcg_global_mem_new(TCG_AREG0,
+        cpu_SR[i] = tcg_global_mem_new(cpu_env,
                           offsetof(CPUMBState, sregs[i]),
                           special_regnames[i]);
     }
 }
 
-void restore_state_to_opc(CPUMBState *env, TranslationBlock *tb, int pc_pos)
+void restore_state_to_opc(CPUMBState *env, TranslationBlock *tb,
+                          target_ulong *data)
 {
-    env->sregs[SR_PC] = tcg_ctx.gen_opc_pc[pc_pos];
+    env->sregs[SR_PC] = data[0];
 }

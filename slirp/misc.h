@@ -16,10 +16,6 @@ struct ex_list {
 	struct ex_list *ex_next;
 };
 
-#ifndef HAVE_STRDUP
-char *strdup(const char *);
-#endif
-
 #define EMU_NONE 0x0
 
 /* TCP emulations */
@@ -47,6 +43,11 @@ struct emu_t {
     uint8_t tos;
     uint8_t emu;
     struct emu_t *next;
+};
+
+struct slirp_quehead {
+    struct slirp_quehead *qh_link;
+    struct slirp_quehead *qh_rlink;
 };
 
 void slirp_insque(void *, void *);

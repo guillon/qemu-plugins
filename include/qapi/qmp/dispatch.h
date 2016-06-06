@@ -16,7 +16,6 @@
 
 #include "qapi/qmp/qobject.h"
 #include "qapi/qmp/qdict.h"
-#include "qapi/error.h"
 
 typedef void (QmpCommandFunc)(QDict *, QObject **, Error **);
 
@@ -50,7 +49,7 @@ void qmp_enable_command(const char *name);
 bool qmp_command_is_enabled(const QmpCommand *cmd);
 const char *qmp_command_name(const QmpCommand *cmd);
 bool qmp_has_success_response(const QmpCommand *cmd);
-QObject *qmp_build_error_object(Error *errp);
+QObject *qmp_build_error_object(Error *err);
 typedef void (*qmp_cmd_callback_fn)(QmpCommand *cmd, void *opaque);
 void qmp_for_each_command(qmp_cmd_callback_fn fn, void *opaque);
 

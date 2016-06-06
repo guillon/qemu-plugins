@@ -8,6 +8,7 @@
  * This code is licensed under the GPL.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/arm/pxa.h"
 #include "hw/sysbus.h"
@@ -459,9 +460,8 @@ static int pxa2xx_dma_init(SysBusDevice *sbd)
         return -1;
     }
 
-    s->chan = g_malloc0(sizeof(PXA2xxDMAChannel) * s->channels);
+    s->chan = g_new0(PXA2xxDMAChannel, s->channels);
 
-    memset(s->chan, 0, sizeof(PXA2xxDMAChannel) * s->channels);
     for (i = 0; i < s->channels; i ++)
         s->chan[i].state = DCSR_STOPINTR;
 
@@ -514,7 +514,6 @@ static VMStateDescription vmstate_pxa2xx_dma_chan = {
     .name = "pxa2xx_dma_chan",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32(descr, PXA2xxDMAChannel),
         VMSTATE_UINT32(src, PXA2xxDMAChannel),
@@ -530,7 +529,6 @@ static VMStateDescription vmstate_pxa2xx_dma = {
     .name = "pxa2xx_dma",
     .version_id = 1,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
     .fields = (VMStateField[]) {
         VMSTATE_UNUSED_TEST(is_version_0, 4),
         VMSTATE_UINT32(stopintr, PXA2xxDMAState),

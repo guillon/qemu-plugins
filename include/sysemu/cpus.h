@@ -2,6 +2,7 @@
 #define QEMU_CPUS_H
 
 /* cpus.c */
+bool qemu_in_vcpu_thread(void);
 void qemu_init_cpu_loop(void);
 void resume_all_vcpus(void);
 void pause_all_vcpus(void);
@@ -23,7 +24,6 @@ extern int smp_threads;
 #define smp_threads 1
 #endif
 
-void set_numa_modes(void);
 void list_cpus(FILE *f, fprintf_function cpu_fprintf, const char *optarg);
 
 #endif

@@ -21,6 +21,7 @@
  *   http://www.milkymist.org/socdoc/hpdmc.pdf
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "trace.h"
@@ -143,8 +144,7 @@ static const VMStateDescription vmstate_milkymist_hpdmc = {
     .name = "milkymist-hpdmc",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, MilkymistHpdmcState, R_MAX),
         VMSTATE_END_OF_LIST()
     }

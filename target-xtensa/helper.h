@@ -1,9 +1,3 @@
-#include "exec/def-helper.h"
-
-#ifdef CONFIG_TCG_PLUGIN
-DEF_HELPER_FLAGS_4(tcg_plugin_pre_tb, 0, void, i64, i64, i64, i64)
-#endif
-
 DEF_HELPER_2(exception, noreturn, env, i32)
 DEF_HELPER_3(exception_cause, noreturn, env, i32, i32)
 DEF_HELPER_4(exception_cause_vaddr, noreturn, env, i32, i32, i32)
@@ -15,7 +9,7 @@ DEF_HELPER_2(wsr_windowbase, void, env, i32)
 DEF_HELPER_4(entry, void, env, i32, i32, i32)
 DEF_HELPER_2(retw, i32, env, i32)
 DEF_HELPER_2(rotw, void, env, i32)
-DEF_HELPER_3(window_check, void, env, i32, i32)
+DEF_HELPER_3(window_check, noreturn, env, i32, i32)
 DEF_HELPER_1(restore_owb, void, env)
 DEF_HELPER_2(movsp, void, env, i32)
 DEF_HELPER_2(wsr_lbeg, void, env, i32)
@@ -29,6 +23,7 @@ DEF_HELPER_2(advance_ccount, void, env, i32)
 DEF_HELPER_1(check_interrupts, void, env)
 DEF_HELPER_3(check_atomctl, void, env, i32, i32)
 
+DEF_HELPER_2(itlb_hit_test, void, env, i32)
 DEF_HELPER_2(wsr_rasid, void, env, i32)
 DEF_HELPER_FLAGS_3(rtlb0, TCG_CALL_NO_RWG_SE, i32, env, i32, i32)
 DEF_HELPER_FLAGS_3(rtlb1, TCG_CALL_NO_RWG_SE, i32, env, i32, i32)
@@ -61,5 +56,3 @@ DEF_HELPER_4(olt_s, void, env, i32, f32, f32)
 DEF_HELPER_4(ult_s, void, env, i32, f32, f32)
 DEF_HELPER_4(ole_s, void, env, i32, f32, f32)
 DEF_HELPER_4(ule_s, void, env, i32, f32, f32)
-
-#include "exec/def-helper.h"

@@ -1,12 +1,6 @@
 /* Code for loading Linux executables.  Mostly linux kernel code.  */
 
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include "qemu/osdep.h"
 
 #include "qemu.h"
 
@@ -89,8 +83,7 @@ static int prepare_binprm(struct linux_binprm *bprm)
 abi_ulong loader_build_argptr(int envc, int argc, abi_ulong sp,
                               abi_ulong stringp, int push_ptr)
 {
-    CPUArchState *env = thread_cpu->env_ptr;
-    TaskState *ts = (TaskState *)env->opaque;
+    TaskState *ts = (TaskState *)thread_cpu->opaque;
     int n = sizeof(abi_ulong);
     abi_ulong envp;
     abi_ulong argv;
@@ -136,10 +129,7 @@ int loader_exec(int fdexec, const char *filename, char **argv, char **envp,
              struct linux_binprm *bprm)
 {
     int retval;
-    int i;
 
-    bprm->p = TARGET_PAGE_SIZE*MAX_ARG_PAGES-sizeof(unsigned int);
-    memset(bprm->page, 0, sizeof(bprm->page));
     bprm->fd = fdexec;
     bprm->filename = (char *)filename;
     bprm->argc = count(argv);
@@ -154,13 +144,13 @@ int loader_exec(int fdexec, const char *filename, char **argv, char **envp,
                 && bprm->buf[1] == 'E'
                 && bprm->buf[2] == 'L'
                 && bprm->buf[3] == 'F') {
-            retval = load_elf_binary(bprm, regs, infop);
+            retval = load_elf_binary(bprm, infop);
 #if defined(TARGET_HAS_BFLT)
         } else if (bprm->buf[0] == 'b'
                 && bprm->buf[1] == 'F'
                 && bprm->buf[2] == 'L'
                 && bprm->buf[3] == 'T') {
-            retval = load_flt_binary(bprm,regs,infop);
+            retval = load_flt_binary(bprm, infop);
 #endif
         } else {
             return -ENOEXEC;
@@ -173,9 +163,5 @@ int loader_exec(int fdexec, const char *filename, char **argv, char **envp,
         return retval;
     }
 
-    /* Something went wrong, return the inode and free the argument pages*/
-    for (i=0 ; i<MAX_ARG_PAGES ; i++) {
-        g_free(bprm->page[i]);
-    }
     return(retval);
 }

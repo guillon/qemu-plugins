@@ -20,6 +20,7 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "qemu-common.h"
 #include "hw/irq.h"
@@ -213,9 +214,6 @@ void exynos4210_init_board_irqs(Exynos4210Irq *s)
     uint32_t grp, bit, irq_id, n;
 
     for (n = 0; n < EXYNOS4210_MAX_EXT_COMBINER_IN_IRQ; n++) {
-        s->board_irqs[n] = qemu_irq_split(s->int_combiner_irq[n],
-                s->ext_combiner_irq[n]);
-
         irq_id = 0;
         if (n == EXYNOS4210_COMBINER_GET_IRQ_NUM(1, 4) ||
                 n == EXYNOS4210_COMBINER_GET_IRQ_NUM(12, 4)) {
@@ -230,8 +228,10 @@ void exynos4210_init_board_irqs(Exynos4210Irq *s)
         if (irq_id) {
             s->board_irqs[n] = qemu_irq_split(s->int_combiner_irq[n],
                     s->ext_gic_irq[irq_id-32]);
+        } else {
+            s->board_irqs[n] = qemu_irq_split(s->int_combiner_irq[n],
+                    s->ext_combiner_irq[n]);
         }
-
     }
     for (; n < EXYNOS4210_MAX_INT_COMBINER_IN_IRQ; n++) {
         /* these IDs are passed to Internal Combiner and External GIC */
@@ -394,7 +394,6 @@ static const VMStateDescription vmstate_exynos4210_irq_gate = {
     .name = "exynos4210.irq_gate",
     .version_id = 2,
     .minimum_version_id = 2,
-    .minimum_version_id_old = 2,
     .fields = (VMStateField[]) {
         VMSTATE_VBUFFER_UINT32(level, Exynos4210IRQGateState, 1, NULL, 0, n_in),
         VMSTATE_END_OF_LIST()

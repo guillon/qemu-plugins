@@ -10,6 +10,7 @@
  * Contributions after 2012-01-13 are licensed under the terms of the
  * GNU GPL, version 2 or (at your option) any later version.
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 
@@ -219,12 +220,11 @@ static int mst_fpga_init(SysBusDevice *sbd)
 }
 
 static VMStateDescription vmstate_mst_fpga_regs = {
-	.name = "mainstone_fpga",
-	.version_id = 0,
-	.minimum_version_id = 0,
-	.minimum_version_id_old = 0,
-	.post_load = mst_fpga_post_load,
-	.fields = (VMStateField []) {
+    .name = "mainstone_fpga",
+    .version_id = 0,
+    .minimum_version_id = 0,
+    .post_load = mst_fpga_post_load,
+    .fields = (VMStateField[]) {
 		VMSTATE_UINT32(prev_level, mst_irq_state),
 		VMSTATE_UINT32(leddat1, mst_irq_state),
 		VMSTATE_UINT32(leddat2, mst_irq_state),

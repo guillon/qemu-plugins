@@ -10,6 +10,7 @@
  * See the COPYING.LIB file in the top-level directory.
  */
 
+#include "qemu/osdep.h"
 #include "qapi/qmp/qint.h"
 #include "qapi/qmp/qfloat.h"
 #include "qapi/qmp/qdict.h"
@@ -18,13 +19,7 @@
 #include "qapi/qmp/qobject.h"
 #include "qemu/queue.h"
 #include "qemu-common.h"
-
-static void qdict_destroy_obj(QObject *obj);
-
-static const QType qdict_type = {
-    .code = QTYPE_QDICT,
-    .destroy = qdict_destroy_obj,
-};
+#include "qemu/cutils.h"
 
 /**
  * qdict_new(): Create a new QDict
@@ -36,7 +31,7 @@ QDict *qdict_new(void)
     QDict *qdict;
 
     qdict = g_malloc0(sizeof(*qdict));
-    QOBJECT_INIT(qdict, &qdict_type);
+    qobject_init(QOBJECT(qdict), QTYPE_QDICT);
 
     return qdict;
 }
@@ -46,9 +41,9 @@ QDict *qdict_new(void)
  */
 QDict *qobject_to_qdict(const QObject *obj)
 {
-    if (qobject_type(obj) != QTYPE_QDICT)
+    if (!obj || qobject_type(obj) != QTYPE_QDICT) {
         return NULL;
-
+    }
     return container_of(obj, QDict, base);
 }
 
@@ -184,8 +179,7 @@ size_t qdict_size(const QDict *qdict)
 /**
  * qdict_get_obj(): Get a QObject of a specific type
  */
-static QObject *qdict_get_obj(const QDict *qdict, const char *key,
-                              qtype_code type)
+static QObject *qdict_get_obj(const QDict *qdict, const char *key, QType type)
 {
     QObject *obj;
 
@@ -229,8 +223,7 @@ double qdict_get_double(const QDict *qdict, const char *key)
  */
 int64_t qdict_get_int(const QDict *qdict, const char *key)
 {
-    QObject *obj = qdict_get_obj(qdict, key, QTYPE_QINT);
-    return qint_get_int(qobject_to_qint(obj));
+    return qint_get_int(qobject_to_qint(qdict_get(qdict, key)));
 }
 
 /**
@@ -241,10 +234,9 @@ int64_t qdict_get_int(const QDict *qdict, const char *key)
  *
  * Return bool mapped by 'key'.
  */
-int qdict_get_bool(const QDict *qdict, const char *key)
+bool qdict_get_bool(const QDict *qdict, const char *key)
 {
-    QObject *obj = qdict_get_obj(qdict, key, QTYPE_QBOOL);
-    return qbool_get_int(qobject_to_qbool(obj));
+    return qbool_get_bool(qobject_to_qbool(qdict_get(qdict, key)));
 }
 
 /**
@@ -270,7 +262,7 @@ QList *qdict_get_qlist(const QDict *qdict, const char *key)
  */
 QDict *qdict_get_qdict(const QDict *qdict, const char *key)
 {
-    return qobject_to_qdict(qdict_get_obj(qdict, key, QTYPE_QDICT));
+    return qobject_to_qdict(qdict_get(qdict, key));
 }
 
 /**
@@ -284,8 +276,7 @@ QDict *qdict_get_qdict(const QDict *qdict, const char *key)
  */
 const char *qdict_get_str(const QDict *qdict, const char *key)
 {
-    QObject *obj = qdict_get_obj(qdict, key, QTYPE_QSTRING);
-    return qstring_get_str(qobject_to_qstring(obj));
+    return qstring_get_str(qobject_to_qstring(qdict_get(qdict, key)));
 }
 
 /**
@@ -298,13 +289,9 @@ const char *qdict_get_str(const QDict *qdict, const char *key)
 int64_t qdict_get_try_int(const QDict *qdict, const char *key,
                           int64_t def_value)
 {
-    QObject *obj;
+    QInt *qint = qobject_to_qint(qdict_get(qdict, key));
 
-    obj = qdict_get(qdict, key);
-    if (!obj || qobject_type(obj) != QTYPE_QINT)
-        return def_value;
-
-    return qint_get_int(qobject_to_qint(obj));
+    return qint ? qint_get_int(qint) : def_value;
 }
 
 /**
@@ -314,15 +301,11 @@ int64_t qdict_get_try_int(const QDict *qdict, const char *key,
  * dictionary or if the stored object is not of QBool type
  * 'def_value' will be returned.
  */
-int qdict_get_try_bool(const QDict *qdict, const char *key, int def_value)
+bool qdict_get_try_bool(const QDict *qdict, const char *key, bool def_value)
 {
-    QObject *obj;
+    QBool *qbool = qobject_to_qbool(qdict_get(qdict, key));
 
-    obj = qdict_get(qdict, key);
-    if (!obj || qobject_type(obj) != QTYPE_QBOOL)
-        return def_value;
-
-    return qbool_get_int(qobject_to_qbool(obj));
+    return qbool ? qbool_get_bool(qbool) : def_value;
 }
 
 /**
@@ -335,13 +318,9 @@ int qdict_get_try_bool(const QDict *qdict, const char *key, int def_value)
  */
 const char *qdict_get_try_str(const QDict *qdict, const char *key)
 {
-    QObject *obj;
+    QString *qstr = qobject_to_qstring(qdict_get(qdict, key));
 
-    obj = qdict_get(qdict, key);
-    if (!obj || qobject_type(obj) != QTYPE_QSTRING)
-        return NULL;
-
-    return qstring_get_str(qobject_to_qstring(obj));
+    return qstr ? qstring_get_str(qstr) : NULL;
 }
 
 /**
@@ -456,7 +435,7 @@ void qdict_del(QDict *qdict, const char *key)
 /**
  * qdict_destroy_obj(): Free all the memory allocated by a QDict
  */
-static void qdict_destroy_obj(QObject *obj)
+void qdict_destroy_obj(QObject *obj)
 {
     int i;
     QDict *qdict;
@@ -477,11 +456,80 @@ static void qdict_destroy_obj(QObject *obj)
     g_free(qdict);
 }
 
-static void qdict_do_flatten(QDict *qdict, QDict *target, const char *prefix)
+/**
+ * qdict_copy_default(): If no entry mapped by 'key' exists in 'dst' yet, the
+ * value of 'key' in 'src' is copied there (and the refcount increased
+ * accordingly).
+ */
+void qdict_copy_default(QDict *dst, QDict *src, const char *key)
+{
+    QObject *val;
+
+    if (qdict_haskey(dst, key)) {
+        return;
+    }
+
+    val = qdict_get(src, key);
+    if (val) {
+        qobject_incref(val);
+        qdict_put_obj(dst, key, val);
+    }
+}
+
+/**
+ * qdict_set_default_str(): If no entry mapped by 'key' exists in 'dst' yet, a
+ * new QString initialised by 'val' is put there.
+ */
+void qdict_set_default_str(QDict *dst, const char *key, const char *val)
+{
+    if (qdict_haskey(dst, key)) {
+        return;
+    }
+
+    qdict_put(dst, key, qstring_from_str(val));
+}
+
+static void qdict_flatten_qdict(QDict *qdict, QDict *target,
+                                const char *prefix);
+
+static void qdict_flatten_qlist(QList *qlist, QDict *target, const char *prefix)
+{
+    QObject *value;
+    const QListEntry *entry;
+    char *new_key;
+    int i;
+
+    /* This function is never called with prefix == NULL, i.e., it is always
+     * called from within qdict_flatten_q(list|dict)(). Therefore, it does not
+     * need to remove list entries during the iteration (the whole list will be
+     * deleted eventually anyway from qdict_flatten_qdict()). */
+    assert(prefix);
+
+    entry = qlist_first(qlist);
+
+    for (i = 0; entry; entry = qlist_next(entry), i++) {
+        value = qlist_entry_obj(entry);
+        new_key = g_strdup_printf("%s.%i", prefix, i);
+
+        if (qobject_type(value) == QTYPE_QDICT) {
+            qdict_flatten_qdict(qobject_to_qdict(value), target, new_key);
+        } else if (qobject_type(value) == QTYPE_QLIST) {
+            qdict_flatten_qlist(qobject_to_qlist(value), target, new_key);
+        } else {
+            /* All other types are moved to the target unchanged. */
+            qobject_incref(value);
+            qdict_put_obj(target, new_key, value);
+        }
+
+        g_free(new_key);
+    }
+}
+
+static void qdict_flatten_qdict(QDict *qdict, QDict *target, const char *prefix)
 {
     QObject *value;
     const QDictEntry *entry, *next;
-    const char *new_key;
+    char *new_key;
     bool delete;
 
     entry = qdict_first(qdict);
@@ -494,17 +542,27 @@ static void qdict_do_flatten(QDict *qdict, QDict *target, const char *prefix)
         delete = false;
 
         if (prefix) {
-            qobject_incref(value);
             new_key = g_strdup_printf("%s.%s", prefix, entry->key);
+        }
+
+        if (qobject_type(value) == QTYPE_QDICT) {
+            /* Entries of QDicts are processed recursively, the QDict object
+             * itself disappears. */
+            qdict_flatten_qdict(qobject_to_qdict(value), target,
+                                new_key ? new_key : entry->key);
+            delete = true;
+        } else if (qobject_type(value) == QTYPE_QLIST) {
+            qdict_flatten_qlist(qobject_to_qlist(value), target,
+                                new_key ? new_key : entry->key);
+            delete = true;
+        } else if (prefix) {
+            /* All other objects are moved to the target unchanged. */
+            qobject_incref(value);
             qdict_put_obj(target, new_key, value);
             delete = true;
         }
 
-        if (qobject_type(value) == QTYPE_QDICT) {
-            qdict_do_flatten(qobject_to_qdict(value), target,
-                             new_key ? new_key : entry->key);
-            delete = true;
-        }
+        g_free(new_key);
 
         if (delete) {
             qdict_del(qdict, entry->key);
@@ -520,12 +578,14 @@ static void qdict_do_flatten(QDict *qdict, QDict *target, const char *prefix)
 
 /**
  * qdict_flatten(): For each nested QDict with key x, all fields with key y
- * are moved to this QDict and their key is renamed to "x.y". This operation
- * is applied recursively for nested QDicts.
+ * are moved to this QDict and their key is renamed to "x.y". For each nested
+ * QList with key x, the field at index y is moved to this QDict with the key
+ * "x.y" (i.e., the reverse of what qdict_array_split() does).
+ * This operation is applied recursively for nested QDicts and QLists.
  */
 void qdict_flatten(QDict *qdict)
 {
-    qdict_do_flatten(qdict, qdict, NULL);
+    qdict_flatten_qdict(qdict, qdict, NULL);
 }
 
 /* extract all the src QDict entries starting by start into dst */
@@ -545,6 +605,177 @@ void qdict_extract_subqdict(QDict *src, QDict **dst, const char *start)
             qdict_put_obj(*dst, p, entry->value);
             qdict_del(src, entry->key);
         }
+        entry = next;
+    }
+}
+
+static int qdict_count_prefixed_entries(const QDict *src, const char *start)
+{
+    const QDictEntry *entry;
+    int count = 0;
+
+    for (entry = qdict_first(src); entry; entry = qdict_next(src, entry)) {
+        if (strstart(entry->key, start, NULL)) {
+            if (count == INT_MAX) {
+                return -ERANGE;
+            }
+            count++;
+        }
+    }
+
+    return count;
+}
+
+/**
+ * qdict_array_split(): This function moves array-like elements of a QDict into
+ * a new QList. Every entry in the original QDict with a key "%u" or one
+ * prefixed "%u.", where %u designates an unsigned integer starting at 0 and
+ * incrementally counting up, will be moved to a new QDict at index %u in the
+ * output QList with the key prefix removed, if that prefix is "%u.". If the
+ * whole key is just "%u", the whole QObject will be moved unchanged without
+ * creating a new QDict. The function terminates when there is no entry in the
+ * QDict with a prefix directly (incrementally) following the last one; it also
+ * returns if there are both entries with "%u" and "%u." for the same index %u.
+ * Example: {"0.a": 42, "0.b": 23, "1.x": 0, "4.y": 1, "o.o": 7, "2": 66}
+ *      (or {"1.x": 0, "4.y": 1, "0.a": 42, "o.o": 7, "0.b": 23, "2": 66})
+ *       => [{"a": 42, "b": 23}, {"x": 0}, 66]
+ *      and {"4.y": 1, "o.o": 7} (remainder of the old QDict)
+ */
+void qdict_array_split(QDict *src, QList **dst)
+{
+    unsigned i;
+
+    *dst = qlist_new();
+
+    for (i = 0; i < UINT_MAX; i++) {
+        QObject *subqobj;
+        bool is_subqdict;
+        QDict *subqdict;
+        char indexstr[32], prefix[32];
+        size_t snprintf_ret;
+
+        snprintf_ret = snprintf(indexstr, 32, "%u", i);
+        assert(snprintf_ret < 32);
+
+        subqobj = qdict_get(src, indexstr);
+
+        snprintf_ret = snprintf(prefix, 32, "%u.", i);
+        assert(snprintf_ret < 32);
+
+        /* Overflow is the same as positive non-zero results */
+        is_subqdict = qdict_count_prefixed_entries(src, prefix);
+
+        // There may be either a single subordinate object (named "%u") or
+        // multiple objects (each with a key prefixed "%u."), but not both.
+        if (!subqobj == !is_subqdict) {
+            break;
+        }
+
+        if (is_subqdict) {
+            qdict_extract_subqdict(src, &subqdict, prefix);
+            assert(qdict_size(subqdict) > 0);
+        } else {
+            qobject_incref(subqobj);
+            qdict_del(src, indexstr);
+        }
+
+        qlist_append_obj(*dst, subqobj ?: QOBJECT(subqdict));
+    }
+}
+
+/**
+ * qdict_array_entries(): Returns the number of direct array entries if the
+ * sub-QDict of src specified by the prefix in subqdict (or src itself for
+ * prefix == "") is valid as an array, i.e. the length of the created list if
+ * the sub-QDict would become empty after calling qdict_array_split() on it. If
+ * the array is not valid, -EINVAL is returned.
+ */
+int qdict_array_entries(QDict *src, const char *subqdict)
+{
+    const QDictEntry *entry;
+    unsigned i;
+    unsigned entries = 0;
+    size_t subqdict_len = strlen(subqdict);
+
+    assert(!subqdict_len || subqdict[subqdict_len - 1] == '.');
+
+    /* qdict_array_split() loops until UINT_MAX, but as we want to return
+     * negative errors, we only have a signed return value here. Any additional
+     * entries will lead to -EINVAL. */
+    for (i = 0; i < INT_MAX; i++) {
+        QObject *subqobj;
+        int subqdict_entries;
+        size_t slen = 32 + subqdict_len;
+        char indexstr[slen], prefix[slen];
+        size_t snprintf_ret;
+
+        snprintf_ret = snprintf(indexstr, slen, "%s%u", subqdict, i);
+        assert(snprintf_ret < slen);
+
+        subqobj = qdict_get(src, indexstr);
+
+        snprintf_ret = snprintf(prefix, slen, "%s%u.", subqdict, i);
+        assert(snprintf_ret < slen);
+
+        subqdict_entries = qdict_count_prefixed_entries(src, prefix);
+        if (subqdict_entries < 0) {
+            return subqdict_entries;
+        }
+
+        /* There may be either a single subordinate object (named "%u") or
+         * multiple objects (each with a key prefixed "%u."), but not both. */
+        if (subqobj && subqdict_entries) {
+            return -EINVAL;
+        } else if (!subqobj && !subqdict_entries) {
+            break;
+        }
+
+        entries += subqdict_entries ? subqdict_entries : 1;
+    }
+
+    /* Consider everything handled that isn't part of the given sub-QDict */
+    for (entry = qdict_first(src); entry; entry = qdict_next(src, entry)) {
+        if (!strstart(qdict_entry_key(entry), subqdict, NULL)) {
+            entries++;
+        }
+    }
+
+    /* Anything left in the sub-QDict that wasn't handled? */
+    if (qdict_size(src) != entries) {
+        return -EINVAL;
+    }
+
+    return i;
+}
+
+/**
+ * qdict_join(): Absorb the src QDict into the dest QDict, that is, move all
+ * elements from src to dest.
+ *
+ * If an element from src has a key already present in dest, it will not be
+ * moved unless overwrite is true.
+ *
+ * If overwrite is true, the conflicting values in dest will be discarded and
+ * replaced by the corresponding values from src.
+ *
+ * Therefore, with overwrite being true, the src QDict will always be empty when
+ * this function returns. If overwrite is false, the src QDict will be empty
+ * iff there were no conflicts.
+ */
+void qdict_join(QDict *dest, QDict *src, bool overwrite)
+{
+    const QDictEntry *entry, *next;
+
+    entry = qdict_first(src);
+    while (entry) {
+        next = qdict_next(src, entry);
+
+        if (overwrite || !qdict_haskey(dest, entry->key)) {
+            qobject_incref(entry->value);
+            qdict_put_obj(dest, entry->key, entry->value);
+            qdict_del(src, entry->key);
+        }
+
         entry = next;
     }
 }

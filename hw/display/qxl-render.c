@@ -19,7 +19,9 @@
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "qxl.h"
+#include "trace.h"
 
 static void qxl_blit(PCIQXLDevice *qxl, QXLRect *rect)
 {
@@ -115,13 +117,14 @@ static void qxl_render_update_area_unlocked(PCIQXLDevice *qxl)
                qxl->guest_primary.bytes_pp,
                qxl->guest_primary.bits_pp);
         if (qxl->guest_primary.qxl_stride > 0) {
+            pixman_format_code_t format =
+                qemu_default_pixman_format(qxl->guest_primary.bits_pp, true);
             surface = qemu_create_displaysurface_from
                 (qxl->guest_primary.surface.width,
                  qxl->guest_primary.surface.height,
-                 qxl->guest_primary.bits_pp,
+                 format,
                  qxl->guest_primary.abs_stride,
-                 qxl->guest_primary.data,
-                 false);
+                 qxl->guest_primary.data);
         } else {
             surface = qemu_create_displaysurface
                 (qxl->guest_primary.surface.width,
@@ -137,6 +140,14 @@ static void qxl_render_update_area_unlocked(PCIQXLDevice *qxl)
         if (qemu_spice_rect_is_empty(qxl->dirty+i)) {
             break;
         }
+        if (qxl->dirty[i].left < 0 ||
+            qxl->dirty[i].top < 0 ||
+            qxl->dirty[i].left > qxl->dirty[i].right ||
+            qxl->dirty[i].top > qxl->dirty[i].bottom ||
+            qxl->dirty[i].right > qxl->guest_primary.surface.width ||
+            qxl->dirty[i].bottom > qxl->guest_primary.surface.height) {
+            continue;
+        }
         qxl_blit(qxl, qxl->dirty+i);
         dpy_gfx_update(vga->con,
                        qxl->dirty[i].left, qxl->dirty[i].top,
@@ -149,7 +160,7 @@ static void qxl_render_update_area_unlocked(PCIQXLDevice *qxl)
 /*
  * use ssd.lock to protect render_update_cookie_num.
  * qxl_render_update is called by io thread or vcpu thread, and the completion
- * callbacks are called by spice_server thread, defering to bh called from the
+ * callbacks are called by spice_server thread, deferring to bh called from the
  * io thread.
  */
 void qxl_render_update(PCIQXLDevice *qxl)
@@ -273,12 +284,14 @@ int qxl_render_cursor(PCIQXLDevice *qxl, QXLCommandExt *ext)
         qxl->ssd.mouse_x = cmd->u.set.position.x;
         qxl->ssd.mouse_y = cmd->u.set.position.y;
         qemu_mutex_unlock(&qxl->ssd.lock);
+        qemu_bh_schedule(qxl->ssd.cursor_bh);
         break;
     case QXL_CURSOR_MOVE:
         qemu_mutex_lock(&qxl->ssd.lock);
         qxl->ssd.mouse_x = cmd->u.position.x;
         qxl->ssd.mouse_y = cmd->u.position.y;
         qemu_mutex_unlock(&qxl->ssd.lock);
+        qemu_bh_schedule(qxl->ssd.cursor_bh);
         break;
     }
     return 0;

@@ -7,6 +7,7 @@
  * This code is licensed under the GPL.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "qemu/timer.h"
 #include "qemu/bitops.h"
@@ -170,7 +171,8 @@ static uint64_t arm_sysctl_read(void *opaque, hwaddr offset,
     case 0x58: /* BOOTCS */
         return 0;
     case 0x5c: /* 24MHz */
-        return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 24000000, get_ticks_per_sec());
+        return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 24000000,
+                        NANOSECONDS_PER_SECOND);
     case 0x60: /* MISC */
         return 0;
     case 0x84: /* PROCID0 */
@@ -276,7 +278,7 @@ static bool vexpress_cfgctrl_read(arm_sysctl_state *s, unsigned int dcc,
         }
         break;
     case SYS_CFG_OSC:
-        if (site == SYS_CFG_SITE_MB && device < sizeof(s->mb_clock)) {
+        if (site == SYS_CFG_SITE_MB && device < ARRAY_SIZE(s->mb_clock)) {
             /* motherboard clock */
             *val = s->mb_clock[device];
             return true;
@@ -324,7 +326,7 @@ static bool vexpress_cfgctrl_write(arm_sysctl_state *s, unsigned int dcc,
 
     switch (function) {
     case SYS_CFG_OSC:
-        if (site == SYS_CFG_SITE_MB && device < sizeof(s->mb_clock)) {
+        if (site == SYS_CFG_SITE_MB && device < ARRAY_SIZE(s->mb_clock)) {
             /* motherboard clock */
             s->mb_clock[device] = val;
             return true;

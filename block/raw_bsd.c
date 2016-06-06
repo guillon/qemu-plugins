@@ -26,16 +26,22 @@
  * IN THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "block/block_int.h"
+#include "qapi/error.h"
 #include "qemu/option.h"
 
-static QEMUOptionParameter raw_create_options[] = {
-    {
-        .name = BLOCK_OPT_SIZE,
-        .type = OPT_SIZE,
-        .help = "Virtual disk size"
-    },
-    { 0 }
+static QemuOptsList raw_create_opts = {
+    .name = "raw-create-opts",
+    .head = QTAILQ_HEAD_INITIALIZER(raw_create_opts.head),
+    .desc = {
+        {
+            .name = BLOCK_OPT_SIZE,
+            .type = QEMU_OPT_SIZE,
+            .help = "Virtual disk size"
+        },
+        { /* end of list */ }
+    }
 };
 
 static int raw_reopen_prepare(BDRVReopenState *reopen_state,
@@ -48,98 +54,154 @@ static int coroutine_fn raw_co_readv(BlockDriverState *bs, int64_t sector_num,
                                      int nb_sectors, QEMUIOVector *qiov)
 {
     BLKDBG_EVENT(bs->file, BLKDBG_READ_AIO);
-    return bdrv_co_readv(bs->file, sector_num, nb_sectors, qiov);
+    return bdrv_co_readv(bs->file->bs, sector_num, nb_sectors, qiov);
 }
 
-static int coroutine_fn raw_co_writev(BlockDriverState *bs, int64_t sector_num,
-                                      int nb_sectors, QEMUIOVector *qiov)
+static int coroutine_fn
+raw_co_writev_flags(BlockDriverState *bs, int64_t sector_num, int nb_sectors,
+                    QEMUIOVector *qiov, int flags)
 {
+    void *buf = NULL;
+    BlockDriver *drv;
+    QEMUIOVector local_qiov;
+    int ret;
+
+    if (bs->probed && sector_num == 0) {
+        /* As long as these conditions are true, we can't get partial writes to
+         * the probe buffer and can just directly check the request. */
+        QEMU_BUILD_BUG_ON(BLOCK_PROBE_BUF_SIZE != 512);
+        QEMU_BUILD_BUG_ON(BDRV_SECTOR_SIZE != 512);
+
+        if (nb_sectors == 0) {
+            /* qemu_iovec_to_buf() would fail, but we want to return success
+             * instead of -EINVAL in this case. */
+            return 0;
+        }
+
+        buf = qemu_try_blockalign(bs->file->bs, 512);
+        if (!buf) {
+            ret = -ENOMEM;
+            goto fail;
+        }
+
+        ret = qemu_iovec_to_buf(qiov, 0, buf, 512);
+        if (ret != 512) {
+            ret = -EINVAL;
+            goto fail;
+        }
+
+        drv = bdrv_probe_all(buf, 512, NULL);
+        if (drv != bs->drv) {
+            ret = -EPERM;
+            goto fail;
+        }
+
+        /* Use the checked buffer, a malicious guest might be overwriting its
+         * original buffer in the background. */
+        qemu_iovec_init(&local_qiov, qiov->niov + 1);
+        qemu_iovec_add(&local_qiov, buf, 512);
+        qemu_iovec_concat(&local_qiov, qiov, 512, qiov->size - 512);
+        qiov = &local_qiov;
+    }
+
     BLKDBG_EVENT(bs->file, BLKDBG_WRITE_AIO);
-    return bdrv_co_writev(bs->file, sector_num, nb_sectors, qiov);
+    ret = bdrv_co_do_pwritev(bs->file->bs, sector_num * BDRV_SECTOR_SIZE,
+                             nb_sectors * BDRV_SECTOR_SIZE, qiov, flags);
+
+fail:
+    if (qiov == &local_qiov) {
+        qemu_iovec_destroy(&local_qiov);
+    }
+    qemu_vfree(buf);
+    return ret;
+}
+
+static int coroutine_fn
+raw_co_writev(BlockDriverState *bs, int64_t sector_num, int nb_sectors,
+              QEMUIOVector *qiov)
+{
+    return raw_co_writev_flags(bs, sector_num, nb_sectors, qiov, 0);
 }
 
 static int64_t coroutine_fn raw_co_get_block_status(BlockDriverState *bs,
                                             int64_t sector_num,
-                                            int nb_sectors, int *pnum)
+                                            int nb_sectors, int *pnum,
+                                            BlockDriverState **file)
 {
     *pnum = nb_sectors;
+    *file = bs->file->bs;
     return BDRV_BLOCK_RAW | BDRV_BLOCK_OFFSET_VALID | BDRV_BLOCK_DATA |
            (sector_num << BDRV_SECTOR_BITS);
 }
 
 static int coroutine_fn raw_co_write_zeroes(BlockDriverState *bs,
-                                            int64_t sector_num, int nb_sectors)
+                                            int64_t sector_num, int nb_sectors,
+                                            BdrvRequestFlags flags)
 {
-    return bdrv_co_write_zeroes(bs->file, sector_num, nb_sectors);
+    return bdrv_co_write_zeroes(bs->file->bs, sector_num, nb_sectors, flags);
 }
 
 static int coroutine_fn raw_co_discard(BlockDriverState *bs,
                                        int64_t sector_num, int nb_sectors)
 {
-    return bdrv_co_discard(bs->file, sector_num, nb_sectors);
+    return bdrv_co_discard(bs->file->bs, sector_num, nb_sectors);
 }
 
 static int64_t raw_getlength(BlockDriverState *bs)
 {
-    return bdrv_getlength(bs->file);
+    return bdrv_getlength(bs->file->bs);
 }
 
 static int raw_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
 {
-    return bdrv_get_info(bs->file, bdi);
+    return bdrv_get_info(bs->file->bs, bdi);
+}
+
+static void raw_refresh_limits(BlockDriverState *bs, Error **errp)
+{
+    bs->bl = bs->file->bs->bl;
 }
 
 static int raw_truncate(BlockDriverState *bs, int64_t offset)
 {
-    return bdrv_truncate(bs->file, offset);
-}
-
-static int raw_is_inserted(BlockDriverState *bs)
-{
-    return bdrv_is_inserted(bs->file);
+    return bdrv_truncate(bs->file->bs, offset);
 }
 
 static int raw_media_changed(BlockDriverState *bs)
 {
-    return bdrv_media_changed(bs->file);
+    return bdrv_media_changed(bs->file->bs);
 }
 
 static void raw_eject(BlockDriverState *bs, bool eject_flag)
 {
-    bdrv_eject(bs->file, eject_flag);
+    bdrv_eject(bs->file->bs, eject_flag);
 }
 
 static void raw_lock_medium(BlockDriverState *bs, bool locked)
 {
-    bdrv_lock_medium(bs->file, locked);
+    bdrv_lock_medium(bs->file->bs, locked);
 }
 
-static int raw_ioctl(BlockDriverState *bs, unsigned long int req, void *buf)
+static BlockAIOCB *raw_aio_ioctl(BlockDriverState *bs,
+                                 unsigned long int req, void *buf,
+                                 BlockCompletionFunc *cb,
+                                 void *opaque)
 {
-    return bdrv_ioctl(bs->file, req, buf);
-}
-
-static BlockDriverAIOCB *raw_aio_ioctl(BlockDriverState *bs,
-                                       unsigned long int req, void *buf,
-                                       BlockDriverCompletionFunc *cb,
-                                       void *opaque)
-{
-    return bdrv_aio_ioctl(bs->file, req, buf, cb, opaque);
+    return bdrv_aio_ioctl(bs->file->bs, req, buf, cb, opaque);
 }
 
 static int raw_has_zero_init(BlockDriverState *bs)
 {
-    return bdrv_has_zero_init(bs->file);
+    return bdrv_has_zero_init(bs->file->bs);
 }
 
-static int raw_create(const char *filename, QEMUOptionParameter *options,
-                      Error **errp)
+static int raw_create(const char *filename, QemuOpts *opts, Error **errp)
 {
     Error *local_err = NULL;
     int ret;
 
-    ret = bdrv_create_file(filename, options, &local_err);
-    if (error_is_set(&local_err)) {
+    ret = bdrv_create_file(filename, opts, &local_err);
+    if (local_err) {
         error_propagate(errp, local_err);
     }
     return ret;
@@ -148,7 +210,19 @@ static int raw_create(const char *filename, QEMUOptionParameter *options,
 static int raw_open(BlockDriverState *bs, QDict *options, int flags,
                     Error **errp)
 {
-    bs->sg = bs->file->sg;
+    bs->sg = bs->file->bs->sg;
+
+    if (bs->probed && !bdrv_is_read_only(bs)) {
+        fprintf(stderr,
+                "WARNING: Image format was not specified for '%s' and probing "
+                "guessed raw.\n"
+                "         Automatically detecting the format is dangerous for "
+                "raw images, write operations on block 0 will be restricted.\n"
+                "         Specify the 'raw' format explicitly to remove the "
+                "restrictions.\n",
+                bs->file->bs->filename);
+    }
+
     return 0;
 }
 
@@ -164,7 +238,17 @@ static int raw_probe(const uint8_t *buf, int buf_size, const char *filename)
     return 1;
 }
 
-static BlockDriver bdrv_raw = {
+static int raw_probe_blocksizes(BlockDriverState *bs, BlockSizes *bsz)
+{
+    return bdrv_probe_blocksizes(bs->file->bs, bsz);
+}
+
+static int raw_probe_geometry(BlockDriverState *bs, HDGeometry *geo)
+{
+    return bdrv_probe_geometry(bs->file->bs, geo);
+}
+
+BlockDriver bdrv_raw = {
     .format_name          = "raw",
     .bdrv_probe           = &raw_probe,
     .bdrv_reopen_prepare  = &raw_reopen_prepare,
@@ -173,6 +257,8 @@ static BlockDriver bdrv_raw = {
     .bdrv_create          = &raw_create,
     .bdrv_co_readv        = &raw_co_readv,
     .bdrv_co_writev       = &raw_co_writev,
+    .bdrv_co_writev_flags = &raw_co_writev_flags,
+    .supported_write_flags = BDRV_REQ_FUA,
     .bdrv_co_write_zeroes = &raw_co_write_zeroes,
     .bdrv_co_discard      = &raw_co_discard,
     .bdrv_co_get_block_status = &raw_co_get_block_status,
@@ -180,13 +266,14 @@ static BlockDriver bdrv_raw = {
     .bdrv_getlength       = &raw_getlength,
     .has_variable_length  = true,
     .bdrv_get_info        = &raw_get_info,
-    .bdrv_is_inserted     = &raw_is_inserted,
+    .bdrv_refresh_limits  = &raw_refresh_limits,
+    .bdrv_probe_blocksizes = &raw_probe_blocksizes,
+    .bdrv_probe_geometry  = &raw_probe_geometry,
     .bdrv_media_changed   = &raw_media_changed,
     .bdrv_eject           = &raw_eject,
     .bdrv_lock_medium     = &raw_lock_medium,
-    .bdrv_ioctl           = &raw_ioctl,
     .bdrv_aio_ioctl       = &raw_aio_ioctl,
-    .create_options       = &raw_create_options[0],
+    .create_opts          = &raw_create_opts,
     .bdrv_has_zero_init   = &raw_has_zero_init
 };
 

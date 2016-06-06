@@ -26,6 +26,7 @@
  */
 
 #include "hw/qdev.h"
+#include "qemu/iov.h"
 #include "qemu/queue.h"
 
 /* Constants related to the USB / PCI interaction */
@@ -102,17 +103,26 @@
 
 #define DeviceRequest ((USB_DIR_IN|USB_TYPE_STANDARD|USB_RECIP_DEVICE)<<8)
 #define DeviceOutRequest ((USB_DIR_OUT|USB_TYPE_STANDARD|USB_RECIP_DEVICE)<<8)
-#define InterfaceRequest \
+#define VendorDeviceRequest ((USB_DIR_IN|USB_TYPE_VENDOR|USB_RECIP_DEVICE)<<8)
+#define VendorDeviceOutRequest \
+        ((USB_DIR_OUT|USB_TYPE_VENDOR|USB_RECIP_DEVICE)<<8)
+
+#define InterfaceRequest                                        \
         ((USB_DIR_IN|USB_TYPE_STANDARD|USB_RECIP_INTERFACE)<<8)
 #define InterfaceOutRequest \
         ((USB_DIR_OUT|USB_TYPE_STANDARD|USB_RECIP_INTERFACE)<<8)
-#define EndpointRequest ((USB_DIR_IN|USB_TYPE_STANDARD|USB_RECIP_ENDPOINT)<<8)
-#define EndpointOutRequest \
-        ((USB_DIR_OUT|USB_TYPE_STANDARD|USB_RECIP_ENDPOINT)<<8)
 #define ClassInterfaceRequest \
         ((USB_DIR_IN|USB_TYPE_CLASS|USB_RECIP_INTERFACE)<<8)
 #define ClassInterfaceOutRequest \
         ((USB_DIR_OUT|USB_TYPE_CLASS|USB_RECIP_INTERFACE)<<8)
+#define VendorInterfaceRequest \
+        ((USB_DIR_IN|USB_TYPE_VENDOR|USB_RECIP_INTERFACE)<<8)
+#define VendorInterfaceOutRequest \
+        ((USB_DIR_OUT|USB_TYPE_VENDOR|USB_RECIP_INTERFACE)<<8)
+
+#define EndpointRequest ((USB_DIR_IN|USB_TYPE_STANDARD|USB_RECIP_ENDPOINT)<<8)
+#define EndpointOutRequest \
+        ((USB_DIR_OUT|USB_TYPE_STANDARD|USB_RECIP_ENDPOINT)<<8)
 
 #define USB_REQ_GET_STATUS		0x00
 #define USB_REQ_CLEAR_FEATURE		0x01
@@ -148,6 +158,11 @@
 #define USB_DEV_CAP_USB2_EXT            0x02
 #define USB_DEV_CAP_SUPERSPEED          0x03
 
+#define USB_CFG_ATT_ONE              (1 << 7) /* should always be set */
+#define USB_CFG_ATT_SELFPOWER        (1 << 6)
+#define USB_CFG_ATT_WAKEUP           (1 << 5)
+#define USB_CFG_ATT_BATTERY          (1 << 4)
+
 #define USB_ENDPOINT_XFER_CONTROL	0
 #define USB_ENDPOINT_XFER_ISOC		1
 #define USB_ENDPOINT_XFER_BULK		2
@@ -173,6 +188,7 @@ typedef struct USBDescIface USBDescIface;
 typedef struct USBDescEndpoint USBDescEndpoint;
 typedef struct USBDescOther USBDescOther;
 typedef struct USBDescString USBDescString;
+typedef struct USBDescMSOS USBDescMSOS;
 
 struct USBDescString {
     uint8_t index;
@@ -189,6 +205,7 @@ struct USBEndpoint {
     uint8_t type;
     uint8_t ifnum;
     int max_packet_size;
+    int max_streams;
     bool pipeline;
     bool halted;
     USBDevice *dev;
@@ -198,6 +215,8 @@ struct USBEndpoint {
 enum USBDeviceFlags {
     USB_DEV_FLAG_FULL_PATH,
     USB_DEV_FLAG_IS_HOST,
+    USB_DEV_FLAG_MSOS_DESC_ENABLE,
+    USB_DEV_FLAG_MSOS_DESC_IN_USE,
 };
 
 /* definition of a USB device */
@@ -249,10 +268,14 @@ struct USBDevice {
 #define USB_DEVICE_GET_CLASS(obj) \
      OBJECT_GET_CLASS(USBDeviceClass, (obj), TYPE_USB_DEVICE)
 
+typedef void (*USBDeviceRealize)(USBDevice *dev, Error **errp);
+typedef void (*USBDeviceUnrealize)(USBDevice *dev, Error **errp);
+
 typedef struct USBDeviceClass {
     DeviceClass parent_class;
 
-    int (*init)(USBDevice *dev);
+    USBDeviceRealize realize;
+    USBDeviceUnrealize unrealize;
 
     /*
      * Walk (enabled) downstream ports, check for a matching device.
@@ -313,6 +336,14 @@ typedef struct USBDeviceClass {
      * has been unlinked / stopped. Optional may be NULL.
      */
     void (*ep_stopped)(USBDevice *dev, USBEndpoint *ep);
+
+    /*
+     * Called by the hcd to alloc / free streams on a bulk endpoint.
+     * Optional may be NULL.
+     */
+    int (*alloc_streams)(USBDevice *dev, USBEndpoint **eps, int nr_eps,
+                         int streams);
+    void (*free_streams)(USBDevice *dev, USBEndpoint **eps, int nr_eps);
 
     const char *product_desc;
     const USBDesc *usb_desc;
@@ -415,13 +446,11 @@ void usb_ep_reset(USBDevice *dev);
 void usb_ep_dump(USBDevice *dev);
 struct USBEndpoint *usb_ep_get(USBDevice *dev, int pid, int ep);
 uint8_t usb_ep_get_type(USBDevice *dev, int pid, int ep);
-uint8_t usb_ep_get_ifnum(USBDevice *dev, int pid, int ep);
 void usb_ep_set_type(USBDevice *dev, int pid, int ep, uint8_t type);
 void usb_ep_set_ifnum(USBDevice *dev, int pid, int ep, uint8_t ifnum);
 void usb_ep_set_max_packet_size(USBDevice *dev, int pid, int ep,
                                 uint16_t raw);
-int usb_ep_get_max_packet_size(USBDevice *dev, int pid, int ep);
-void usb_ep_set_pipeline(USBDevice *dev, int pid, int ep, bool enabled);
+void usb_ep_set_max_streams(USBDevice *dev, int pid, int ep, uint8_t raw);
 void usb_ep_set_halted(USBDevice *dev, int pid, int ep, bool halted);
 USBPacket *usb_ep_find_packet_by_id(USBDevice *dev, int pid, int ep,
                                     uint64_t id);
@@ -430,23 +459,24 @@ void usb_ep_combine_input_packets(USBEndpoint *ep);
 void usb_combined_input_packet_complete(USBDevice *dev, USBPacket *p);
 void usb_combined_packet_cancel(USBDevice *dev, USBPacket *p);
 
+void usb_pick_speed(USBPort *port);
 void usb_attach(USBPort *port);
 void usb_detach(USBPort *port);
 void usb_port_reset(USBPort *port);
 void usb_device_reset(USBDevice *dev);
 void usb_wakeup(USBEndpoint *ep, unsigned int stream);
 void usb_generic_async_ctrl_complete(USBDevice *s, USBPacket *p);
-int set_usb_string(uint8_t *buf, const char *str);
 
 /* usb-linux.c */
 USBDevice *usb_host_device_open(USBBus *bus, const char *devname);
-void usb_host_info(Monitor *mon, const QDict *qdict);
+void hmp_info_usbhost(Monitor *mon, const QDict *qdict);
 
 /* usb ports of the VM */
 
 #define VM_USB_HUB_SIZE 8
 
-/* usb-musb.c */
+/* hw/usb/hdc-musb.c */
+
 enum musb_irq_source_e {
     musb_irq_suspend = 0,
     musb_irq_resume,
@@ -465,6 +495,10 @@ enum musb_irq_source_e {
 };
 
 typedef struct MUSBState MUSBState;
+
+extern CPUReadMemoryFunc * const musb_read[];
+extern CPUWriteMemoryFunc * const musb_write[];
+
 MUSBState *musb_init(DeviceState *parent_device, int gpio_base);
 void musb_reset(MUSBState *s);
 uint32_t musb_core_intr_get(MUSBState *s);
@@ -488,13 +522,15 @@ struct USBBus {
 };
 
 struct USBBusOps {
-    int (*register_companion)(USBBus *bus, USBPort *ports[],
-                              uint32_t portcount, uint32_t firstport);
+    void (*register_companion)(USBBus *bus, USBPort *ports[],
+                               uint32_t portcount, uint32_t firstport,
+                               Error **errp);
     void (*wakeup_endpoint)(USBBus *bus, USBEndpoint *ep, unsigned int stream);
 };
 
 void usb_bus_new(USBBus *bus, size_t bus_size,
                  USBBusOps *ops, DeviceState *host);
+void usb_bus_release(USBBus *bus);
 USBBus *usb_bus_find(int busnr);
 void usb_legacy_register(const char *typename, const char *usbdevice_name,
                          USBDevice *(*usbdevice_init)(USBBus *bus,
@@ -504,16 +540,18 @@ USBDevice *usb_create_simple(USBBus *bus, const char *name);
 USBDevice *usbdevice_create(const char *cmdline);
 void usb_register_port(USBBus *bus, USBPort *port, void *opaque, int index,
                        USBPortOps *ops, int speedmask);
-int usb_register_companion(const char *masterbus, USBPort *ports[],
-                           uint32_t portcount, uint32_t firstport,
-                           void *opaque, USBPortOps *ops, int speedmask);
+void usb_register_companion(const char *masterbus, USBPort *ports[],
+                            uint32_t portcount, uint32_t firstport,
+                            void *opaque, USBPortOps *ops, int speedmask,
+                            Error **errp);
 void usb_port_location(USBPort *downstream, USBPort *upstream, int portnr);
 void usb_unregister_port(USBBus *bus, USBPort *port);
-int usb_claim_port(USBDevice *dev);
+void usb_claim_port(USBDevice *dev, Error **errp);
 void usb_release_port(USBDevice *dev);
-int usb_device_attach(USBDevice *dev);
+void usb_device_attach(USBDevice *dev, Error **errp);
 int usb_device_detach(USBDevice *dev);
 int usb_device_delete_addr(int busnr, int addr);
+void usb_check_attach(USBDevice *dev, Error **errp);
 
 static inline USBBus *usb_bus_from_device(USBDevice *d)
 {
@@ -549,6 +587,10 @@ void usb_device_set_interface(USBDevice *dev, int interface,
 void usb_device_flush_ep_queue(USBDevice *dev, USBEndpoint *ep);
 
 void usb_device_ep_stopped(USBDevice *dev, USBEndpoint *ep);
+
+int usb_device_alloc_streams(USBDevice *dev, USBEndpoint **eps, int nr_eps,
+                             int streams);
+void usb_device_free_streams(USBDevice *dev, USBEndpoint **eps, int nr_eps);
 
 const char *usb_device_get_product_desc(USBDevice *dev);
 

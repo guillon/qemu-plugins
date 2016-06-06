@@ -12,6 +12,7 @@
  */
 #include "qapi/qmp/dispatch.h"
 #include "qemu-common.h"
+#include "qga-qmp-commands.h"
 
 #define QGA_READ_COUNT_DEFAULT 4096
 
@@ -19,6 +20,7 @@ typedef struct GAState GAState;
 typedef struct GACommandState GACommandState;
 extern GAState *ga_state;
 
+GList *ga_command_blacklist_init(GList *blacklist);
 void ga_command_state_init(GAState *s, GACommandState *cs);
 void ga_command_state_add(GACommandState *cs,
                           void (*init)(void),
@@ -36,6 +38,7 @@ void ga_set_frozen(GAState *s);
 void ga_unset_frozen(GAState *s);
 const char *ga_fsfreeze_hook(GAState *s);
 int64_t ga_get_fd_handle(GAState *s, Error **errp);
+int ga_parse_whence(GuestFileWhence *whence, Error **errp);
 
 #ifndef _WIN32
 void reopen_fd_to_null(int fd);

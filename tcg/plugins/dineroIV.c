@@ -29,8 +29,6 @@
 #include <inttypes.h>
 #include <math.h>
 
-#include "tcg-op.h"
-#include "exec/def-helper.h"
 #include "tcg-plugin.h"
 
 #define D4ADDR uint64_t
@@ -69,6 +67,15 @@ static int latencies_num;
 #define TYPE_DWRITE 2
 #define TYPE_NUM    3
 
+typedef union {
+    uint64_t data;
+    struct {
+        uint16_t size;
+        uint16_t cpu_index;
+        uint8_t type;
+    };
+} access_info_t;
+
 static inline size_t type2index(char type) {
     switch (type) {
     case 'i': return TYPE_IFETCH;
@@ -96,9 +103,9 @@ static inline int index2dinero(size_t index) {
     assert(0);
 }
 
-static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t pc)
+static void after_exec_opc(uint64_t info_data, uint64_t address, uint64_t pc)
 {
-    TPIHelperInfo info = *(TPIHelperInfo *)&info_;
+    access_info_t info = { .data = info_data };
 
     if (output_flags & (OUTPUT_CYCLES|OUTPUT_STATS|OUTPUT_DINERO)) {
 
@@ -141,119 +148,70 @@ static void after_exec_opc(uint64_t info_, uint64_t address, uint64_t pc)
     }
 }
 
-static void gen_helper(const TCGPluginInterface *tpi, TCGArg *opargs, uint64_t pc, TPIHelperInfo info);
+static void gen_helper(const TCGPluginInterface *tpi, TCGArg *args, int type, uint16_t size, uint64_t pc, int cpu_index);
 
 static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_opcode)
 {
-    TPIHelperInfo info;
+    uint64_t pc;
+    uint16_t size;
+    int type;
+    int cpu_index;
 
-#define MEMACCESS(type_, size_) do {                            \
-        info.type = type_;                                      \
-        info.size = size_;                                      \
-        info.cpu_index = 0; /* tpi_opcode->cpu_index NYI */     \
+#define MEMACCESS(type_, size_) do {                       \
+        type = type_;                                      \
+        size = size_;                                      \
+        cpu_index = tpi_opcode->cpu_index;                 \
+        pc = tpi_opcode->pc;                               \
     } while (0);
 
-    switch (*tpi_opcode->opcode) {
-    case INDEX_op_qemu_ld8s:
-    case INDEX_op_qemu_ld8u:
-        MEMACCESS('r', 1);
-        break;
-
-    case INDEX_op_qemu_ld16s:
-    case INDEX_op_qemu_ld16u:
-        MEMACCESS('r', 2);
+    switch (tpi_opcode->operator) {
+    case INDEX_op_insn_start:
+#if defined(TARGET_SH4)
+        MEMACCESS('i', 2);
+#elif defined(TARGET_ARM)
+        MEMACCESS('i', ARM_TBFLAG_THUMB(tpi->tb->flags) ? 2 : 4);
+#else
+        MEMACCESS('i', 4); /* Assume 4 bytes, even for variable length encoding. */
+#endif
         break;
 
     case INDEX_op_qemu_ld_i32:
-    case INDEX_op_qemu_ld32:
-#if TCG_TARGET_REG_BITS == 64
-    case INDEX_op_qemu_ld32s:
-    case INDEX_op_qemu_ld32u:
-#endif
-        MEMACCESS('r', 4);
-        break;
-
     case INDEX_op_qemu_ld_i64:
-    case INDEX_op_qemu_ld64:
-        MEMACCESS('r', 8);
-        break;
-
-    case INDEX_op_qemu_st8:
-        MEMACCESS('w', 1);
-        break;
-
-    case INDEX_op_qemu_st16:
-        MEMACCESS('w', 2);
+        MEMACCESS('r', 1 << (get_memop(tpi_opcode->opargs[2]) & MO_SIZE));
         break;
 
     case INDEX_op_qemu_st_i32:
-    case INDEX_op_qemu_st32:
-        MEMACCESS('w', 4);
-        break;
-
     case INDEX_op_qemu_st_i64:
-    case INDEX_op_qemu_st64:
-        MEMACCESS('w', 8);
+        MEMACCESS('w', 1 << (get_memop(tpi_opcode->opargs[2]) & MO_SIZE));
         break;
 
     default:
         return;
     }
 
-    gen_helper(tpi, tpi_opcode->opargs, tpi_opcode->pc, info);
+    gen_helper(tpi, tpi_opcode->opargs, type, size, pc, cpu_index);
 }
 
-static void gen_helper(const TCGPluginInterface *tpi, TCGArg *opargs, uint64_t pc, TPIHelperInfo info)
+static void gen_helper(const TCGPluginInterface *tpi, TCGArg *opargs, int type, uint16_t size, uint64_t pc, int cpu_index)
 {
-    int sizemask = 0;
+    access_info_t info = { .type = type, .size = size, .cpu_index = cpu_index };
     TCGArg args[3];
 
-    TCGArg addr_arg;
-    TCGv_i64 tcgv_info = tcg_const_i64(*(uint64_t *)&info);
+    TCGv_i64 tcgv_info = tcg_const_i64(info.data);
     TCGv_i64 tcgv_pc   = tcg_const_i64(pc);
-    TCGv_i64 tcgv_addr = tcg_temp_new_i64();
 
     args[0] = GET_TCGV_I64(tcgv_info);
-    if (opargs) {
-      addr_arg = opargs[1];
-#if TCG_TARGET_REG_BITS == 32
-      if (info.size == 8) {
-	addr_arg = opargs[2];
-      }
-#endif
-      tcg_gen_extu_tl_i64(tcgv_addr, MAKE_TCGV(addr_arg));
-      args[1] = GET_TCGV_I64(tcgv_addr);
+    if (info.type != 'i') {
+        args[1] = opargs[1];
     } else {
-      tcg_gen_movi_i64(tcgv_addr, 0);
-      args[1] = GET_TCGV_I64(tcgv_addr);
+        args[1] = GET_TCGV_I64(tcgv_pc);
     }
     args[2] = GET_TCGV_I64(tcgv_pc);
 
-    dh_sizemask(void, 0);
-    dh_sizemask(i64, 1);
-    dh_sizemask(i64, 2);
-    dh_sizemask(i64, 3);
+    tcg_gen_callN(tpi->tcg_ctx, after_exec_opc, TCG_CALL_DUMMY_ARG, 3, args);
 
-    tcg_gen_helperN(after_exec_opc, 0, sizemask, TCG_CALL_DUMMY_ARG, 3, args);
-
-    tcg_temp_free_i64(tcgv_addr);
     tcg_temp_free_i64(tcgv_pc);
     tcg_temp_free_i64(tcgv_info);
-}
-
-static void decode_instr(const TCGPluginInterface *tpi, uint64_t pc)
-{
-    TPIHelperInfo info;
-
-#if defined(TARGET_SH4)
-    MEMACCESS('i', 2);
-#elif defined(TARGET_ARM)
-    MEMACCESS('i', ARM_TBFLAG_THUMB(tpi->tb->flags) ? 2 : 4);
-#else
-    MEMACCESS('i', 4); /* Assume 4 bytes, even for variable length encoding. */
-#endif
-
-    gen_helper(tpi, NULL, pc, info);
 }
 
 extern void dostats (void);
@@ -466,11 +424,18 @@ void tpi_init(TCGPluginInterface *tpi)
     const char *latencies;
     const char *output_flags_str;
 
-    TPI_INIT_VERSION(*tpi);
+    TPI_INIT_VERSION(tpi);
+    TPI_DECL_FUNC_3(tpi, after_exec_opc, void, i64, i64, i64);
+
+    /* Sorry, for simplicity works on 64 bits hosts only. */
+    assert(TCG_TARGET_REG_BITS == TARGET_LONG_BITS);
+    assert(TCG_TARGET_REG_BITS == 64);
+
+    assert(sizeof(access_info_t) == sizeof(uint64_t));
+
     output = tpi->output;
 
     tpi->after_gen_opc = after_gen_opc;
-    tpi->decode_instr  = decode_instr;
     tpi->cpus_stopped  = cpus_stopped;
 
     output_flags_str = getenv("DINEROIV_OUTPUTS");

@@ -10,8 +10,10 @@
  * See the COPYING file in the top-level directory.
  */
 
+#include "qemu/osdep.h"
 #include "sysemu/rng-random.h"
 #include "sysemu/rng.h"
+#include "qapi/error.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/main-loop.h"
 
@@ -21,10 +23,6 @@ struct RndRandom
 
     int fd;
     char *filename;
-
-    EntropyReceiveFunc *receive_func;
-    void *opaque;
-    size_t size;
 };
 
 /**
@@ -37,36 +35,35 @@ struct RndRandom
 static void entropy_available(void *opaque)
 {
     RndRandom *s = RNG_RANDOM(opaque);
-    uint8_t buffer[s->size];
-    ssize_t len;
 
-    len = read(s->fd, buffer, s->size);
-    if (len < 0 && errno == EAGAIN) {
-        return;
+    while (!QSIMPLEQ_EMPTY(&s->parent.requests)) {
+        RngRequest *req = QSIMPLEQ_FIRST(&s->parent.requests);
+        ssize_t len;
+
+        len = read(s->fd, req->data, req->size);
+        if (len < 0 && errno == EAGAIN) {
+            return;
+        }
+        g_assert(len != -1);
+
+        req->receive_entropy(req->opaque, req->data, len);
+
+        rng_backend_finalize_request(&s->parent, req);
     }
-    g_assert(len != -1);
 
-    s->receive_func(s->opaque, buffer, len);
-    s->receive_func = NULL;
-
+    /* We've drained all requests, the fd handler can be reset. */
     qemu_set_fd_handler(s->fd, NULL, NULL, NULL);
 }
 
-static void rng_random_request_entropy(RngBackend *b, size_t size,
-                                        EntropyReceiveFunc *receive_entropy,
-                                        void *opaque)
+static void rng_random_request_entropy(RngBackend *b, RngRequest *req)
 {
     RndRandom *s = RNG_RANDOM(b);
 
-    if (s->receive_func) {
-        s->receive_func(s->opaque, NULL, 0);
+    if (QSIMPLEQ_EMPTY(&s->parent.requests)) {
+        /* If there are no pending requests yet, we need to
+         * install our fd handler. */
+        qemu_set_fd_handler(s->fd, entropy_available, NULL, s);
     }
-
-    s->receive_func = receive_entropy;
-    s->opaque = opaque;
-    s->size = size;
-
-    qemu_set_fd_handler(s->fd, entropy_available, NULL, s);
 }
 
 static void rng_random_opened(RngBackend *b, Error **errp)
@@ -74,8 +71,8 @@ static void rng_random_opened(RngBackend *b, Error **errp)
     RndRandom *s = RNG_RANDOM(b);
 
     if (s->filename == NULL) {
-        error_set(errp, QERR_INVALID_PARAMETER_VALUE,
-                  "filename", "a valid filename");
+        error_setg(errp, QERR_INVALID_PARAMETER_VALUE,
+                   "filename", "a valid filename");
     } else {
         s->fd = qemu_open(s->filename, O_RDONLY | O_NONBLOCK);
         if (s->fd == -1) {
@@ -88,11 +85,7 @@ static char *rng_random_get_filename(Object *obj, Error **errp)
 {
     RndRandom *s = RNG_RANDOM(obj);
 
-    if (s->filename) {
-        return g_strdup(s->filename);
-    }
-
-    return NULL;
+    return g_strdup(s->filename);
 }
 
 static void rng_random_set_filename(Object *obj, const char *filename,
@@ -102,14 +95,11 @@ static void rng_random_set_filename(Object *obj, const char *filename,
     RndRandom *s = RNG_RANDOM(obj);
 
     if (b->opened) {
-        error_set(errp, QERR_PERMISSION_DENIED);
+        error_setg(errp, QERR_PERMISSION_DENIED);
         return;
     }
 
-    if (s->filename) {
-        g_free(s->filename);
-    }
-
+    g_free(s->filename);
     s->filename = g_strdup(filename);
 }
 
@@ -123,15 +113,15 @@ static void rng_random_init(Object *obj)
                             NULL);
 
     s->filename = g_strdup("/dev/random");
+    s->fd = -1;
 }
 
 static void rng_random_finalize(Object *obj)
 {
     RndRandom *s = RNG_RANDOM(obj);
 
-    qemu_set_fd_handler(s->fd, NULL, NULL, NULL);
-
     if (s->fd != -1) {
+        qemu_set_fd_handler(s->fd, NULL, NULL, NULL);
         qemu_close(s->fd);
     }
 

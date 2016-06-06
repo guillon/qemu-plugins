@@ -22,6 +22,7 @@
  *   http://www.milkymist.org/socdoc/vgafb.pdf
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
 #include "trace.h"
@@ -71,6 +72,7 @@ struct MilkymistVgafbState {
     SysBusDevice parent_obj;
 
     MemoryRegion regs_region;
+    MemoryRegionSection fbsection;
     QemuConsole *con;
 
     int invalidate;
@@ -91,6 +93,7 @@ static void vgafb_update_display(void *opaque)
     MilkymistVgafbState *s = opaque;
     SysBusDevice *sbd;
     DisplaySurface *surface = qemu_console_surface(s->con);
+    int src_width;
     int first = 0;
     int last = 0;
     drawfn fn;
@@ -129,11 +132,18 @@ static void vgafb_update_display(void *opaque)
         break;
     }
 
-    framebuffer_update_display(surface, sysbus_address_space(sbd),
-                               s->regs[R_BASEADDRESS] + s->fb_offset,
+    src_width = s->regs[R_HRES] * 2;
+    if (s->invalidate) {
+        framebuffer_update_memory_section(&s->fbsection,
+                                          sysbus_address_space(sbd),
+                                          s->regs[R_BASEADDRESS] + s->fb_offset,
+                                          s->regs[R_VRES], src_width);
+    }
+
+    framebuffer_update_display(surface, &s->fbsection,
                                s->regs[R_HRES],
                                s->regs[R_VRES],
-                               s->regs[R_HRES] * 2,
+                               src_width,
                                dest_width,
                                0,
                                s->invalidate,
@@ -290,7 +300,7 @@ static int milkymist_vgafb_init(SysBusDevice *dev)
             "milkymist-vgafb", R_MAX * 4);
     sysbus_init_mmio(dev, &s->regs_region);
 
-    s->con = graphic_console_init(DEVICE(dev), &vgafb_ops, s);
+    s->con = graphic_console_init(DEVICE(dev), 0, &vgafb_ops, s);
 
     return 0;
 }
@@ -305,9 +315,8 @@ static const VMStateDescription vmstate_milkymist_vgafb = {
     .name = "milkymist-vgafb",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .post_load = vgafb_post_load,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, MilkymistVgafbState, R_MAX),
         VMSTATE_END_OF_LIST()
     }

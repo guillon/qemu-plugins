@@ -61,19 +61,14 @@ elif [ "$IMGPROTO" = "nbd" ]; then
 elif [ "$IMGPROTO" = "ssh" ]; then
     TEST_IMG_FILE=$TEST_DIR/t.$IMGFMT
     TEST_IMG="ssh://127.0.0.1$TEST_IMG_FILE"
+elif [ "$IMGPROTO" = "nfs" ]; then
+    TEST_DIR="nfs://127.0.0.1/$TEST_DIR"
+    TEST_IMG=$TEST_DIR/t.$IMGFMT
+elif [ "$IMGPROTO" = "archipelago" ]; then
+    TEST_IMG="archipelago:at.$IMGFMT"
 else
     TEST_IMG=$IMGPROTO:$TEST_DIR/t.$IMGFMT
 fi
-
-function valgrind_qemu_io()
-{
-    valgrind --log-file=/tmp/$$.valgrind --error-exitcode=99 $REAL_QEMU_IO "$@"
-    if [ $? != 0 ]; then
-        cat /tmp/$$.valgrind
-    fi
-    rm -f /tmp/$$.valgrind
-}
-
 
 _optstr_add()
 {
@@ -144,30 +139,24 @@ _make_test_img()
      else
         $QEMU_IMG create -f $IMGFMT $extra_img_options "$img_name" $image_size 2>&1
      fi
-    ) | \
-        sed -e "s#$IMGPROTO:$TEST_DIR#TEST_DIR#g" \
-            -e "s#$TEST_DIR#TEST_DIR#g" \
-            -e "s#$IMGFMT#IMGFMT#g" \
-            -e "s# encryption=off##g" \
-            -e "s# cluster_size=[0-9]\\+##g" \
-            -e "s# table_size=[0-9]\\+##g" \
-            -e "s# compat='[^']*'##g" \
-            -e "s# compat6=\\(on\\|off\\)##g" \
-            -e "s# static=\\(on\\|off\\)##g" \
-            -e "s# zeroed_grain=\\(on\\|off\\)##g" \
-            -e "s# subformat='[^']*'##g" \
-            -e "s# adapter_type='[^']*'##g" \
-            -e "s# lazy_refcounts=\\(on\\|off\\)##g" \
-            -e "s# block_size=[0-9]\\+##g" \
-            -e "s# block_state_zero=\\(on\\|off\\)##g" \
-            -e "s# log_size=[0-9]\\+##g"
+    ) | _filter_img_create
 
     # Start an NBD server on the image file, which is what we'll be talking to
     if [ $IMGPROTO = "nbd" ]; then
-        eval "$QEMU_NBD -v -t -b 127.0.0.1 -p 10810  $TEST_IMG_FILE &"
-        QEMU_NBD_PID=$!
+        eval "$QEMU_NBD -v -t -b 127.0.0.1 -p 10810 -f $IMGFMT  $TEST_IMG_FILE &"
         sleep 1 # FIXME: qemu-nbd needs to be listening before we continue
     fi
+}
+
+_rm_test_img()
+{
+    local img=$1
+    if [ "$IMGFMT" = "vmdk" ]; then
+        # Remove all the extents for vmdk
+        "$QEMU_IMG" info "$img" 2>/dev/null | grep 'filename:' | cut -f 2 -d: \
+            | xargs -I {} rm -f "{}"
+    fi
+    rm -f "$img"
 }
 
 _cleanup_test_img()
@@ -175,13 +164,18 @@ _cleanup_test_img()
     case "$IMGPROTO" in
 
         nbd)
-            kill $QEMU_NBD_PID
+            if [ -f "${TEST_DIR}/qemu-nbd.pid" ]; then
+                local QEMU_NBD_PID
+                read QEMU_NBD_PID < "${TEST_DIR}/qemu-nbd.pid"
+                kill ${QEMU_NBD_PID}
+                rm -f "${TEST_DIR}/qemu-nbd.pid"
+            fi
             rm -f "$TEST_IMG_FILE"
             ;;
         file)
-            rm -f "$TEST_DIR/t.$IMGFMT"
-            rm -f "$TEST_DIR/t.$IMGFMT.orig"
-            rm -f "$TEST_DIR/t.$IMGFMT.base"
+            _rm_test_img "$TEST_DIR/t.$IMGFMT"
+            _rm_test_img "$TEST_DIR/t.$IMGFMT.orig"
+            _rm_test_img "$TEST_DIR/t.$IMGFMT.base"
             if [ -n "$SAMPLE_IMG_FILE" ]
             then
                 rm -f "$TEST_DIR/$SAMPLE_IMG_FILE"
@@ -189,7 +183,11 @@ _cleanup_test_img()
             ;;
 
         rbd)
-            rbd rm "$TEST_DIR/t.$IMGFMT" > /dev/null
+            rbd --no-progress rm "$TEST_DIR/t.$IMGFMT" > /dev/null
+            ;;
+
+        archipelago)
+            vlmc remove "at.$IMGFMT" > /dev/null
             ;;
 
         sheepdog)
@@ -209,6 +207,13 @@ _check_test_img()
 
 _img_info()
 {
+    if [[ "$1" == "--format-specific" ]]; then
+        local format_specific=1
+        shift
+    else
+        local format_specific=0
+    fi
+
     discard=0
     regex_json_spec_start='^ *"format-specific": \{'
     $QEMU_IMG info "$@" "$TEST_IMG" 2>&1 | \
@@ -218,7 +223,9 @@ _img_info()
             -e "/^disk size:/ D" \
             -e "/actual-size/ D" | \
         while IFS='' read line; do
-            if [[ $line == "Format specific information:" ]]; then
+            if [[ $format_specific == 1 ]]; then
+                discard=0
+            elif [[ $line == "Format specific information:" ]]; then
                 discard=1
             elif [[ $line =~ $regex_json_spec_start ]]; then
                 discard=2
@@ -280,57 +287,11 @@ _need_to_be_root()
     fi
 }
 
-
-# Do a command, log it to $seq.full, optionally test return status
-# and die if command fails. If called with one argument _do executes the
-# command, logs it, and returns its exit status. With two arguments _do
-# first prints the message passed in the first argument, and then "done"
-# or "fail" depending on the return status of the command passed in the
-# second argument. If the command fails and the variable _do_die_on_error
-# is set to "always" or the two argument form is used and _do_die_on_error
-# is set to "message_only" _do will print an error message to
-# $seq.out and exit.
-
-_do()
-{
-    if [ $# -eq 1 ]; then
-        _cmd=$1
-    elif [ $# -eq 2 ]; then
-        _note=$1
-        _cmd=$2
-        echo -n "$_note... "
-    else
-        echo "Usage: _do [note] cmd" 1>&2
-        status=1; exit
-    fi
-
-    (eval "echo '---' \"$_cmd\"") >>$here/$seq.full
-    (eval "$_cmd") >$tmp._out 2>&1; ret=$?
-    cat $tmp._out >>$here/$seq.full
-    if [ $# -eq 2 ]; then
-        if [ $ret -eq 0 ]; then
-            echo "done"
-        else
-            echo "fail"
-        fi
-    fi
-    if [ $ret -ne 0  ] \
-        && [ "$_do_die_on_error" = "always" \
-            -o \( $# -eq 2 -a "$_do_die_on_error" = "message_only" \) ]
-    then
-        [ $# -ne 2 ] && echo
-        eval "echo \"$_cmd\" failed \(returned $ret\): see $seq.full"
-        status=1; exit
-    fi
-
-    return $ret
-}
-
 # bail out, setting up .notrun file
 #
 _notrun()
 {
-    echo "$*" >$seq.notrun
+    echo "$*" >"$OUTPUT_DIR/$seq.notrun"
     echo "$seq not run: $*"
     status=0
     exit
@@ -340,7 +301,7 @@ _notrun()
 #
 _fail()
 {
-    echo "$*" | tee -a $here/$seq.full
+    echo "$*" | tee -a "$OUTPUT_DIR/$seq.full"
     echo "(see $seq.full for details)"
     status=1
     exit 1
@@ -350,6 +311,9 @@ _fail()
 #
 _supported_fmt()
 {
+    # "generic" is suitable for most image formats. For some formats it doesn't
+    # work, however (most notably read-only formats), so they can opt out by
+    # setting IMGFMT_GENERIC to false.
     for f; do
         if [ "$f" = "$IMGFMT" -o "$f" = "generic" -a "$IMGFMT_GENERIC" = "true" ]; then
             return
@@ -387,17 +351,33 @@ _supported_os()
     _notrun "not suitable for this OS: $HOSTOS"
 }
 
-_unsupported_qemu_io_options()
+_supported_cache_modes()
+{
+    for mode; do
+        if [ "$mode" = "$CACHEMODE" ]; then
+            return
+        fi
+    done
+    _notrun "not suitable for cache mode: $CACHEMODE"
+}
+
+_default_cache_mode()
+{
+    if $CACHEMODE_IS_DEFAULT; then
+        CACHEMODE="$1"
+        QEMU_IO="$QEMU_IO --cache $1"
+        return
+    fi
+}
+
+_unsupported_imgopts()
 {
     for bad_opt
     do
-        for opt in $QEMU_IO_OPTIONS
-        do
-            if [ "$bad_opt" = "$opt" ]
-            then
-                _notrun "not suitable for qemu-io option: $bad_opt"
-            fi
-        done
+        if echo "$IMGOPTS" | grep -q 2>/dev/null "$bad_opt"
+        then
+            _notrun "not suitable for image option: $bad_opt"
+        fi
     done
 }
 
@@ -405,7 +385,18 @@ _unsupported_qemu_io_options()
 #
 _require_command()
 {
-    [ -x "$1" ] || _notrun "$1 utility required, skipped this test"
+    if [ "$1" = "QEMU" ]; then
+        c=$QEMU_PROG
+    elif [ "$1" = "QEMU_IMG" ]; then
+        c=$QEMU_IMG_PROG
+    elif [ "$1" = "QEMU_IO" ]; then
+        c=$QEMU_IO_PROG
+    elif [ "$1" = "QEMU_NBD" ]; then
+        c=$QEMU_NBD_PROG
+    else
+        eval c=\$$1
+    fi
+    [ -x "$c" ] || _notrun "$1 utility required, skipped this test"
 }
 
 _full_imgfmt_details()
@@ -455,4 +446,4 @@ _die()
 }
 
 # make sure this script returns success
-/bin/true
+true

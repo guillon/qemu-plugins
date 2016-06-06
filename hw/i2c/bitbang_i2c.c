@@ -9,6 +9,7 @@
  * Contributions after 2012-01-13 are licensed under the terms of the
  * GNU GPL, version 2 or (at your option) any later version.
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "bitbang_i2c.h"
 #include "hw/sysbus.h"
@@ -46,7 +47,7 @@ typedef enum bitbang_i2c_state {
 } bitbang_i2c_state;
 
 struct bitbang_i2c_interface {
-    i2c_bus *bus;
+    I2CBus *bus;
     bitbang_i2c_state state;
     int last_data;
     int last_clock;
@@ -170,7 +171,7 @@ int bitbang_i2c_set(bitbang_i2c_interface *i2c, int line, int level)
     abort();
 }
 
-bitbang_i2c_interface *bitbang_i2c_init(i2c_bus *bus)
+bitbang_i2c_interface *bitbang_i2c_init(I2CBus *bus)
 {
     bitbang_i2c_interface *s;
 
@@ -213,7 +214,7 @@ static int gpio_i2c_init(SysBusDevice *sbd)
 {
     DeviceState *dev = DEVICE(sbd);
     GPIOI2CState *s = GPIO_I2C(dev);
-    i2c_bus *bus;
+    I2CBus *bus;
 
     memory_region_init(&s->dummy_iomem, OBJECT(s), "gpio_i2c", 0);
     sysbus_init_mmio(sbd, &s->dummy_iomem);

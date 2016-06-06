@@ -19,11 +19,15 @@
  * <http://www.gnu.org/licenses/>.
  */
 
-#include "qapi/error.h"
-#include "qemu/typedefs.h"
 #include "qemu/notify.h"
 #include "qemu/option.h"
 #include "exec/memory.h"
+#include "hw/irq.h"
+
+/*
+ * current device naming scheme supports up to 256 memory devices
+ */
+#define ACPI_MAX_RAM_SLOTS 256
 
 /* from linux include/acpi/actype.h */
 /* Default ACPI register widths */
@@ -69,6 +73,12 @@
 #define ACPI_BITMASK_RT_CLOCK_ENABLE            0x0400
 #define ACPI_BITMASK_PCIEXP_WAKE_DISABLE        0x4000	/* ACPI 3.0 */
 
+#define ACPI_BITMASK_PM1_COMMON_ENABLED         ( \
+        ACPI_BITMASK_RT_CLOCK_ENABLE        | \
+        ACPI_BITMASK_POWER_BUTTON_ENABLE    | \
+        ACPI_BITMASK_GLOBAL_LOCK_ENABLE     | \
+        ACPI_BITMASK_TIMER_ENABLE)
+
 /* PM1x_CNT */
 #define ACPI_BITMASK_SCI_ENABLE                 0x0001
 #define ACPI_BITMASK_BUS_MASTER_RLD             0x0002
@@ -78,6 +88,13 @@
 
 /* PM2_CNT */
 #define ACPI_BITMASK_ARB_DISABLE                0x0001
+
+/* These values are part of guest ABI, and can not be changed */
+typedef enum {
+    ACPI_PCI_HOTPLUG_STATUS = 2,
+    ACPI_CPU_HOTPLUG_STATUS = 4,
+    ACPI_MEMORY_HOTPLUG_STATUS = 8,
+} AcpiGPEStatusBits;
 
 /* structs */
 typedef struct ACPIPMTimer ACPIPMTimer;
@@ -137,7 +154,7 @@ void acpi_pm_tmr_reset(ACPIREGS *ar);
 static inline int64_t acpi_pm_tmr_get_clock(void)
 {
     return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), PM_TIMER_FREQUENCY,
-                    get_ticks_per_sec());
+                    NANOSECONDS_PER_SECOND);
 }
 
 /* PM1a_EVT: piix and ich9 don't implement PM1b. */
@@ -148,7 +165,8 @@ void acpi_pm1_evt_init(ACPIREGS *ar, acpi_update_sci_fn update_sci,
                        MemoryRegion *parent);
 
 /* PM1a_CNT: piix and ich9 don't implement PM1b CNT. */
-void acpi_pm1_cnt_init(ACPIREGS *ar, MemoryRegion *parent, uint8_t s4_val);
+void acpi_pm1_cnt_init(ACPIREGS *ar, MemoryRegion *parent,
+                       bool disable_s3, bool disable_s4, uint8_t s4_val);
 void acpi_pm1_cnt_update(ACPIREGS *ar,
                          bool sci_enable, bool sci_disable);
 void acpi_pm1_cnt_reset(ACPIREGS *ar);
@@ -160,6 +178,11 @@ void acpi_gpe_reset(ACPIREGS *ar);
 void acpi_gpe_ioport_writeb(ACPIREGS *ar, uint32_t addr, uint32_t val);
 uint32_t acpi_gpe_ioport_readb(ACPIREGS *ar, uint32_t addr);
 
+void acpi_send_gpe_event(ACPIREGS *ar, qemu_irq irq,
+                         AcpiGPEStatusBits status);
+
+void acpi_update_sci(ACPIREGS *acpi_regs, qemu_irq irq);
+
 /* acpi.c */
 extern int acpi_enabled;
 extern char unsigned *acpi_tables;
@@ -170,5 +193,12 @@ uint8_t *acpi_table_next(uint8_t *current);
 unsigned acpi_table_len(void *current);
 void acpi_table_add(const QemuOpts *opts, Error **errp);
 void acpi_table_add_builtin(const QemuOpts *opts, Error **errp);
+
+typedef struct AcpiSlicOem AcpiSlicOem;
+struct AcpiSlicOem {
+  char *id;
+  char *table_id;
+};
+int acpi_get_slic_oem(AcpiSlicOem *oem);
 
 #endif /* !QEMU_HW_ACPI_H */

@@ -6,6 +6,7 @@
  *
  * This code is licensed under the GPL.
  */
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/devices.h"
 #include "ui/console.h"
@@ -51,8 +52,7 @@ static const VMStateDescription vmstate_stellaris_button = {
     .name = "stellaris_button",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT8(pressed, gamepad_button),
         VMSTATE_END_OF_LIST()
     }
@@ -62,8 +62,7 @@ static const VMStateDescription vmstate_stellaris_gamepad = {
     .name = "stellaris_gamepad",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_INT32(extension, gamepad_state),
         VMSTATE_STRUCT_VARRAY_INT32(buttons, gamepad_state, num_buttons, 0,
                               vmstate_stellaris_button, gamepad_button),
@@ -71,14 +70,14 @@ static const VMStateDescription vmstate_stellaris_gamepad = {
     }
 };
 
-/* Returns an array 5 ouput slots.  */
+/* Returns an array of 5 output slots.  */
 void stellaris_gamepad_init(int n, qemu_irq *irq, const int *keycode)
 {
     gamepad_state *s;
     int i;
 
-    s = (gamepad_state *)g_malloc0(sizeof (gamepad_state));
-    s->buttons = (gamepad_button *)g_malloc0(n * sizeof (gamepad_button));
+    s = g_new0(gamepad_state, 1);
+    s->buttons = g_new0(gamepad_button, n);
     for (i = 0; i < n; i++) {
         s->buttons[i].irq = irq[i];
         s->buttons[i].keycode = keycode[i];

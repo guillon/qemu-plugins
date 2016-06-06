@@ -28,13 +28,18 @@ ETEXI
         .args_type  = "device:B",
         .params     = "device|all",
         .help       = "commit changes to the disk images (if -snapshot is used) or backing files",
-        .mhandler.cmd = do_commit,
+        .mhandler.cmd = hmp_commit,
     },
 
 STEXI
 @item commit
 @findex commit
 Commit changes to the disk images (if -snapshot is used) or backing files.
+If the backing file is smaller than the snapshot, then the backing file will be
+resized to be the same size as the snapshot.  If the snapshot is smaller than
+the backing file, the backing file will not be truncated.  If you want the
+backing file to match the size of the smaller snapshot, you can safely truncate
+it yourself once the commit operation successfully completes.
 ETEXI
 
     {
@@ -42,7 +47,6 @@ ETEXI
         .args_type  = "",
         .params     = "",
         .help       = "quit the emulator",
-        .user_print = monitor_user_noop,
         .mhandler.cmd = hmp_quit,
     },
 
@@ -171,11 +175,10 @@ ETEXI
 
     {
         .name       = "drive_del",
-        .args_type  = "id:s",
+        .args_type  = "id:B",
         .params     = "device",
         .help       = "remove host block device",
-        .user_print = monitor_user_noop,
-        .mhandler.cmd_new = do_drive_del,
+        .mhandler.cmd = hmp_drive_del,
     },
 
 STEXI
@@ -191,8 +194,8 @@ ETEXI
 
     {
         .name       = "change",
-        .args_type  = "device:B,target:F,arg:s?",
-        .params     = "device filename [format]",
+        .args_type  = "device:B,target:F,arg:s?,read-only-mode:s?",
+        .params     = "device filename [format [read-only-mode]]",
         .help       = "change a removable medium, optional format",
         .mhandler.cmd = hmp_change,
     },
@@ -200,11 +203,10 @@ ETEXI
 STEXI
 @item change @var{device} @var{setting}
 @findex change
-
 Change the configuration of a device.
 
 @table @option
-@item change @var{diskdevice} @var{filename} [@var{format}]
+@item change @var{diskdevice} @var{filename} [@var{format} [@var{read-only-mode}]]
 Change the medium for a removable disk device to point to @var{filename}. eg
 
 @example
@@ -212,6 +214,20 @@ Change the medium for a removable disk device to point to @var{filename}. eg
 @end example
 
 @var{format} is optional.
+
+@var{read-only-mode} may be used to change the read-only status of the device.
+It accepts the following values:
+
+@table @var
+@item retain
+Retains the current status; this is the default.
+
+@item read-only
+Makes the device read-only.
+
+@item read-write
+Makes the device writable.
+@end table
 
 @item change vnc @var{display},@var{options}
 Change the configuration of the VNC server. The valid syntax for @var{display}
@@ -240,7 +256,7 @@ ETEXI
         .args_type  = "filename:F",
         .params     = "filename",
         .help       = "save screen into PPM image 'filename'",
-        .mhandler.cmd = hmp_screen_dump,
+        .mhandler.cmd = hmp_screendump,
     },
 
 STEXI
@@ -254,7 +270,7 @@ ETEXI
         .args_type  = "filename:F",
         .params     = "filename",
         .help       = "output logs to 'filename'",
-        .mhandler.cmd = do_logfile,
+        .mhandler.cmd = hmp_logfile,
     },
 
 STEXI
@@ -268,7 +284,8 @@ ETEXI
         .args_type  = "name:s,option:b",
         .params     = "name on|off",
         .help       = "changes status of a specific trace event",
-        .mhandler.cmd = do_trace_event_set_state,
+        .mhandler.cmd = hmp_trace_event,
+        .command_completion = trace_event_completion,
     },
 
 STEXI
@@ -283,7 +300,7 @@ ETEXI
         .args_type  = "op:s?,arg:F?",
         .params     = "on|off|flush|set [arg]",
         .help       = "open, close, or flush trace file, or set a new file name",
-        .mhandler.cmd = do_trace_file,
+        .mhandler.cmd = hmp_trace_file,
     },
 
 STEXI
@@ -298,7 +315,7 @@ ETEXI
         .args_type  = "items:s",
         .params     = "item1[,...]",
         .help       = "activate logging of the specified items",
-        .mhandler.cmd = do_log,
+        .mhandler.cmd = hmp_log,
     },
 
 STEXI
@@ -312,7 +329,7 @@ ETEXI
         .args_type  = "name:s?",
         .params     = "[tag|id]",
         .help       = "save a VM snapshot. If no tag or id are provided, a new snapshot is created",
-        .mhandler.cmd = do_savevm,
+        .mhandler.cmd = hmp_savevm,
     },
 
 STEXI
@@ -329,7 +346,8 @@ ETEXI
         .args_type  = "name:s",
         .params     = "tag|id",
         .help       = "restore a VM snapshot from its tag or id",
-        .mhandler.cmd = do_loadvm,
+        .mhandler.cmd = hmp_loadvm,
+        .command_completion = loadvm_completion,
     },
 
 STEXI
@@ -344,7 +362,8 @@ ETEXI
         .args_type  = "name:s",
         .params     = "tag|id",
         .help       = "delete a VM snapshot from its tag or id",
-        .mhandler.cmd = do_delvm,
+        .mhandler.cmd = hmp_delvm,
+        .command_completion = delvm_completion,
     },
 
 STEXI
@@ -358,7 +377,7 @@ ETEXI
         .args_type  = "option:s?",
         .params     = "[on|off]",
         .help       = "run emulation in singlestep mode or switch to normal mode",
-        .mhandler.cmd = do_singlestep,
+        .mhandler.cmd = hmp_singlestep,
     },
 
 STEXI
@@ -415,7 +434,7 @@ ETEXI
         .args_type  = "device:s?",
         .params     = "[device]",
         .help       = "start gdbserver on given device (default 'tcp::1234'), stop with 'none'",
-        .mhandler.cmd = do_gdbserver,
+        .mhandler.cmd = hmp_gdbserver,
     },
 
 STEXI
@@ -429,7 +448,7 @@ ETEXI
         .args_type  = "fmt:/,addr:l",
         .params     = "/fmt addr",
         .help       = "virtual memory dump starting at 'addr'",
-        .mhandler.cmd = do_memory_dump,
+        .mhandler.cmd = hmp_memory_dump,
     },
 
 STEXI
@@ -443,7 +462,7 @@ ETEXI
         .args_type  = "fmt:/,addr:l",
         .params     = "/fmt addr",
         .help       = "physical memory dump starting at 'addr'",
-        .mhandler.cmd = do_physical_memory_dump,
+        .mhandler.cmd = hmp_physical_memory_dump,
     },
 
 STEXI
@@ -516,7 +535,6 @@ ETEXI
 STEXI
 @item p or print/@var{fmt} @var{expr}
 @findex print
-
 Print expression value. Only the @var{format} part of @var{fmt} is
 used.
 ETEXI
@@ -526,10 +544,12 @@ ETEXI
         .args_type  = "fmt:/,addr:i,index:i.",
         .params     = "/fmt addr",
         .help       = "I/O port read",
-        .mhandler.cmd = do_ioport_read,
+        .mhandler.cmd = hmp_ioport_read,
     },
 
 STEXI
+@item i/@var{fmt} @var{addr} [.@var{index}]
+@findex i
 Read I/O port.
 ETEXI
 
@@ -538,10 +558,12 @@ ETEXI
         .args_type  = "fmt:/,addr:i,val:i",
         .params     = "/fmt addr value",
         .help       = "I/O port write",
-        .mhandler.cmd = do_ioport_write,
+        .mhandler.cmd = hmp_ioport_write,
     },
 
 STEXI
+@item o/@var{fmt} @var{addr} @var{val}
+@findex o
 Write to I/O port.
 ETEXI
 
@@ -550,13 +572,13 @@ ETEXI
         .args_type  = "keys:s,hold-time:i?",
         .params     = "keys [hold_ms]",
         .help       = "send keys to the VM (e.g. 'sendkey ctrl-alt-f1', default hold time=100 ms)",
-        .mhandler.cmd = hmp_send_key,
+        .mhandler.cmd = hmp_sendkey,
+        .command_completion = sendkey_completion,
     },
 
 STEXI
 @item sendkey @var{keys}
 @findex sendkey
-
 Send @var{keys} to the guest. @var{keys} could be the name of the
 key or the raw value in hexadecimal format. Use @code{-} to press
 several keys simultaneously. Example:
@@ -579,7 +601,6 @@ ETEXI
 STEXI
 @item system_reset
 @findex system_reset
-
 Reset the system.
 ETEXI
 
@@ -594,7 +615,6 @@ ETEXI
 STEXI
 @item system_powerdown
 @findex system_powerdown
-
 Power down the system (if supported).
 ETEXI
 
@@ -603,13 +623,12 @@ ETEXI
         .args_type  = "start:i,size:i",
         .params     = "addr size",
         .help       = "compute the checksum of a memory region",
-        .mhandler.cmd = do_sum,
+        .mhandler.cmd = hmp_sum,
     },
 
 STEXI
 @item sum @var{addr} @var{size}
 @findex sum
-
 Compute the checksum of a memory region.
 ETEXI
 
@@ -618,13 +637,12 @@ ETEXI
         .args_type  = "devname:s",
         .params     = "device",
         .help       = "add USB device (e.g. 'host:bus.addr' or 'host:vendor_id:product_id')",
-        .mhandler.cmd = do_usb_add,
+        .mhandler.cmd = hmp_usb_add,
     },
 
 STEXI
 @item usb_add @var{devname}
 @findex usb_add
-
 Add the USB device @var{devname}.  For details of available devices see
 @ref{usb_devices}
 ETEXI
@@ -634,13 +652,12 @@ ETEXI
         .args_type  = "devname:s",
         .params     = "device",
         .help       = "remove USB device 'bus.addr'",
-        .mhandler.cmd = do_usb_del,
+        .mhandler.cmd = hmp_usb_del,
     },
 
 STEXI
 @item usb_del @var{devname}
 @findex usb_del
-
 Remove the USB device @var{devname} from the QEMU virtual USB
 hub. @var{devname} has the syntax @code{bus.addr}. Use the monitor
 command @code{info usb} to see the devices you can remove.
@@ -651,14 +668,13 @@ ETEXI
         .args_type  = "device:O",
         .params     = "driver[,prop=value][,...]",
         .help       = "add device, like -device on the command line",
-        .user_print = monitor_user_noop,
-        .mhandler.cmd_new = do_device_add,
+        .mhandler.cmd = hmp_device_add,
+        .command_completion = device_add_completion,
     },
 
 STEXI
 @item device_add @var{config}
 @findex device_add
-
 Add device.
 ETEXI
 
@@ -668,13 +684,14 @@ ETEXI
         .params     = "device",
         .help       = "remove device",
         .mhandler.cmd = hmp_device_del,
+        .command_completion = device_del_completion,
     },
 
 STEXI
 @item device_del @var{id}
 @findex device_del
-
-Remove device @var{id}.
+Remove device @var{id}. @var{id} may be a short ID
+or a QOM object path.
 ETEXI
 
     {
@@ -696,7 +713,7 @@ ETEXI
         .args_type  = "dx_str:s,dy_str:s,dz_str:s?",
         .params     = "dx dy [dz]",
         .help       = "send mouse move events",
-        .mhandler.cmd = do_mouse_move,
+        .mhandler.cmd = hmp_mouse_move,
     },
 
 STEXI
@@ -711,7 +728,7 @@ ETEXI
         .args_type  = "button_state:i",
         .params     = "state",
         .help       = "change mouse button state (1=L, 2=M, 4=R)",
-        .mhandler.cmd = do_mouse_button,
+        .mhandler.cmd = hmp_mouse_button,
     },
 
 STEXI
@@ -725,7 +742,7 @@ ETEXI
         .args_type  = "index:i",
         .params     = "index",
         .help       = "set which mouse device receives events",
-        .mhandler.cmd = do_mouse_set,
+        .mhandler.cmd = hmp_mouse_set,
     },
 
 STEXI
@@ -743,7 +760,7 @@ ETEXI
         .args_type  = "path:F,freq:i?,bits:i?,nchannels:i?",
         .params     = "path [frequency [bits [channels]]]",
         .help       = "capture audio to a wave file (default frequency=44100 bits=16 channels=2)",
-        .mhandler.cmd = do_wav_capture,
+        .mhandler.cmd = hmp_wavcapture,
     },
 STEXI
 @item wavcapture @var{filename} [@var{frequency} [@var{bits} [@var{channels}]]]
@@ -764,7 +781,7 @@ ETEXI
         .args_type  = "n:i",
         .params     = "capture index",
         .help       = "stop capture",
-        .mhandler.cmd = do_stop_capture,
+        .mhandler.cmd = hmp_stopcapture,
     },
 STEXI
 @item stopcapture @var{index}
@@ -808,13 +825,12 @@ ETEXI
         .args_type  = "bootdevice:s",
         .params     = "bootdevice",
         .help       = "define new values for the boot device list",
-        .mhandler.cmd = do_boot_set,
+        .mhandler.cmd = hmp_boot_set,
     },
 
 STEXI
 @item boot_set @var{bootdevicelist}
 @findex boot_set
-
 Define new values for the boot device list. Those values will override
 the values specified on the command line through the @code{-boot} option.
 
@@ -822,19 +838,17 @@ The values that can be specified here depend on the machine type, but are
 the same that can be specified in the @code{-boot} command line option.
 ETEXI
 
-#if defined(TARGET_I386) || defined(TARGET_S390X)
     {
         .name       = "nmi",
         .args_type  = "",
         .params     = "",
-        .help       = "inject an NMI on all guest's CPUs",
-        .mhandler.cmd = hmp_inject_nmi,
+        .help       = "inject an NMI",
+        .mhandler.cmd = hmp_nmi,
     },
-#endif
 STEXI
 @item nmi @var{cpu}
 @findex nmi
-Inject an NMI (x86) or RESTART (s390x) on the given CPU.
+Inject an NMI on the default CPU (x86/s390) or all CPUs (ppc64).
 
 ETEXI
 
@@ -844,6 +858,7 @@ ETEXI
         .params     = "device data",
         .help       = "Write to a ring buffer character device",
         .mhandler.cmd = hmp_ringbuf_write,
+        .command_completion = ringbuf_write_completion,
     },
 
 STEXI
@@ -860,6 +875,7 @@ ETEXI
         .params     = "device size",
         .help       = "Read from a ring buffer character device",
         .mhandler.cmd = hmp_ringbuf_read,
+        .command_completion = ringbuf_write_completion,
     },
 
 STEXI
@@ -908,6 +924,22 @@ STEXI
 @item migrate_cancel
 @findex migrate_cancel
 Cancel the current VM migration.
+
+ETEXI
+
+    {
+        .name       = "migrate_incoming",
+        .args_type  = "uri:s",
+        .params     = "uri",
+        .help       = "Continue an incoming migration from an -incoming defer",
+        .mhandler.cmd = hmp_migrate_incoming,
+    },
+
+STEXI
+@item migrate_incoming @var{uri}
+@findex migrate_incoming
+Continue an incoming migration using the @var{uri} (that has the same syntax
+as the -incoming option).
 
 ETEXI
 
@@ -965,6 +997,7 @@ ETEXI
         .params     = "capability state",
         .help       = "Enable/Disable the usage of a capability for migration",
         .mhandler.cmd = hmp_migrate_set_capability,
+        .command_completion = migrate_set_capability_completion,
     },
 
 STEXI
@@ -974,45 +1007,100 @@ Enable/Disable the usage of a capability @var{capability} for migration.
 ETEXI
 
     {
+        .name       = "migrate_set_parameter",
+        .args_type  = "parameter:s,value:i",
+        .params     = "parameter value",
+        .help       = "Set the parameter for migration",
+        .mhandler.cmd = hmp_migrate_set_parameter,
+        .command_completion = migrate_set_parameter_completion,
+    },
+
+STEXI
+@item migrate_set_parameter @var{parameter} @var{value}
+@findex migrate_set_parameter
+Set the parameter @var{parameter} for migration.
+ETEXI
+
+    {
+        .name       = "migrate_start_postcopy",
+        .args_type  = "",
+        .params     = "",
+        .help       = "Followup to a migration command to switch the migration"
+                      " to postcopy mode. The postcopy-ram capability must "
+                      "be set before the original migration command.",
+        .mhandler.cmd = hmp_migrate_start_postcopy,
+    },
+
+STEXI
+@item migrate_start_postcopy
+@findex migrate_start_postcopy
+Switch in-progress migration to postcopy mode. Ignored after the end of
+migration (or once already in postcopy).
+ETEXI
+
+    {
         .name       = "client_migrate_info",
         .args_type  = "protocol:s,hostname:s,port:i?,tls-port:i?,cert-subject:s?",
         .params     = "protocol hostname port tls-port cert-subject",
-        .help       = "send migration info to spice/vnc client",
-        .user_print = monitor_user_noop,
-        .mhandler.cmd_async = client_migrate_info,
-        .flags      = MONITOR_CMD_ASYNC,
+        .help       = "set migration information for remote display",
+        .mhandler.cmd = hmp_client_migrate_info,
     },
 
 STEXI
 @item client_migrate_info @var{protocol} @var{hostname} @var{port} @var{tls-port} @var{cert-subject}
 @findex client_migrate_info
-Set the spice/vnc connection info for the migration target.  The spice/vnc
-server will ask the spice/vnc client to automatically reconnect using the
-new parameters (if specified) once the vm migration finished successfully.
+Set migration information for remote display.  This makes the server
+ask the client to automatically reconnect using the new parameters
+once migration finished successfully.  Only implemented for SPICE.
 ETEXI
 
     {
         .name       = "dump-guest-memory",
-        .args_type  = "paging:-p,filename:F,begin:i?,length:i?",
-        .params     = "[-p] filename [begin] [length]",
-        .help       = "dump guest memory to file"
-                      "\n\t\t\t begin(optional): the starting physical address"
-                      "\n\t\t\t length(optional): the memory size, in bytes",
+        .args_type  = "paging:-p,detach:-d,zlib:-z,lzo:-l,snappy:-s,filename:F,begin:i?,length:i?",
+        .params     = "[-p] [-d] [-z|-l|-s] filename [begin length]",
+        .help       = "dump guest memory into file 'filename'.\n\t\t\t"
+                      "-p: do paging to get guest's memory mapping.\n\t\t\t"
+                      "-d: return immediately (do not wait for completion).\n\t\t\t"
+                      "-z: dump in kdump-compressed format, with zlib compression.\n\t\t\t"
+                      "-l: dump in kdump-compressed format, with lzo compression.\n\t\t\t"
+                      "-s: dump in kdump-compressed format, with snappy compression.\n\t\t\t"
+                      "begin: the starting physical address.\n\t\t\t"
+                      "length: the memory size, in bytes.",
         .mhandler.cmd = hmp_dump_guest_memory,
     },
 
 
 STEXI
-@item dump-guest-memory [-p] @var{protocol} @var{begin} @var{length}
+@item dump-guest-memory [-p] @var{filename} @var{begin} @var{length}
+@item dump-guest-memory [-z|-l|-s] @var{filename}
 @findex dump-guest-memory
 Dump guest memory to @var{protocol}. The file can be processed with crash or
-gdb.
-  filename: dump file name
-    paging: do paging to get guest's memory mapping
+gdb. Without -z|-l|-s, the dump format is ELF.
+        -p: do paging to get guest's memory mapping.
+        -z: dump in kdump-compressed format, with zlib compression.
+        -l: dump in kdump-compressed format, with lzo compression.
+        -s: dump in kdump-compressed format, with snappy compression.
+  filename: dump file name.
      begin: the starting physical address. It's optional, and should be
-            specified with length together.
+            specified together with length.
     length: the memory size, in bytes. It's optional, and should be specified
-            with begin together.
+            together with begin.
+ETEXI
+
+#if defined(TARGET_S390X)
+    {
+        .name       = "dump-skeys",
+        .args_type  = "filename:F",
+        .params     = "",
+        .help       = "Save guest storage keys into file 'filename'.\n",
+        .mhandler.cmd = hmp_dump_skeys,
+    },
+#endif
+
+STEXI
+@item dump-skeys @var{filename}
+@findex dump-skeys
+Save guest storage keys to a file.
 ETEXI
 
     {
@@ -1113,53 +1201,21 @@ ETEXI
 
     {
         .name       = "drive_add",
-        .args_type  = "pci_addr:s,opts:s",
-        .params     = "[[<domain>:]<bus>:]<slot>\n"
+        .args_type  = "node:-n,pci_addr:s,opts:s",
+        .params     = "[-n] [[<domain>:]<bus>:]<slot>\n"
                       "[file=file][,if=type][,bus=n]\n"
                       "[,unit=m][,media=d][,index=i]\n"
                       "[,cyls=c,heads=h,secs=s[,trans=t]]\n"
                       "[,snapshot=on|off][,cache=on|off]\n"
                       "[,readonly=on|off][,copy-on-read=on|off]",
         .help       = "add drive to PCI storage controller",
-        .mhandler.cmd = drive_hot_add,
+        .mhandler.cmd = hmp_drive_add,
     },
 
 STEXI
 @item drive_add
 @findex drive_add
 Add drive to PCI storage controller.
-ETEXI
-
-#if defined(CONFIG_PCI_HOTPLUG_OLD)
-    {
-        .name       = "pci_add",
-        .args_type  = "pci_addr:s,type:s,opts:s?",
-        .params     = "auto|[[<domain>:]<bus>:]<slot> nic|storage [[vlan=n][,macaddr=addr][,model=type]] [file=file][,if=type][,bus=nr]...",
-        .help       = "hot-add PCI device",
-        .mhandler.cmd = pci_device_hot_add,
-    },
-#endif
-
-STEXI
-@item pci_add
-@findex pci_add
-Hot-add PCI device.
-ETEXI
-
-#if defined(CONFIG_PCI_HOTPLUG_OLD)
-    {
-        .name       = "pci_del",
-        .args_type  = "pci_addr:s",
-        .params     = "[[<domain>:]<bus>:]<slot>",
-        .help       = "hot remove PCI device",
-        .mhandler.cmd = do_pci_device_hot_remove,
-    },
-#endif
-
-STEXI
-@item pci_del
-@findex pci_del
-Hot remove PCI device.
 ETEXI
 
     {
@@ -1177,8 +1233,7 @@ ETEXI
                       "<error_status> = error string or 32bit\n\t\t\t"
                       "<tlb header> = 32bit x 4\n\t\t\t"
                       "<tlb header prefix> = 32bit x 4",
-        .user_print  = pcie_aer_inject_error_print,
-        .mhandler.cmd_new = do_pcie_aer_inject_error,
+        .mhandler.cmd = hmp_pcie_aer_inject_error,
     },
 
 STEXI
@@ -1190,9 +1245,10 @@ ETEXI
     {
         .name       = "host_net_add",
         .args_type  = "device:s,opts:s?",
-        .params     = "tap|user|socket|vde|dump [options]",
+        .params     = "tap|user|socket|vde|netmap|bridge|vhost-user|dump [options]",
         .help       = "add host VLAN client",
-        .mhandler.cmd = net_host_device_add,
+        .mhandler.cmd = hmp_host_net_add,
+        .command_completion = host_net_add_completion,
     },
 
 STEXI
@@ -1206,7 +1262,8 @@ ETEXI
         .args_type  = "vlan_id:i,device:s",
         .params     = "vlan_id name",
         .help       = "remove host VLAN client",
-        .mhandler.cmd = net_host_device_remove,
+        .mhandler.cmd = hmp_host_net_remove,
+        .command_completion = host_net_remove_completion,
     },
 
 STEXI
@@ -1218,9 +1275,10 @@ ETEXI
     {
         .name       = "netdev_add",
         .args_type  = "netdev:O",
-        .params     = "[user|tap|socket|hubport],id=str[,prop=value][,...]",
+        .params     = "[user|tap|socket|vde|bridge|hubport|netmap|vhost-user],id=str[,prop=value][,...]",
         .help       = "add host network device",
         .mhandler.cmd = hmp_netdev_add,
+        .command_completion = netdev_add_completion,
     },
 
 STEXI
@@ -1235,6 +1293,7 @@ ETEXI
         .params     = "id",
         .help       = "remove host network device",
         .mhandler.cmd = hmp_netdev_del,
+        .command_completion = netdev_del_completion,
     },
 
 STEXI
@@ -1243,13 +1302,43 @@ STEXI
 Remove host network device.
 ETEXI
 
+    {
+        .name       = "object_add",
+        .args_type  = "object:O",
+        .params     = "[qom-type=]type,id=str[,prop=value][,...]",
+        .help       = "create QOM object",
+        .mhandler.cmd = hmp_object_add,
+        .command_completion = object_add_completion,
+    },
+
+STEXI
+@item object_add
+@findex object_add
+Create QOM object.
+ETEXI
+
+    {
+        .name       = "object_del",
+        .args_type  = "id:s",
+        .params     = "id",
+        .help       = "destroy QOM object",
+        .mhandler.cmd = hmp_object_del,
+        .command_completion = object_del_completion,
+    },
+
+STEXI
+@item object_del
+@findex object_del
+Destroy QOM object.
+ETEXI
+
 #ifdef CONFIG_SLIRP
     {
         .name       = "hostfwd_add",
         .args_type  = "arg1:s,arg2:s?,arg3:s?",
         .params     = "[vlan_id name] [tcp|udp]:[hostaddr]:hostport-[guestaddr]:guestport",
         .help       = "redirect TCP or UDP connections from host to guest (requires -net user)",
-        .mhandler.cmd = net_slirp_hostfwd_add,
+        .mhandler.cmd = hmp_hostfwd_add,
     },
 #endif
 STEXI
@@ -1264,7 +1353,7 @@ ETEXI
         .args_type  = "arg1:s,arg2:s?,arg3:s?",
         .params     = "[vlan_id name] [tcp|udp]:[hostaddr]:hostport",
         .help       = "remove host-to-guest TCP or UDP redirection",
-        .mhandler.cmd = net_slirp_hostfwd_remove,
+        .mhandler.cmd = hmp_hostfwd_remove,
     },
 
 #endif
@@ -1294,6 +1383,7 @@ ETEXI
         .params     = "name on|off",
         .help       = "change the link status of a network adapter",
         .mhandler.cmd = hmp_set_link,
+        .command_completion = set_link_completion,
     },
 
 STEXI
@@ -1307,7 +1397,8 @@ ETEXI
         .args_type  = "action:s",
         .params     = "[reset|shutdown|poweroff|pause|debug|none]",
         .help       = "change watchdog action",
-        .mhandler.cmd = do_watchdog_action,
+        .mhandler.cmd = hmp_watchdog_action,
+        .command_completion = watchdog_action_completion,
     },
 
 STEXI
@@ -1321,7 +1412,7 @@ ETEXI
         .args_type  = "aclname:s",
         .params     = "aclname",
         .help       = "list rules in the access control list",
-        .mhandler.cmd = do_acl_show,
+        .mhandler.cmd = hmp_acl_show,
     },
 
 STEXI
@@ -1338,7 +1429,7 @@ ETEXI
         .args_type  = "aclname:s,policy:s",
         .params     = "aclname allow|deny",
         .help       = "set default access control list policy",
-        .mhandler.cmd = do_acl_policy,
+        .mhandler.cmd = hmp_acl_policy,
     },
 
 STEXI
@@ -1354,7 +1445,7 @@ ETEXI
         .args_type  = "aclname:s,match:s,policy:s,index:i?",
         .params     = "aclname match allow|deny [index]",
         .help       = "add a match rule to the access control list",
-        .mhandler.cmd = do_acl_add,
+        .mhandler.cmd = hmp_acl_add,
     },
 
 STEXI
@@ -1373,7 +1464,7 @@ ETEXI
         .args_type  = "aclname:s,match:s",
         .params     = "aclname match",
         .help       = "remove a match rule from the access control list",
-        .mhandler.cmd = do_acl_remove,
+        .mhandler.cmd = hmp_acl_remove,
     },
 
 STEXI
@@ -1387,7 +1478,7 @@ ETEXI
         .args_type  = "aclname:s",
         .params     = "aclname",
         .help       = "reset the access control list",
-        .mhandler.cmd = do_acl_reset,
+        .mhandler.cmd = hmp_acl_reset,
     },
 
 STEXI
@@ -1449,7 +1540,7 @@ ETEXI
         .args_type  = "broadcast:-b,cpu_index:i,bank:i,status:l,mcg_status:l,addr:l,misc:l",
         .params     = "[-b] cpu bank status mcgstatus addr misc",
         .help       = "inject a MCE on the given CPU [and broadcast to other CPUs with -b option]",
-        .mhandler.cmd = do_inject_mce,
+        .mhandler.cmd = hmp_mce,
     },
 
 #endif
@@ -1500,9 +1591,9 @@ ETEXI
     },
 
 STEXI
-@item block_set_io_throttle @var{device} @var{bps} @var{bps_rd} @var{bps_wr} @var{iops} @var{iops_rd} @var{iops_wr}
-@findex block_set_io_throttle
-Change I/O throttle limits for a block drive to @var{bps} @var{bps_rd} @var{bps_wr} @var{iops} @var{iops_rd} @var{iops_wr}
+@item block_passwd @var{device} @var{password}
+@findex block_passwd
+Set the encrypted device @var{device} password to @var{password}
 ETEXI
 
     {
@@ -1514,9 +1605,9 @@ ETEXI
     },
 
 STEXI
-@item block_passwd @var{device} @var{password}
-@findex block_passwd
-Set the encrypted device @var{device} password to @var{password}
+@item block_set_io_throttle @var{device} @var{bps} @var{bps_rd} @var{bps_wr} @var{iops} @var{iops_rd} @var{iops_wr}
+@findex block_set_io_throttle
+Change I/O throttle limits for a block drive to @var{bps} @var{bps_rd} @var{bps_wr} @var{iops} @var{iops_rd} @var{iops_wr}
 ETEXI
 
     {
@@ -1530,7 +1621,6 @@ ETEXI
 STEXI
 @item set_password [ vnc | spice ] password [ action-if-connected ]
 @findex set_password
-
 Change spice/vnc password.  Use zero to make the password stay valid
 forever.  @var{action-if-connected} specifies what should happen in
 case a connection is established: @var{fail} makes the password change
@@ -1550,7 +1640,6 @@ ETEXI
 STEXI
 @item expire_password [ vnc | spice ] expire-time
 @findex expire_password
-
 Specify when a password for spice/vnc becomes
 invalid. @var{expire-time} accepts:
 
@@ -1577,12 +1666,12 @@ ETEXI
         .params     = "args",
         .help       = "add chardev",
         .mhandler.cmd = hmp_chardev_add,
+        .command_completion = chardev_add_completion,
     },
 
 STEXI
-@item chardev_add args
-@findex chardev_add
-
+@item chardev-add args
+@findex chardev-add
 chardev_add accepts the same parameters as the -chardev command line switch.
 
 ETEXI
@@ -1593,12 +1682,12 @@ ETEXI
         .params     = "id",
         .help       = "remove chardev",
         .mhandler.cmd = hmp_chardev_remove,
+        .command_completion = chardev_remove_completion,
     },
 
 STEXI
-@item chardev_remove id
-@findex chardev_remove
-
+@item chardev-remove id
+@findex chardev-remove
 Removes the chardev @var{id}.
 
 ETEXI
@@ -1614,9 +1703,48 @@ ETEXI
 STEXI
 @item qemu-io @var{device} @var{command}
 @findex qemu-io
-
 Executes a qemu-io command on the given block device.
 
+ETEXI
+
+    {
+        .name       = "cpu-add",
+        .args_type  = "id:i",
+        .params     = "id",
+        .help       = "add cpu",
+        .mhandler.cmd  = hmp_cpu_add,
+    },
+
+STEXI
+@item cpu-add @var{id}
+@findex cpu-add
+Add CPU with id @var{id}
+ETEXI
+
+    {
+        .name       = "qom-list",
+        .args_type  = "path:s?",
+        .params     = "path",
+        .help       = "list QOM properties",
+        .mhandler.cmd  = hmp_qom_list,
+    },
+
+STEXI
+@item qom-list [@var{path}]
+Print QOM properties of object at location @var{path}
+ETEXI
+
+    {
+        .name       = "qom-set",
+        .args_type  = "path:s,property:s,value:s",
+        .params     = "path property value",
+        .help       = "set QOM property",
+        .mhandler.cmd  = hmp_qom_set,
+    },
+
+STEXI
+@item qom-set @var{path} @var{property} @var{value}
+Set QOM property @var{property} of object at location @var{path} to value @var{value}
 ETEXI
 
     {
@@ -1624,97 +1752,9 @@ ETEXI
         .args_type  = "item:s?",
         .params     = "[subcommand]",
         .help       = "show various information about the system state",
-        .mhandler.cmd = do_info_help,
+        .mhandler.cmd = hmp_info_help,
         .sub_table = info_cmds,
     },
-
-STEXI
-@item info @var{subcommand}
-@findex info
-Show various information about the system state.
-
-@table @option
-@item info version
-show the version of QEMU
-@item info network
-show the various VLANs and the associated devices
-@item info chardev
-show the character devices
-@item info block
-show the block devices
-@item info blockstats
-show block device statistics
-@item info registers
-show the cpu registers
-@item info cpus
-show infos for each CPU
-@item info history
-show the command line history
-@item info irq
-show the interrupts statistics (if available)
-@item info pic
-show i8259 (PIC) state
-@item info pci
-show emulated PCI device info
-@item info tlb
-show virtual to physical memory mappings (i386, SH4, SPARC, PPC, and Xtensa only)
-@item info mem
-show the active virtual memory mappings (i386 only)
-@item info jit
-show dynamic compiler info
-@item info numa
-show NUMA information
-@item info kvm
-show KVM information
-@item info usb
-show USB devices plugged on the virtual USB hub
-@item info usbhost
-show all USB host devices
-@item info profile
-show profiling information
-@item info capture
-show information about active capturing
-@item info snapshots
-show list of VM snapshots
-@item info status
-show the current VM status (running|paused)
-@item info pcmcia
-show guest PCMCIA status
-@item info mice
-show which guest mouse is receiving events
-@item info vnc
-show the vnc server status
-@item info name
-show the current VM name
-@item info uuid
-show the current VM UUID
-@item info cpustats
-show CPU statistics
-@item info usernet
-show user network stack connection states
-@item info migrate
-show migration status
-@item info migrate_capabilities
-show current migration capabilities
-@item info migrate_cache_size
-show current migration XBZRLE cache size
-@item info balloon
-show balloon information
-@item info qtree
-show device tree
-@item info qdm
-show qdev device model list
-@item info roms
-show roms
-@item info tpm
-show the TPM device
-@end table
-ETEXI
-
-STEXI
-@item info trace-events
-show available trace events and their state
-ETEXI
 
 STEXI
 @end table

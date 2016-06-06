@@ -18,9 +18,11 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/i2c/i2c.h"
 #include "tmp105.h"
+#include "qapi/error.h"
 #include "qapi/visitor.h"
 
 static void tmp105_interrupt_update(TMP105State *s)
@@ -52,24 +54,28 @@ static void tmp105_alarm_update(TMP105State *s)
     tmp105_interrupt_update(s);
 }
 
-static void tmp105_get_temperature(Object *obj, Visitor *v, void *opaque,
-                                   const char *name, Error **errp)
+static void tmp105_get_temperature(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
 {
     TMP105State *s = TMP105(obj);
-    int64_t value = s->temperature;
+    int64_t value = s->temperature * 1000 / 256;
 
-    visit_type_int(v, &value, name, errp);
+    visit_type_int(v, name, &value, errp);
 }
 
-/* Units are 0.001 centigrades relative to 0 C.  */
-static void tmp105_set_temperature(Object *obj, Visitor *v, void *opaque,
-                                   const char *name, Error **errp)
+/* Units are 0.001 centigrades relative to 0 C.  s->temperature is 8.8
+ * fixed point, so units are 1/256 centigrades.  A simple ratio will do.
+ */
+static void tmp105_set_temperature(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
 {
     TMP105State *s = TMP105(obj);
+    Error *local_err = NULL;
     int64_t temp;
 
-    visit_type_int(v, &temp, name, errp);
-    if (error_is_set(errp)) {
+    visit_type_int(v, name, &temp, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
         return;
     }
     if (temp >= 128000 || temp < -128000) {
@@ -78,7 +84,7 @@ static void tmp105_set_temperature(Object *obj, Visitor *v, void *opaque,
         return;
     }
 
-    s->temperature = ((int16_t) (temp * 0x800 / 128000)) << 4;
+    s->temperature = (int16_t) (temp * 256 / 1000);
 
     tmp105_alarm_update(s);
 }
@@ -195,9 +201,8 @@ static const VMStateDescription vmstate_tmp105 = {
     .name = "TMP105",
     .version_id = 0,
     .minimum_version_id = 0,
-    .minimum_version_id_old = 0,
     .post_load = tmp105_post_load,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT8(len, TMP105State),
         VMSTATE_UINT8_ARRAY(buf, TMP105State, 2),
         VMSTATE_UINT8(pointer, TMP105State),

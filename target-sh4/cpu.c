@@ -19,6 +19,8 @@
  * <http://www.gnu.org/licenses/lgpl-2.1.html>
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "cpu.h"
 #include "qemu-common.h"
 #include "migration/vmstate.h"
@@ -39,6 +41,11 @@ static void superh_cpu_synchronize_from_tb(CPUState *cs, TranslationBlock *tb)
     cpu->env.flags = tb->flags;
 }
 
+static bool superh_cpu_has_work(CPUState *cs)
+{
+    return cs->interrupt_request & CPU_INTERRUPT_HARD;
+}
+
 /* CPUClass::reset() */
 static void superh_cpu_reset(CPUState *s)
 {
@@ -48,8 +55,8 @@ static void superh_cpu_reset(CPUState *s)
 
     scc->parent_reset(s);
 
-    memset(env, 0, offsetof(CPUSH4State, breakpoints));
-    tlb_flush(env, 1);
+    memset(env, 0, offsetof(CPUSH4State, id));
+    tlb_flush(s, 1);
 
     env->pc = 0xA0000000;
 #if defined(CONFIG_USER_ONLY)
@@ -57,12 +64,19 @@ static void superh_cpu_reset(CPUState *s)
     env->fpscr = FPSCR_PR; /* value for userspace according to the kernel */
     set_float_rounding_mode(float_round_nearest_even, &env->fp_status); /* ?! */
 #else
-    env->sr = SR_MD | SR_RB | SR_BL | SR_I3 | SR_I2 | SR_I1 | SR_I0;
+    env->sr = (1u << SR_MD) | (1u << SR_RB) | (1u << SR_BL) |
+              (1u << SR_I3) | (1u << SR_I2) | (1u << SR_I1) | (1u << SR_I0);
     env->fpscr = FPSCR_DN | FPSCR_RM_ZERO; /* CPU reset value according to SH4 manual */
     set_float_rounding_mode(float_round_to_zero, &env->fp_status);
     set_flush_to_zero(1, &env->fp_status);
 #endif
     set_default_nan_mode(1, &env->fp_status);
+}
+
+static void superh_cpu_disas_set_info(CPUState *cpu, disassemble_info *info)
+{
+    info->mach = bfd_mach_sh4;
+    info->print_insn = print_insn_sh;
 }
 
 typedef struct SuperHCPUListState {
@@ -144,18 +158,7 @@ static ObjectClass *superh_cpu_class_by_name(const char *cpu_model)
 
 SuperHCPU *cpu_sh4_init(const char *cpu_model)
 {
-    SuperHCPU *cpu;
-    ObjectClass *oc;
-
-    oc = superh_cpu_class_by_name(cpu_model);
-    if (oc == NULL) {
-        return NULL;
-    }
-    cpu = SUPERH_CPU(object_new(object_class_get_name(oc)));
-
-    object_property_set_bool(OBJECT(cpu), true, "realized", NULL);
-
-    return cpu;
+    return SUPERH_CPU(cpu_generic_init(TYPE_SUPERH_CPU, cpu_model));
 }
 
 static void sh7750r_cpu_initfn(Object *obj)
@@ -254,7 +257,7 @@ static void superh_cpu_initfn(Object *obj)
     CPUSH4State *env = &cpu->env;
 
     cs->env_ptr = env;
-    cpu_exec_init(env);
+    cpu_exec_init(cs, &error_abort);
 
     env->movcal_backup_tail = &(env->movcal_backup);
 
@@ -281,17 +284,31 @@ static void superh_cpu_class_init(ObjectClass *oc, void *data)
     cc->reset = superh_cpu_reset;
 
     cc->class_by_name = superh_cpu_class_by_name;
+    cc->has_work = superh_cpu_has_work;
     cc->do_interrupt = superh_cpu_do_interrupt;
+    cc->cpu_exec_interrupt = superh_cpu_exec_interrupt;
     cc->dump_state = superh_cpu_dump_state;
     cc->set_pc = superh_cpu_set_pc;
     cc->synchronize_from_tb = superh_cpu_synchronize_from_tb;
     cc->gdb_read_register = superh_cpu_gdb_read_register;
     cc->gdb_write_register = superh_cpu_gdb_write_register;
-#ifndef CONFIG_USER_ONLY
+#ifdef CONFIG_USER_ONLY
+    cc->handle_mmu_fault = superh_cpu_handle_mmu_fault;
+#else
     cc->get_phys_page_debug = superh_cpu_get_phys_page_debug;
 #endif
-    dc->vmsd = &vmstate_sh_cpu;
+    cc->disas_set_info = superh_cpu_disas_set_info;
+
     cc->gdb_num_core_regs = 59;
+
+    dc->vmsd = &vmstate_sh_cpu;
+
+    /*
+     * Reason: superh_cpu_initfn() calls cpu_exec_init(), which saves
+     * the object in cpus -> dangling pointer after final
+     * object_unref().
+     */
+    dc->cannot_destroy_with_object_finalize_yet = true;
 }
 
 static const TypeInfo superh_cpu_type_info = {

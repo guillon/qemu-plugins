@@ -17,12 +17,6 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "exec/def-helper.h"
-
-#ifdef CONFIG_TCG_PLUGIN
-DEF_HELPER_FLAGS_4(tcg_plugin_pre_tb, 0, void, i64, i64, i64, i64)
-#endif
-
 /* exception */
 DEF_HELPER_FLAGS_2(exception, 0, void, env, i32)
 
@@ -70,5 +64,3 @@ DEF_HELPER_FLAGS_1(rfe, 0, void, env)
 /* sys */
 DEF_HELPER_FLAGS_4(mtspr, 0, void, env, tl, tl, tl)
 DEF_HELPER_FLAGS_4(mfspr, 0, tl, env, tl, tl, tl)
-
-#include "exec/def-helper.h"

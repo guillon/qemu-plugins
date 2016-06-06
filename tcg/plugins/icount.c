@@ -47,13 +47,14 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
     for (i = 0; i < tpi->nb_cpus; i++) {
         fprintf(tpi->output,
                 "%s (%d): number of executed instructions on CPU #%d = %" PRIu64 "\n",
-                tcg_plugin_get_filename(), getpid(), i, icount_total[i]);
+                tcg_plugin_get_filename(), getpid(), i,
+                icount_total[i]);
     }
 }
 
 void tpi_init(TCGPluginInterface *tpi)
 {
-    TPI_INIT_VERSION_GENERIC(*tpi);
+    TPI_INIT_VERSION_GENERIC(tpi);
 
     tpi->pre_tb_helper_code = pre_tb_helper_code;
     tpi->cpus_stopped = cpus_stopped;

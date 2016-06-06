@@ -1,5 +1,7 @@
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "monitor/monitor.h"
+#include "qemu/error-report.h"
 #include "audio.h"
 
 typedef struct {
@@ -63,8 +65,7 @@ static void wav_destroy (void *opaque)
         }
     doclose:
         if (fclose (wav->f)) {
-            fprintf (stderr, "wav_destroy: fclose failed: %s",
-                     strerror (errno));
+            error_report("wav_destroy: fclose failed: %s", strerror(errno));
         }
     }
 

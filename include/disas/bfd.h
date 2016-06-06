@@ -313,6 +313,11 @@ typedef struct disassemble_info {
   void (*print_address_func)
     (bfd_vma addr, struct disassemble_info *info);
 
+    /* Function called to print an instruction. The function is architecture
+     * specific.
+     */
+    int (*print_insn)(bfd_vma addr, struct disassemble_info *info);
+
   /* Function called to determine if there is a symbol at the given ADDR.
      If there is, the function returns 1, otherwise it returns 0.
      This is used by ports which support an overlay manager where
@@ -379,6 +384,7 @@ int print_insn_h8300            (bfd_vma, disassemble_info*);
 int print_insn_h8300h           (bfd_vma, disassemble_info*);
 int print_insn_h8300s           (bfd_vma, disassemble_info*);
 int print_insn_h8500            (bfd_vma, disassemble_info*);
+int print_insn_arm_a64          (bfd_vma, disassemble_info*);
 int print_insn_alpha            (bfd_vma, disassemble_info*);
 disassembler_ftype arc_get_disassembler (int, int);
 int print_insn_arm              (bfd_vma, disassemble_info*);
@@ -462,6 +468,7 @@ int generic_symbol_at_address(bfd_vma, struct disassemble_info *);
   (INFO).read_memory_func = buffer_read_memory, \
   (INFO).memory_error_func = perror_memory, \
   (INFO).print_address_func = generic_print_address, \
+  (INFO).print_insn = NULL, \
   (INFO).symbol_at_address_func = generic_symbol_at_address, \
   (INFO).flags = 0, \
   (INFO).bytes_per_line = 0, \

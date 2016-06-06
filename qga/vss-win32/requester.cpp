@@ -10,10 +10,9 @@
  * See the COPYING file in the top-level directory.
  */
 
-#include <stdio.h>
+#include "qemu/osdep.h"
 #include "vss-common.h"
 #include "requester.h"
-#include "assert.h"
 #include "inc/win2003/vswriter.h"
 #include "inc/win2003/vsbackup.h"
 
@@ -23,10 +22,12 @@
 /* Call QueryStatus every 10 ms while waiting for frozen event */
 #define VSS_TIMEOUT_EVENT_MSEC 10
 
-#define err_set(e, err, fmt, ...) \
-    ((e)->error_set((e)->errp, err, (e)->err_class, fmt, ## __VA_ARGS__))
+#define err_set(e, err, fmt, ...)                                           \
+    ((e)->error_setg_win32_wrapper((e)->errp, __FILE__, __LINE__, __func__, \
+                                   err, fmt, ## __VA_ARGS__))
+/* Bad idea, works only when (e)->errp != NULL: */
 #define err_is_set(e) ((e)->errp && *(e)->errp)
-
+/* To lift this restriction, error_propagate(), like we do in QEMU code */
 
 /* Handle to VSSAPI.DLL */
 static HMODULE hLib;
@@ -50,10 +51,6 @@ static struct QGAVSSContext {
 
 STDAPI requester_init(void)
 {
-    vss_ctx.hEventFrozen =  INVALID_HANDLE_VALUE;
-    vss_ctx.hEventThaw = INVALID_HANDLE_VALUE;
-    vss_ctx.hEventTimeout = INVALID_HANDLE_VALUE;
-
     COMInitializer initializer; /* to call CoInitializeSecurity */
     HRESULT hr = CoInitializeSecurity(
         NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
@@ -94,17 +91,17 @@ STDAPI requester_init(void)
 
 static void requester_cleanup(void)
 {
-    if (vss_ctx.hEventFrozen != INVALID_HANDLE_VALUE) {
+    if (vss_ctx.hEventFrozen) {
         CloseHandle(vss_ctx.hEventFrozen);
-        vss_ctx.hEventFrozen = INVALID_HANDLE_VALUE;
+        vss_ctx.hEventFrozen = NULL;
     }
-    if (vss_ctx.hEventThaw != INVALID_HANDLE_VALUE) {
+    if (vss_ctx.hEventThaw) {
         CloseHandle(vss_ctx.hEventThaw);
-        vss_ctx.hEventThaw = INVALID_HANDLE_VALUE;
+        vss_ctx.hEventThaw = NULL;
     }
-    if (vss_ctx.hEventTimeout != INVALID_HANDLE_VALUE) {
+    if (vss_ctx.hEventTimeout) {
         CloseHandle(vss_ctx.hEventTimeout);
-        vss_ctx.hEventTimeout = INVALID_HANDLE_VALUE;
+        vss_ctx.hEventTimeout = NULL;
     }
     if (vss_ctx.pAsyncSnapshot) {
         vss_ctx.pAsyncSnapshot->Release();
@@ -256,6 +253,32 @@ void requester_freeze(int *num_vols, ErrorSet *errset)
 
     CoInitialize(NULL);
 
+    /* Allow unrestricted access to events */
+    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = &sd;
+    sa.bInheritHandle = FALSE;
+
+    vss_ctx.hEventFrozen = CreateEvent(&sa, TRUE, FALSE, EVENT_NAME_FROZEN);
+    if (!vss_ctx.hEventFrozen) {
+        err_set(errset, GetLastError(), "failed to create event %s",
+                EVENT_NAME_FROZEN);
+        goto out;
+    }
+    vss_ctx.hEventThaw = CreateEvent(&sa, TRUE, FALSE, EVENT_NAME_THAW);
+    if (!vss_ctx.hEventThaw) {
+        err_set(errset, GetLastError(), "failed to create event %s",
+                EVENT_NAME_THAW);
+        goto out;
+    }
+    vss_ctx.hEventTimeout = CreateEvent(&sa, TRUE, FALSE, EVENT_NAME_TIMEOUT);
+    if (!vss_ctx.hEventTimeout) {
+        err_set(errset, GetLastError(), "failed to create event %s",
+                EVENT_NAME_TIMEOUT);
+        goto out;
+    }
+
     assert(pCreateVssBackupComponents != NULL);
     hr = pCreateVssBackupComponents(&vss_ctx.pVssbc);
     if (FAILED(hr)) {
@@ -366,32 +389,6 @@ void requester_freeze(int *num_vols, ErrorSet *errset)
         goto out;
     }
 
-    /* Allow unrestricted access to events */
-    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
-    SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
-    sa.nLength = sizeof(sa);
-    sa.lpSecurityDescriptor = &sd;
-    sa.bInheritHandle = FALSE;
-
-    vss_ctx.hEventFrozen = CreateEvent(&sa, TRUE, FALSE, EVENT_NAME_FROZEN);
-    if (vss_ctx.hEventFrozen == INVALID_HANDLE_VALUE) {
-        err_set(errset, GetLastError(), "failed to create event %s",
-                EVENT_NAME_FROZEN);
-        goto out;
-    }
-    vss_ctx.hEventThaw = CreateEvent(&sa, TRUE, FALSE, EVENT_NAME_THAW);
-    if (vss_ctx.hEventThaw == INVALID_HANDLE_VALUE) {
-        err_set(errset, GetLastError(), "failed to create event %s",
-                EVENT_NAME_THAW);
-        goto out;
-    }
-    vss_ctx.hEventTimeout = CreateEvent(&sa, TRUE, FALSE, EVENT_NAME_TIMEOUT);
-    if (vss_ctx.hEventTimeout == INVALID_HANDLE_VALUE) {
-        err_set(errset, GetLastError(), "failed to create event %s",
-                EVENT_NAME_TIMEOUT);
-        goto out;
-    }
-
     /*
      * Start VSS quiescing operations.
      * CQGAVssProvider::CommitSnapshots will kick vss_ctx.hEventFrozen
@@ -443,7 +440,7 @@ void requester_thaw(int *num_vols, ErrorSet *errset)
 {
     COMPointer<IVssAsync> pAsync;
 
-    if (vss_ctx.hEventThaw == INVALID_HANDLE_VALUE) {
+    if (!vss_ctx.hEventThaw) {
         /*
          * In this case, DoSnapshotSet is aborted or not started,
          * and no volumes must be frozen. We return without an error.

@@ -12,6 +12,8 @@
  * or (at your option) any later version.
  */
 
+#include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "cpu.h"
 #include "qemu-common.h"
 #include "migration/vmstate.h"
@@ -21,6 +23,12 @@ static void uc32_cpu_set_pc(CPUState *cs, vaddr value)
     UniCore32CPU *cpu = UNICORE32_CPU(cs);
 
     cpu->env.regs[31] = value;
+}
+
+static bool uc32_cpu_has_work(CPUState *cs)
+{
+    return cs->interrupt_request &
+        (CPU_INTERRUPT_HARD | CPU_INTERRUPT_EXITTB);
 }
 
 static inline void set_feature(CPUUniCore32State *env, int feature)
@@ -105,7 +113,7 @@ static void uc32_cpu_initfn(Object *obj)
     static bool inited;
 
     cs->env_ptr = env;
-    cpu_exec_init(env);
+    cpu_exec_init(cs, &error_abort);
 
 #ifdef CONFIG_USER_ONLY
     env->uncached_asr = ASR_MODE_USER;
@@ -115,7 +123,7 @@ static void uc32_cpu_initfn(Object *obj)
     env->regs[31] = 0x03000000;
 #endif
 
-    tlb_flush(env, 1);
+    tlb_flush(cs, 1);
 
     if (tcg_enabled() && !inited) {
         inited = true;
@@ -138,13 +146,24 @@ static void uc32_cpu_class_init(ObjectClass *oc, void *data)
     dc->realize = uc32_cpu_realizefn;
 
     cc->class_by_name = uc32_cpu_class_by_name;
+    cc->has_work = uc32_cpu_has_work;
     cc->do_interrupt = uc32_cpu_do_interrupt;
+    cc->cpu_exec_interrupt = uc32_cpu_exec_interrupt;
     cc->dump_state = uc32_cpu_dump_state;
     cc->set_pc = uc32_cpu_set_pc;
-#ifndef CONFIG_USER_ONLY
+#ifdef CONFIG_USER_ONLY
+    cc->handle_mmu_fault = uc32_cpu_handle_mmu_fault;
+#else
     cc->get_phys_page_debug = uc32_cpu_get_phys_page_debug;
 #endif
     dc->vmsd = &vmstate_uc32_cpu;
+
+    /*
+     * Reason: uc32_cpu_initfn() calls cpu_exec_init(), which saves
+     * the object in cpus -> dangling pointer after final
+     * object_unref().
+     */
+    dc->cannot_destroy_with_object_finalize_yet = true;
 }
 
 static void uc32_register_cpu_type(const UniCore32CPUInfo *info)

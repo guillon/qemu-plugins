@@ -13,7 +13,13 @@
 
 #include "sysemu/kvm.h"
 
+#define kvm_apic_in_kernel() (kvm_irqchip_in_kernel())
+
 bool kvm_allows_irq0_override(void);
+bool kvm_has_smm(void);
+void kvm_synchronize_all_tsc(void);
+void kvm_arch_reset_vcpu(X86CPU *cs);
+void kvm_arch_do_init_vcpu(X86CPU *cs);
 
 int kvm_device_pci_assign(KVMState *s, PCIHostDeviceAddress *dev_addr,
                           uint32_t flags, uint32_t *dev_id);

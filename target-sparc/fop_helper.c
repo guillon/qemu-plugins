@@ -17,8 +17,9 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "qemu/osdep.h"
 #include "cpu.h"
-#include "helper.h"
+#include "exec/helper-proto.h"
 
 #define QT0 (env->qt0)
 #define QT1 (env->qt1)

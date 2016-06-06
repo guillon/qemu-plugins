@@ -22,15 +22,9 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include "qemu/osdep.h"
 #include <windows.h>
 #include <mmsystem.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <time.h>
-#include <errno.h>
-#include <sys/time.h>
-#include "config-host.h"
 #include "sysemu/sysemu.h"
 #include "qemu-options.h"
 
@@ -84,26 +78,9 @@ void os_setup_early_signal_handling(void)
 }
 
 /* Look for support files in the same directory as the executable.  */
-char *os_find_datadir(const char *argv0)
+char *os_find_datadir(void)
 {
-    char *p;
-    char buf[MAX_PATH];
-    DWORD len;
-
-    len = GetModuleFileName(NULL, buf, sizeof(buf) - 1);
-    if (len == 0) {
-        return NULL;
-    }
-
-    buf[len] = 0;
-    p = buf + len - 1;
-    while (p != buf && *p != '\\')
-        p--;
-    *p = 0;
-    if (access(buf, R_OK) == 0) {
-        return g_strdup(buf);
-    }
-    return NULL;
+    return qemu_get_exec_dir();
 }
 
 void os_set_line_buffering(void)
@@ -119,11 +96,6 @@ void os_set_line_buffering(void)
 void os_parse_cmd_args(int index, const char *optarg)
 {
     return;
-}
-
-void os_pidfile_error(void)
-{
-    fprintf(stderr, "Could not acquire pid file: %s\n", strerror(errno));
 }
 
 int qemu_create_pidfile(const char *filename)

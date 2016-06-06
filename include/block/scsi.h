@@ -143,6 +143,8 @@
 #define READ_CD               0xbe
 #define SEND_DVD_STRUCTURE    0xbf
 
+const char *scsi_command_name(uint8_t cmd);
+
 /*
  * SERVICE ACTION IN subcodes
  */
@@ -227,7 +229,7 @@
 #define MODE_PAGE_TO_PROTECT                  0x1d
 #define MODE_PAGE_CAPABILITIES                0x2a
 #define MODE_PAGE_ALLS                        0x3f
-/* Not in Mt. Fuji, but in ATAPI 2.6 -- depricated now in favor
+/* Not in Mt. Fuji, but in ATAPI 2.6 -- deprecated now in favor
  * of MODE_PAGE_SENSE_POWER */
 #define MODE_PAGE_CDROM                       0x0d
 

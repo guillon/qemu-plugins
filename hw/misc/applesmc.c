@@ -30,6 +30,7 @@
  *
  */
 
+#include "qemu/osdep.h"
 #include "hw/hw.h"
 #include "hw/isa/isa.h"
 #include "ui/console.h"
@@ -43,7 +44,6 @@
 /* command/status port used by Apple SMC */
 #define APPLESMC_CMD_PORT              0x4
 #define APPLESMC_NR_PORTS              32
-#define APPLESMC_MAX_DATA_LENGTH       32
 
 #define APPLESMC_READ_CMD              0x10
 #define APPLESMC_WRITE_CMD             0x11
@@ -66,7 +66,6 @@ struct AppleSMCData {
     QLIST_ENTRY(AppleSMCData) node;
 };
 
-#define TYPE_APPLE_SMC "isa-applesmc"
 #define APPLE_SMC(obj) OBJECT_CHECK(AppleSMCState, (obj), TYPE_APPLE_SMC)
 
 typedef struct AppleSMCState AppleSMCState;
@@ -250,8 +249,8 @@ static void applesmc_isa_realize(DeviceState *dev, Error **errp)
 }
 
 static Property applesmc_isa_properties[] = {
-    DEFINE_PROP_HEX32("iobase", AppleSMCState, iobase,
-                      APPLESMC_DEFAULT_IOBASE),
+    DEFINE_PROP_UINT32(APPLESMC_PROP_IO_BASE, AppleSMCState, iobase,
+                       APPLESMC_DEFAULT_IOBASE),
     DEFINE_PROP_STRING("osk", AppleSMCState, osk),
     DEFINE_PROP_END_OF_LIST(),
 };

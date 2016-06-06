@@ -24,6 +24,7 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "sysemu/char.h"
 #include "qemu/log.h"
@@ -152,11 +153,11 @@ typedef struct XgmacState {
     uint32_t regs[R_MAX];
 } XgmacState;
 
-const VMStateDescription vmstate_rxtx_stats = {
+static const VMStateDescription vmstate_rxtx_stats = {
     .name = "xgmac_stats",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT64(rx_bytes, RxTxStats),
         VMSTATE_UINT64(tx_bytes, RxTxStats),
         VMSTATE_UINT64(rx, RxTxStats),
@@ -312,10 +313,8 @@ static const MemoryRegionOps enet_mem_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static int eth_can_rx(NetClientState *nc)
+static int eth_can_rx(XgmacState *s)
 {
-    XgmacState *s = qemu_get_nic_opaque(nc);
-
     /* RX enabled?  */
     return s->regs[DMA_CONTROL] & DMA_CONTROL_SR;
 }
@@ -329,6 +328,9 @@ static ssize_t eth_rx(NetClientState *nc, const uint8_t *buf, size_t size)
     struct desc bd;
     ssize_t ret;
 
+    if (!eth_can_rx(s)) {
+        return -1;
+    }
     unicast = ~buf[0] & 0x1;
     broadcast = memcmp(buf, sa_bcast, 6) == 0;
     multicast = !unicast && !broadcast;
@@ -368,19 +370,10 @@ out:
     return ret;
 }
 
-static void eth_cleanup(NetClientState *nc)
-{
-    XgmacState *s = qemu_get_nic_opaque(nc);
-
-    s->nic = NULL;
-}
-
 static NetClientInfo net_xgmac_enet_info = {
     .type = NET_CLIENT_OPTIONS_KIND_NIC,
     .size = sizeof(NICState),
-    .can_receive = eth_can_rx,
     .receive = eth_rx,
-    .cleanup = eth_cleanup,
 };
 
 static int xgmac_enet_init(SysBusDevice *sbd)
