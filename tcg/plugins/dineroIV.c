@@ -221,7 +221,7 @@ static void gen_helper(const TCGPluginInterface *tpi, TCGArg *opargs, uint64_t p
 	addr_arg = opargs[2];
       }
 #endif
-      tcg_gen_extu_tl_i64(tcgv_addr, addr_arg);
+      tcg_gen_extu_tl_i64(tcgv_addr, MAKE_TCGV(addr_arg));
       args[1] = GET_TCGV_I64(tcgv_addr);
     } else {
       tcg_gen_movi_i64(tcgv_addr, 0);

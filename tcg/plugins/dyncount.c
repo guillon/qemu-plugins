@@ -128,7 +128,7 @@ static void gen_update_group_helper(const TCGPluginInterface *tpi, uint32_t grou
     tcgv_count = tcg_const_i32(1);
 
     args[0] = GET_TCGV_I32(tcgv_group);
-    args[1] = GET_TCGV_I64(tcgv_count);
+    args[1] = GET_TCGV_I32(tcgv_count);
 
     dh_sizemask(void, 0);
     dh_sizemask(i32, 1);
@@ -155,7 +155,7 @@ static void gen_update_op_helper(const TCGPluginInterface *tpi, uint32_t op, uin
     tcgv_count = tcg_const_i32(1);
 
     args[0] = GET_TCGV_I32(tcgv_op);
-    args[1] = GET_TCGV_I64(tcgv_count);
+    args[1] = GET_TCGV_I32(tcgv_count);
 
     dh_sizemask(void, 0);
     dh_sizemask(i32, 1);
