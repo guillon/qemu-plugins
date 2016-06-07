@@ -140,7 +140,7 @@ static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_op
     if (decoded) {
         gen_printf_insn(tpi, insn);
     } else {
-        fprintf(output, "tcg/plugins/dyntrace: unable to disassemble instruction at PC 0x%"PRIx64"\n", tpi_opcode->pc);
+        fprintf(output, "# WARNING: tcg/plugins/dyntrace: unable to disassemble instruction at PC 0x%"PRIx64"\n", tpi_opcode->pc);
     }
 }
 
@@ -155,15 +155,8 @@ void tpi_init(TCGPluginInterface *tpi)
     TPI_INIT_VERSION_GENERIC(tpi);
     TPI_DECL_FUNC_1(tpi, write_str, void, i64);
 
-#if defined(TARGET_X86_64)
-    if (cs_open(CS_ARCH_X86, CS_MODE_64, &cs_handle) != CS_ERR_OK)
+    if (cs_open(CS_ARCH, CS_MODE, &cs_handle) != CS_ERR_OK)
         abort();
-#elif defined(TARGET_I386)
-    if (cs_open(CS_ARCH_X86, CS_MODE_32, &cs_handle) != CS_ERR_OK)
-        abort();
-#else
-#error "dyncount plugin currently works only for: TARGET_x86_64/TARGET_i386"
-#endif
 
     cs_option(cs_handle, CS_OPT_DETAIL, CS_OPT_ON);
 

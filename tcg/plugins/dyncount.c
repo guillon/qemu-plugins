@@ -84,6 +84,8 @@ static csh cs_handle;
 static uint64_t *group_count;
 static uint64_t *op_count;
 static uint64_t icount_total;
+static uint64_t ld_bytes;
+static uint64_t st_bytes;
 
 static void cpus_stopped(const TCGPluginInterface *tpi)
 {
@@ -114,6 +116,8 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
             }
         }
     }
+    fprintf(tpi->output, "\nloaded_bytes: %"PRIu64"\n", ld_bytes);
+    fprintf(tpi->output, "\nstored_bytes: %"PRIu64"\n", st_bytes);
     fprintf(tpi->output, "\ninstructions_total: %"PRIu64"\n", icount_total);
 }
 
@@ -151,7 +155,25 @@ static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_op
     size_t count;
     cs_insn *insns;
 
-    if (tpi_opcode->operator != INDEX_op_insn_start) return;
+    switch(tpi_opcode->operator) {
+    case INDEX_op_qemu_ld_i32:
+    case INDEX_op_qemu_ld_i64:
+        gen_update_counters(tpi, &ld_bytes,
+                            1 << (get_memop(tpi_opcode->opargs[2]) & MO_SIZE),
+                            NULL);
+        return;
+
+    case INDEX_op_qemu_st_i32:
+    case INDEX_op_qemu_st_i64:
+        gen_update_counters(tpi, &st_bytes,
+                            1 << (get_memop(tpi_opcode->opargs[2]) & MO_SIZE),
+                            NULL);
+        return;
+    case INDEX_op_insn_start:
+        break;
+    default:
+        return;
+    }
 
     count = cs_disasm(cs_handle, (void *)(intptr_t)tpi_opcode->pc, 16,
                       tpi_opcode->pc, 1, &insns);
@@ -175,7 +197,7 @@ static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_op
         const char *symbol, *filename;
         uint64_t address;
         lookup_symbol3(tpi_opcode->pc, &symbol, &filename, &address);
-        fprintf(tpi->output, "tcg/plugins/dyncount: unable to disassemble instruction at PC 0x%"PRIx64" (%s: %s + 0x%"PRIx64")\n", tpi_opcode->pc, filename, symbol, tpi_opcode->pc - address);
+        fprintf(tpi->output, "# WARNING: tcg/plugins/dyncount: unable to disassemble instruction at PC 0x%"PRIx64" (%s: %s + 0x%"PRIx64")\n", tpi_opcode->pc, filename, symbol, tpi_opcode->pc - address);
         gen_update_counters(tpi, &icount_total, 1, NULL);
     }
 }
