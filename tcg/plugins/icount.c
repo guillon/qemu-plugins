@@ -38,7 +38,7 @@ static void pre_tb_helper_code(const TCGPluginInterface *tpi,
                                TPIHelperInfo info, uint64_t address,
                                uint64_t data1, uint64_t data2)
 {
-    icount_total[info.cpu_index] += info.icount;
+    atomic_add(&icount_total[info.cpu_index], info.icount);
 }
 
 static void cpus_stopped(const TCGPluginInterface *tpi)
