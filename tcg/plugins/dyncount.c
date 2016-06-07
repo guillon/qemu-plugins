@@ -30,8 +30,8 @@
 #include <inttypes.h>
 #include <unistd.h>
 
-#include "tcg-op.h"
 #include "tcg-plugin.h"
+#include "disas/disas.h"
 
 #ifdef CONFIG_CAPSTONE
 #include <capstone.h>
@@ -77,7 +77,10 @@ void tpi_init(TCGPluginInterface *tpi)
 #define MAX_GROUPS_COUNT 16384
 #define MAX_OPS_COUNT 16384
 
+/* Global capstone handle. Not synchronized. */
 static csh cs_handle;
+
+/* Shared globals. Must be synchrionized. */
 static uint64_t *group_count;
 static uint64_t *op_count;
 static uint64_t icount_total;
@@ -117,8 +120,8 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
 static void update_counters(uint64_t counter_ptr, uint64_t count,
                             uint64_t counter_ptr2)
 {
-    *((uint64_t *)counter_ptr) += count;
-    if (counter_ptr2 != 0) *((uint64_t *)counter_ptr2) += count;
+    atomic_add((uint64_t *)counter_ptr, count);
+    if (counter_ptr2 != 0) atomic_add((uint64_t *)counter_ptr2, count);
 }
 
 static void gen_update_counters(const TCGPluginInterface *tpi, uint64_t *counter_ptr, uint64_t count, uint64_t *counter_ptr2)
@@ -169,7 +172,11 @@ static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_op
         }
         cs_free(insn, count);
     } else {
-        fprintf(tpi->output, "tcg/plugins/dyncount: unable to disassnble instruction at PC 0x%"PRIx64"\n", tpi_opcode->pc);
+        const char *symbol, *filename;
+        uint64_t address;
+        lookup_symbol3(tpi_opcode->pc, &symbol, &filename, &address);
+        fprintf(tpi->output, "tcg/plugins/dyncount: unable to disassemble instruction at PC 0x%"PRIx64" (%s: %s + 0x%"PRIx64")\n", tpi_opcode->pc, filename, symbol, tpi_opcode->pc - address);
+        gen_update_counters(tpi, &icount_total, 1, NULL);
     }
 }
 
