@@ -277,6 +277,8 @@ typedef struct d4_cache_struct {
 	double conf_miss      [2 * D4NUMACCESSTYPES];	/* conflict misses */
 	double conf_blockmiss [2 * D4NUMACCESSTYPES];
 
+	void (*cache_miss_handler)();
+
 	double multiblock;
 	double bytes_read;
 	double bytes_written;
