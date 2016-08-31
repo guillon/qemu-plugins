@@ -81,7 +81,7 @@ static int glue(symfind, SZ)(const void *s0, const void *s1)
 }
 
 static const char *glue(lookup_symbol, SZ)(struct syminfo *s,
-                                           hwaddr orig_addr, hwaddr *symbol_addr)
+                                           hwaddr orig_addr, hwaddr *symbol_addr, hwaddr *symbol_size)
 {
     struct elf_sym *syms = glue(s->disas_symtab.elf, SZ);
     struct elf_sym *sym;
@@ -90,10 +90,12 @@ static const char *glue(lookup_symbol, SZ)(struct syminfo *s,
                   glue(symfind, SZ));
     if (sym != NULL) {
         if (symbol_addr != NULL) *symbol_addr = sym->st_value;
+        if (symbol_size != NULL) *symbol_size = sym->st_size;
         return s->disas_strtab + sym->st_name;
     }
 
     if (symbol_addr != NULL) *symbol_addr = orig_addr;
+    if (symbol_size != NULL) *symbol_size = 0;
     return "";
 }
 

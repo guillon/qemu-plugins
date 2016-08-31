@@ -372,7 +372,7 @@ const char *lookup_symbol(target_ulong orig_addr)
     struct syminfo *s;
 
     for (s = syminfos; s; s = s->next) {
-        symbol = s->lookup_symbol(s, orig_addr, NULL);
+        symbol = s->lookup_symbol(s, orig_addr, NULL, NULL);
         if (symbol[0] != '\0') {
             break;
         }
@@ -387,7 +387,7 @@ bool lookup_symbol2(target_ulong orig_addr, const char **symbol, const char **fi
     struct syminfo *s;
 
     for (s = syminfos; s; s = s->next) {
-        *symbol = s->lookup_symbol(s, orig_addr, NULL);
+        *symbol = s->lookup_symbol(s, orig_addr, NULL, NULL);
         if (*symbol[0] != '\0') {
             *filename = s->filename;
             return true;
@@ -409,7 +409,7 @@ bool lookup_symbol3(target_ulong orig_addr, const char **symbol, const char **fi
 #else
         hwaddr target_address;
 #endif
-        *symbol = s->lookup_symbol(s, orig_addr, &target_address);
+        *symbol = s->lookup_symbol(s, orig_addr, &target_address, NULL);
         if (*symbol[0] != '\0') {
             *filename = s->filename;
             *address = target_address;
@@ -420,6 +420,32 @@ bool lookup_symbol3(target_ulong orig_addr, const char **symbol, const char **fi
     *symbol = "";
     *filename = "";
     *address = orig_addr;
+    return false;
+}
+
+bool lookup_symbol4(target_ulong orig_addr, const char **symbol, const char **filename, uint64_t *address, uint64_t *size)
+{
+    struct syminfo *s;
+
+    for (s = syminfos; s; s = s->next) {
+#if defined(CONFIG_USER_ONLY)
+        target_ulong target_address, target_size;
+#else
+        hwaddr target_address, target_size;
+#endif
+        *symbol = s->lookup_symbol(s, orig_addr, &target_address, &target_size);
+        if (*symbol[0] != '\0') {
+            *filename = s->filename;
+            *address = target_address;
+            *size = target_size;
+            return true;
+        }
+    }
+
+    *symbol = "";
+    *filename = "";
+    *address = orig_addr;
+    *size = 0;
     return false;
 }
 
