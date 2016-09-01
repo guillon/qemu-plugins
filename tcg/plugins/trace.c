@@ -25,10 +25,31 @@
  * SOFTWARE.
  */
 
+/*
+ * trace - Execution trace plugin
+ *
+ * Usage:
+ *   $ env TPI_OUTPUT=trace.txt qemu-arch -tcg-plugin trace cmd...
+ *
+ * Generates a full execution trace, actually a trace of executed
+ * Target blocks.
+ * Note that the trace interleaves execution from different CPUs
+ * and threads.
+ *
+ * Scope:
+ * - linux-user: ok
+ * - linux-user threaded: ok
+ * - bsd-user: not compiled, not tested
+ * - bsd-user threaded: not compiled, not tested
+ * - system: not compiled, not tested
+ * - generic: yes
+ * - archs: all
+ */
+
 #include <stdio.h>
 #include <stdint.h>
 #include <inttypes.h>
-
+#include <sys/syscall.h>
 #include "tcg-plugin.h"
 #include "disas/disas.h"
 
@@ -39,13 +60,16 @@ static void pre_tb_helper_code(const TCGPluginInterface *tpi,
     const char *symbol = (const char *)(uintptr_t)data1;
     const char *filename = (const char *)(uintptr_t)data2;
 
-    if (!info.icount)
-        return;
-
-    fprintf(tpi->output, "%s (%d): CPU #%" PRIu32 " - 0x%016" PRIx64 " [%" PRIu32 "]: %" PRIu32 " instruction(s) in '%s:%s'\n",
-            tcg_plugin_get_filename(), getpid(), info.cpu_index, address, info.size, info.icount,
+    tpi_exec_lock(tpi);
+    fprintf(tpi_output(tpi), "%s %"PRIu32" %"PRIu32": CPU #%" PRIu32 " - 0x%016" PRIx64 " [%" PRIu32 "]: %" PRIu32 " instruction(s) in '%s:%s'\n",
+            tcg_plugin_get_filename(),
+            tpi_thread_pid(tpi), tpi_thread_tid(tpi),
+            tpi_current_cpu_index(tpi), address,
+            tpi_current_tb_size(tpi),
+            tpi_current_tb_icount(tpi),
             filename != NULL && filename[0] != '\0' ? filename : "<unknown>",
             symbol != NULL && symbol[0] != '\0' ? symbol : "<unknown>");
+    tpi_exec_unlock(tpi);
 }
 
 static void pre_tb_helper_data(const TCGPluginInterface *tpi,

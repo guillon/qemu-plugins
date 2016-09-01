@@ -36,6 +36,8 @@
 #include <stdint.h>  /* int*_t types, */
 #include <glib.h>    /* glib2 objects/functions,*/
 #include <sys/sendfile.h> /* sendfile(2), */
+#include <execinfo.h>     /* backtrace(3), */
+
 
 #include "tcg.h"
 #include "tcg-op.h"
@@ -43,6 +45,10 @@
 #include "exec/exec-all.h"   /* TranslationBlock */
 #include "qom/cpu.h"         /* CPUState */
 #include "sysemu/sysemu.h"   /* max_cpus */
+#include "qemu/log.h"        /* qemu_set_log() */
+
+/* Definition of private externals used in tcg-plugin.inc.c. */
+__thread uint32_t _tpi_thread_tid;
 
 /* Singleton plugins global state. */
 static struct {
@@ -57,6 +63,9 @@ static struct {
        concurrent access when mutex_protected is true.  */
     bool mutex_protected;
     pthread_mutex_t helper_mutex;
+
+    /* User global plugin helpers execution mutex. */
+    pthread_mutex_t user_mutex;
 
     /* Actual list of plugins. */
     GList *tpi_list;
@@ -78,6 +87,11 @@ void tcg_plugin_load(const char *name)
 static void tcg_plugin_state_init(void)
 {
     if (g_plugins_state.output != NULL) return;
+
+    /* No TB chain with plugins as we must have an up to date
+     * env->current_tb for the plugin interface.
+     */
+    qemu_set_log(CPU_LOG_TB_NOCHAIN);
 
     /* Plugins output is, in order of priority:
      *
@@ -166,8 +180,15 @@ static void tcg_plugin_state_init(void)
 
     g_plugins_state.verbose = getenv("TPI_VERBOSE") != NULL;
 
-    g_plugins_state.mutex_protected = (getenv("TPI_MUTEX_PROTECTED") != NULL);
-    pthread_mutex_init(&g_plugins_state.helper_mutex, NULL);
+    {
+        pthread_mutexattr_t attr;
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
+        pthread_mutex_init(&g_plugins_state.user_mutex, &attr);
+
+        g_plugins_state.mutex_protected = (getenv("TPI_MUTEX_PROTECTED") != NULL);
+        pthread_mutex_init(&g_plugins_state.helper_mutex, NULL);
+    }
 }
 
 /* Load the dynamic shared object "name" and call its function
@@ -616,6 +637,7 @@ bool tcg_plugin_enabled(void)
 void tcg_plugin_cpus_stopped(void)
 {
     GList *l;
+
     for (l = g_plugins_state.tpi_list; l != NULL; l = l->next)
     {
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
@@ -678,5 +700,29 @@ void tcg_plugin_after_gen_opc(TCGOp *opcode, TCGArg *opargs, uint8_t nb_args)
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
         if (tcg_plugin_initialize(tpi))
             tcg_plugin_tpi_after_gen_opc(tpi, opcode, opargs, nb_args);
+    }
+}
+
+void tpi_exec_lock(const TCGPluginInterface *tpi)
+{
+    int err;
+    (void)tpi;
+    err = pthread_mutex_lock(&g_plugins_state.user_mutex);
+    if (err != 0) {
+        fprintf(stderr, "qemu: tpi_exec_lock: fatal error: %s",
+                strerror(err));
+        abort();
+    }
+}
+
+void tpi_exec_unlock(const TCGPluginInterface *tpi)
+{
+    int err;
+    (void)tpi;
+    err = pthread_mutex_unlock(&g_plugins_state.user_mutex);
+    if (err != 0) {
+        fprintf(stderr, "qemu: tpi_exec_unlock: fatal error: %s",
+                strerror(err));
+        abort();
     }
 }

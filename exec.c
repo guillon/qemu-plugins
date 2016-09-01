@@ -25,7 +25,6 @@
 #include "qemu/cutils.h"
 #include "cpu.h"
 #include "tcg.h"
-#include "tcg-plugin.h"
 #include "hw/hw.h"
 #if !defined(CONFIG_USER_ONLY)
 #include "hw/boards.h"
@@ -60,6 +59,8 @@
 #ifndef _WIN32
 #include "qemu/mmap-alloc.h"
 #endif
+
+#include "tcg-plugin.h"
 
 //#define DEBUG_SUBPAGE
 

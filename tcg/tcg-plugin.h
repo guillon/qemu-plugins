@@ -48,7 +48,6 @@
     bool tcg_plugin_enabled(void);
     void tcg_plugin_load(const char *name);
     void tcg_plugin_cpus_stopped(void);
-    void tcg_plugin_register_info(uint64_t pc, CPUState *env, TranslationBlock *tb);
     void tcg_plugin_before_gen_tb(CPUState *env, TranslationBlock *tb);
     void tcg_plugin_after_gen_tb(CPUState *env, TranslationBlock *tb);
     void tcg_plugin_after_gen_opc(TCGOp *opcode, TCGArg *opargs, uint8_t nb_args);
@@ -57,7 +56,6 @@
 #   define tcg_plugin_enabled() false
 #   define tcg_plugin_load(dso)
 #   define tcg_plugin_cpus_stopped()
-#   define tcg_plugin_register_info(pc, env, tb)
 #   define tcg_plugin_before_gen_tb(env, tb)
 #   define tcg_plugin_after_gen_tb(env, tb)
 #   define tcg_plugin_after_gen_opc(tcg_opcode, tcg_opargs_, nb_args)
@@ -115,7 +113,7 @@ typedef void (* tpi_pre_tb_helper_data_t)(const TCGPluginInterface *tpi,
                                           TPIHelperInfo info, uint64_t address,
                                           uint64_t *data1, uint64_t *data2);
 
-#define TPI_VERSION 5
+#define TPI_VERSION 6
 struct TCGPluginInterface
 {
     /* Compatibility information.  */
@@ -272,5 +270,76 @@ struct TCGPluginInterface
 
 typedef void (* tpi_init_t)(TCGPluginInterface *tpi);
 void tpi_init(TCGPluginInterface *tpi);
+
+/*
+ * Utility functions provided in addition to
+ * QEMU interfaces callable from plugin execution time
+ * or translation time helpers.
+ */
+
+/*
+ * Thread local storage specification.
+ * Use for instance as in:
+ *   static TPI_THREAD int thread_local;
+ */
+#ifdef __GNUC__
+#define TPI_THREAD __thread
+#else
+#error "Thread local storage not supported"
+#endif
+
+/*
+ * Global plugin interface accessors.
+ */
+static inline FILE *tpi_output(const TCGPluginInterface *tpi);
+
+/*
+ * Translation blocks accessors.
+ * Available at translation time and execution time.
+ */
+static inline TranslationBlock *tpi_current_tb(const TCGPluginInterface *tpi);
+static inline uint64_t tpi_current_tb_address(const TCGPluginInterface *tpi);
+static inline uint32_t tpi_current_tb_size(const TCGPluginInterface *tpi);
+static inline uint32_t tpi_current_tb_icount(const TCGPluginInterface *tpi);
+
+/*
+ * Thread related identifiers.
+ * Note that at translation time, these return the
+ * translation thread ids which may be different from the
+ * actual execution threads.
+ */
+static inline uint32_t tpi_thread_pid(const TCGPluginInterface *tpi);
+static inline uint32_t tpi_thread_tid(const TCGPluginInterface *tpi);
+static inline pthread_t tpi_thread_self(const TCGPluginInterface *tpi);
+
+/*
+ * QEMU CPUState and CPUArchState accessors.
+ * Note that at translation time, these return the
+ * translation CPU state which may be different from the
+ * actual execution CPU state.
+ */
+static inline CPUState *tpi_current_cpu(const TCGPluginInterface *tpi);
+static inline CPUArchState *tpi_current_cpu_arch(const TCGPluginInterface *tpi);
+static inline uint32_t tpi_current_cpu_index(const TCGPluginInterface *tpi);
+static inline uint32_t tpi_nb_cpus(const TCGPluginInterface *tpi);
+
+/*
+ * Execution lock functions.
+ * Should be used for atomic regions executed from plugin
+ * helpers such as printfs to tpi_output().
+ * This lock is non recursive and will generate an
+ * abort on relock condition.
+ */
+extern void tpi_exec_lock(const TCGPluginInterface *tpi);
+extern void tpi_exec_unlock(const TCGPluginInterface *tpi);
+
+/*
+ * Guest to host address and loads.
+ */
+static inline uint64_t tpi_guest_ptr(const TCGPluginInterface *tpi, uint64_t guest_address);
+static inline uint64_t tpi_guest_load64(const TCGPluginInterface *tpi, uint64_t guest_address);
+static inline uint32_t tpi_guest_load32(const TCGPluginInterface *tpi, uint64_t guest_address);
+
+#include "tcg-plugin.inc.c"
 
 #endif /* TCG_PLUGIN_H */

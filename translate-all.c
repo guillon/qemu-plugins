@@ -30,7 +30,6 @@
 #include "trace.h"
 #include "disas/disas.h"
 #include "tcg.h"
-#include "tcg-plugin.h"
 #if defined(CONFIG_USER_ONLY)
 #include "qemu.h"
 #if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
@@ -57,6 +56,8 @@
 #include "qemu/bitmap.h"
 #include "qemu/timer.h"
 #include "exec/log.h"
+
+#include "tcg-plugin.h"
 
 //#define DEBUG_TB_INVALIDATE
 //#define DEBUG_FLUSH
