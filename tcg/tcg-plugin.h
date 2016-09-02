@@ -310,7 +310,7 @@ static inline uint32_t tpi_current_tb_icount(const TCGPluginInterface *tpi);
  */
 static inline uint32_t tpi_thread_pid(const TCGPluginInterface *tpi);
 static inline uint32_t tpi_thread_tid(const TCGPluginInterface *tpi);
-static inline pthread_t tpi_thread_self(const TCGPluginInterface *tpi);
+static inline uint64_t tpi_thread_self(const TCGPluginInterface *tpi);
 
 /*
  * QEMU CPUState and CPUArchState accessors.
