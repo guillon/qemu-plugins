@@ -34,9 +34,11 @@
 #include <sys/syscall.h> /* SYS_gettid, */
 #include <pthread.h>     /* pthread_*(3p), */
 
+#ifdef CONFIG_USER_ONLY
 #ifndef QEMU_H
 /* Defined by linux_user/qemu.h. */
 extern __thread CPUState *thread_cpu;
+#endif
 #endif
 
 extern __thread uint32_t _tpi_thread_tid;
@@ -68,45 +70,49 @@ static inline uint64_t tpi_thread_self(const TCGPluginInterface *tpi)
 static inline TranslationBlock *tpi_current_tb(const TCGPluginInterface *tpi)
 {
     (void)tpi;
-    return (TranslationBlock *)thread_cpu->current_tb;
+    return (TranslationBlock *)tpi_current_cpu(tpi)->current_tb;
 }
 
 static inline uint64_t tpi_current_tb_address(const TCGPluginInterface *tpi)
 {
     (void)tpi;
-    return (uint64_t)thread_cpu->current_tb->pc;
+    return (uint64_t)tpi_current_cpu(tpi)->current_tb->pc;
 }
 
 static inline uint32_t tpi_current_tb_size(const TCGPluginInterface *tpi)
 {
     (void)tpi;
-    return (uint32_t)thread_cpu->current_tb->size;
+    return (uint32_t)tpi_current_cpu(tpi)->current_tb->size;
 
 }
 
 static inline uint32_t tpi_current_tb_icount(const TCGPluginInterface *tpi)
 {
     (void)tpi;
-    return (uint32_t)thread_cpu->current_tb->icount;
+    return (uint32_t)tpi_current_cpu(tpi)->current_tb->icount;
 
 }
 
 static inline CPUState *tpi_current_cpu(const TCGPluginInterface *tpi)
 {
     (void)tpi;
+#ifdef CONFIG_USER_ONLY
     return thread_cpu;
+#else
+    return current_cpu;
+#endif
 }
 
 static inline CPUArchState *tpi_current_cpu_arch(const TCGPluginInterface *tpi)
 {
     (void)tpi;
-    return thread_cpu->env_ptr;
+    return tpi_current_cpu(tpi)->env_ptr;
 }
 
 static inline uint32_t tpi_current_cpu_index(const TCGPluginInterface *tpi)
 {
     (void)tpi;
-    return (uint32_t)thread_cpu->cpu_index;
+    return (uint32_t)tpi_current_cpu(tpi)->cpu_index;
 }
 
 static inline uint32_t tpi_nb_cpus(const TCGPluginInterface *tpi)
@@ -116,24 +122,42 @@ static inline uint32_t tpi_nb_cpus(const TCGPluginInterface *tpi)
 
 static inline uint64_t tpi_guest_ptr(const TCGPluginInterface *tpi, uint64_t guest_address)
 {
+#ifdef CONFIG_USER_ONLY
     (void)tpi;
     return guest_address + guest_base;
+#else
+    (void)tpi;
+    fprintf(stderr, "qemu: tpi_guest_ptr: fatal error: not implemented in system mode\n");
+    abort();
+#endif
 }
 
 static inline uint64_t tpi_guest_load64(const TCGPluginInterface *tpi, uint64_t guest_address)
 {
+#ifdef CONFIG_USER_ONLY
     union { uint64_t v; struct { char bytes[8]; } b; } val;
     (void)tpi;
     /* TODO: manage incompatible endianess. */
     val.b = *(__typeof(val.b) *)(guest_address + guest_base);
     return val.v;
+#else
+    (void)tpi;
+    fprintf(stderr, "qemu: tpi_guest_load64: fatal error: not implemented in system mode\n");
+    abort();
+#endif
 }
 
 static inline uint32_t tpi_guest_load32(const TCGPluginInterface *tpi, uint64_t guest_address)
 {
+#ifdef CONFIG_USER_ONLY
     union { uint32_t v; struct { char bytes[4]; } b; } val;
     (void)tpi;
     /* TODO: manage incompatible endianess. */
     val.b = *(__typeof(val.b) *)(guest_address + guest_base);
     return val.v;
+#else
+    (void)tpi;
+    fprintf(stderr, "qemu: tpi_guest_load32: fatal error: not implemented in system mode\n");
+    abort();
+#endif
 }

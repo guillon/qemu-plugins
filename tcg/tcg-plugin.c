@@ -709,7 +709,7 @@ void tpi_exec_lock(const TCGPluginInterface *tpi)
     (void)tpi;
     err = pthread_mutex_lock(&g_plugins_state.user_mutex);
     if (err != 0) {
-        fprintf(stderr, "qemu: tpi_exec_lock: fatal error: %s",
+        fprintf(stderr, "qemu: tpi_exec_lock: fatal error: %s\n",
                 strerror(err));
         abort();
     }
@@ -721,7 +721,7 @@ void tpi_exec_unlock(const TCGPluginInterface *tpi)
     (void)tpi;
     err = pthread_mutex_unlock(&g_plugins_state.user_mutex);
     if (err != 0) {
-        fprintf(stderr, "qemu: tpi_exec_unlock: fatal error: %s",
+        fprintf(stderr, "qemu: tpi_exec_unlock: fatal error: %s\n",
                 strerror(err));
         abort();
     }
