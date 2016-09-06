@@ -325,8 +325,8 @@ static void potential_return(const TCGPluginInterface *tpi, uint64_t address, ui
     if (found != NULL) {
         /* Atomic output of this thread event. */
         tpi_exec_lock(tpi);
-        fprintf(tpi_output(tpi), "- call_return: { tid: %"PRIu32", id: %d, sym_name: \"%s\", file_name: \"%s\" }\n",
-                tpi_thread_tid(tpi), locals.stack.num, found->sym_name, found->file_name);
+        fprintf(tpi_output(tpi), "- call_return: { tid: %"PRIu32", id: %"PRIu64", depth: %d, sym_name: \"%s\", file_name: \"%s\" }\n",
+                tpi_thread_tid(tpi), found->id, found->depth, found->sym_name, found->file_name);
         fprintf(tpi_output(tpi), "  frame:\n");
         call_stack_dump(&locals.stack, 4, tpi_output(tpi));
         fflush(tpi_output(tpi));
