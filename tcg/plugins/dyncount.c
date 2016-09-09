@@ -48,6 +48,14 @@
 #define CS_ARCH CS_ARCH_X86
 #define CS_MODE CS_MODE_64
 #define CS_GROUPS_NAME "x86"
+#elif defined(TARGET_AARCH64)
+#define CS_ARCH CS_ARCH_ARM64
+#define CS_MODE 0
+#define CS_GROUPS_NAME "arm64"
+#elif defined(TARGET_ARM)
+#define CS_ARCH CS_ARCH_ARM
+#define CS_MODE CS_MODE_ARM
+#define CS_GROUPS_NAME "arm"
 #else
 #define CS_GROUPS_NAME ""
 #endif
@@ -65,7 +73,7 @@ void tpi_init(TCGPluginInterface *tpi)
             "#          Install capstone from http://www.capstone-engine.org/\n"
             "#          and reconfigure/recompile QEMU.\n"
         );
-#elsif !defined(CS_ARCH)
+#elif !defined(CS_ARCH)
     fprintf(tpi->output,
             "# WARNING: dyncount plugin disabled.\n"
             "           This plugin is not available for target " TARGET_NAME ".\n"
@@ -175,7 +183,7 @@ static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_op
         return;
     }
 
-    count = cs_disasm(cs_handle, (void *)(intptr_t)tpi_opcode->pc, 16,
+    count = cs_disasm(cs_handle, (void *)(intptr_t)tpi_guest_ptr(tpi, tpi_opcode->pc), 16,
                       tpi_opcode->pc, 1, &insns);
     if (count > 0) {
         cs_insn *insn = &insns[0];
