@@ -44,18 +44,26 @@
 #define CS_ARCH CS_ARCH_X86
 #define CS_MODE CS_MODE_32
 #define CS_GROUPS_NAME "x86"
+#define CS_INS_COUNT X86_INS_ENDING
+#define CS_GRP_COUNT X86_GRP_ENDING
 #elif defined(TARGET_X86_64)
 #define CS_ARCH CS_ARCH_X86
 #define CS_MODE CS_MODE_64
 #define CS_GROUPS_NAME "x86"
+#define CS_INS_COUNT X86_INS_ENDING
+#define CS_GRP_COUNT X86_GRP_ENDING
 #elif defined(TARGET_AARCH64)
 #define CS_ARCH CS_ARCH_ARM64
 #define CS_MODE 0
 #define CS_GROUPS_NAME "arm64"
+#define CS_INS_COUNT ARM64_INS_ENDING
+#define CS_GRP_COUNT ARM64_GRP_ENDING
 #elif defined(TARGET_ARM)
 #define CS_ARCH CS_ARCH_ARM
 #define CS_MODE CS_MODE_ARM
 #define CS_GROUPS_NAME "arm"
+#define CS_INS_COUNT ARM_INS_ENDING
+#define CS_GRP_COUNT ARM_GRP_ENDING
 #else
 #define CS_GROUPS_NAME ""
 #endif
@@ -82,9 +90,6 @@ void tpi_init(TCGPluginInterface *tpi)
 }
 #else
 
-#define MAX_GROUPS_COUNT 16384
-#define MAX_OPS_COUNT 16384
-
 /* Global capstone handle. Not synchronized. */
 static csh cs_handle;
 
@@ -100,16 +105,22 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
     unsigned int i;
 
     fprintf(tpi->output, "\nmnemonics_count:\n");
-    for (i = 0; i < MAX_OPS_COUNT; i++) {
+    for (i = 0; i < CS_INS_COUNT; i++) {
         if (op_count[i] > 0) {
-            fprintf(tpi->output,
-                    "  %s: %"PRIu64"\n",
-                    cs_insn_name(cs_handle, i),
-                    op_count[i]);
+            if (i == 0) {
+                fprintf(tpi->output,
+                        "  _unknown_: %"PRIu64"\n",
+                        op_count[i]);
+            } else {
+                fprintf(tpi->output,
+                        "  %s: %"PRIu64"\n",
+                        cs_insn_name(cs_handle, i),
+                        op_count[i]);
+            }
         }
     }
     fprintf(tpi->output, "\ngroups_count:\n");
-    for (i = 0; i < MAX_GROUPS_COUNT; i++) {
+    for (i = 0; i < CS_GRP_COUNT; i++) {
         if (group_count[i] > 0) {
             if (i == 0) {
                 fprintf(tpi->output,
@@ -188,16 +199,21 @@ static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_op
     if (count > 0) {
         cs_insn *insn = &insns[0];
         cs_detail *detail = insn->detail;
-        assert(insn->id < MAX_OPS_COUNT);
-        gen_update_counters(tpi, &op_count[insn->id], 1, &icount_total);
+        if (insn->id == 0 || insn->id >= CS_INS_COUNT) {
+            /* We may get an instruction id out of range, force it to 0 (unknown). */
+            gen_update_counters(tpi, &op_count[0], 1, &icount_total);
+        } else {
+            gen_update_counters(tpi, &op_count[insn->id], 1, &icount_total);
+        }
         if (detail->groups_count > 0) {
             int n;
             for (n = 0; n < detail->groups_count; n++) {
                 int group = detail->groups[n];
-                assert(group < MAX_GROUPS_COUNT);
+                assert(group < CS_GRP_COUNT);
                 gen_update_counters(tpi, &group_count[group], 1, NULL);
             }
         } else {
+            /* If not in any group, add to group 0 (nogroup). */
             gen_update_counters(tpi, &group_count[0], 1, NULL);
         }
         cs_free(insn, count);
@@ -206,7 +222,8 @@ static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_op
         uint64_t address;
         lookup_symbol3(tpi_opcode->pc, &symbol, &filename, &address);
         fprintf(tpi->output, "# WARNING: tcg/plugins/dyncount: unable to disassemble instruction at PC 0x%"PRIx64" (%s: %s + 0x%"PRIx64")\n", tpi_opcode->pc, filename, symbol, tpi_opcode->pc - address);
-        gen_update_counters(tpi, &icount_total, 1, NULL);
+        gen_update_counters(tpi, &op_count[0], 1, &icount_total);
+        gen_update_counters(tpi, &group_count[0], 1, NULL);
     }
 }
 
@@ -223,8 +240,8 @@ void tpi_init(TCGPluginInterface *tpi)
     tpi->cpus_stopped = cpus_stopped;
     tpi->after_gen_opc = after_gen_opc;
 
-    group_count = g_malloc0(MAX_GROUPS_COUNT * sizeof(uint64_t));
-    op_count = g_malloc0(MAX_OPS_COUNT * sizeof(uint64_t));
+    group_count = g_malloc0(CS_GRP_COUNT * sizeof(uint64_t));
+    op_count = g_malloc0(CS_INS_COUNT * sizeof(uint64_t));
 }
 
 #endif /* CONFIG_CAPSTONE */
