@@ -54,8 +54,10 @@ static uint32_t output_flags;
 #define OUTPUT_STATS     (1U<<3)
 #define OUTPUT_TRACE     (1U<<4)
 #define OUTPUT_DINERO    (1U<<5)
+#define OUTPUT_YAML      (1U<<6)
 #define OUTPUTS_LEGACY_1 (OUTPUT_COPYRIGHT|OUTPUT_TRACE)
-#define OUTPUTS_DEFAULT  (OUTPUT_STATS|OUTPUT_CYCLES)
+#define OUTPUTS_LEGACY_2 (OUTPUT_STATS|OUTPUT_CYCLES)
+#define OUTPUTS_DEFAULT  (OUTPUT_STATS|OUTPUT_CYCLES|OUTPUT_YAML)
 
 #define DINEROIV_DEFAULT_LATENCIES "0,2,40"
 #define DINEROIV_DEFAULT_CMDLINE "-l1-isize 16k -l1-dsize 8192 -l1-ibsize 32 -l1-dbsize 16"
@@ -326,6 +328,57 @@ static void dineroiv_sumup(FILE *output)
     }
 }
 
+static void dineroiv_sumup_yaml(FILE *output)
+{
+    int cache_idx;
+    int type_idx;
+
+    cycles_total = instr_total;
+
+    /* Compute and dump stats per access type. */
+    if (output_flags & OUTPUT_STATS) {
+        fprintf(output, "\n");
+        fprintf(output, "mem_accesses:\n");
+    }
+    for (cache_idx = 0; cache_idx < caches_num; cache_idx++) {
+        const char *name = caches_list[cache_idx]->name;
+        fprintf(output, "  - id: \"%s\"\n", name);
+        for (type_idx = 0; type_idx < TYPE_NUM; type_idx++) {
+            double fetches = caches_list[cache_idx]->fetch[index2dinero(type_idx)];
+            double misses = caches_list[cache_idx]->miss[index2dinero(type_idx)];
+            if (output_flags & OUTPUT_STATS) {
+                const char *type = index2type(type_idx);
+                fprintf(output, "    \"%s\": %"PRIu64"\n", type, (uint64_t)fetches);
+                fprintf(output, "    \"%s missed\": %"PRIu64"\n", type, (uint64_t)misses);
+                if (fetches > 0) {
+                    fprintf(output, "    \"%s miss ratio\": %.10f\n", type,
+                            misses/fetches);
+                    fprintf(output, "    \"%s miss %%\": %.8f%%\n", type,
+                            trunc(misses/fetches * 100.0e8)/1.0e8);
+                } else {
+                    fprintf(output, "    \"%s miss ratio\": %.10f\n", type, 0.0);
+                    fprintf(output, "    \"%s miss %%\": %.8f%%\n", type, 0.0);
+                }
+                /* Treat only data/inst reads for cycles estimate.
+                   Assume that data stores are bypassed. */
+                if (cache_idx < latencies_num) {
+                    if (type_idx == TYPE_DREAD || type_idx == TYPE_IFETCH)
+                        cycles_total += (uint64_t)fetches *
+                            caches_latencies[cache_idx];
+                }
+            }
+        }
+    }
+
+    if (output_flags & OUTPUT_STATS) {
+        fprintf(output, "\n");
+        fprintf(output, "instructions_summary:\n");
+        fprintf(output, "  count: %"PRIu64"\n", instr_total);
+        fprintf(output, "  loads: %"PRIu64"\n", load_total);
+        fprintf(output, "  stores: %"PRIu64"\n", store_total);
+    }
+}
+
 
 static void cpus_stopped(const TCGPluginInterface *tpi)
 {
@@ -340,7 +393,10 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
     }
 
     if (output_flags & (OUTPUT_CYCLES|OUTPUT_STATS)) {
-        dineroiv_sumup(tpi->output);
+        if (output_flags & (OUTPUT_YAML))
+            dineroiv_sumup_yaml(tpi->output);
+        else
+            dineroiv_sumup(tpi->output);
     }
 
     if (output_flags & OUTPUT_DINERO) {
@@ -351,9 +407,16 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
     }
 
     if (output_flags & OUTPUT_CYCLES) {
-        fprintf(tpi->output,
-                "%s (%d): number of estimated cycles = %" PRIu64 "\n",
-                tcg_plugin_get_filename(), getpid(), cycles_total);
+        if (output_flags & (OUTPUT_YAML)) {
+            fprintf(tpi->output, "\n");
+            fprintf(tpi->output, "estimated_cpi: %.4f\n", (double)cycles_total / instr_total);
+            fprintf(tpi->output, "\n");
+            fprintf(tpi->output, "estimated_cycles: %" PRIu64 "\n", cycles_total);
+        } else {
+            fprintf(tpi->output,
+                    "%s (%d): number of estimated cycles = %" PRIu64 "\n",
+                    tcg_plugin_get_filename(), getpid(), cycles_total);
+        }
     }
 }
 
@@ -397,8 +460,10 @@ static void parse_output_flags(const char *outputs)
         { "stats", OUTPUT_STATS },
         { "trace", OUTPUT_TRACE },
         { "dinero", OUTPUT_DINERO },
+        { "yaml", OUTPUT_YAML },
         { "default", OUTPUTS_DEFAULT },
-        { "legacy-1", OUTPUTS_LEGACY_1 }
+        { "legacy-1", OUTPUTS_LEGACY_1 },
+        { "legacy-2", OUTPUTS_LEGACY_2 }
     };
 
     output_flags = 0;
