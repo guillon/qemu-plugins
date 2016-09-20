@@ -27,8 +27,10 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <unistd.h>
+#include <glib.h>
 
 #include "tcg-plugin.h"
 #include "disas/disas.h"
@@ -67,6 +69,8 @@
 #else
 #define CS_GROUPS_NAME ""
 #endif
+#define INS_MAX_COUNT 4096
+#define GRP_MAX_COUNT 4096
 
 #endif /* CONFIG_CAPSTONE */
 
@@ -90,83 +94,142 @@ void tpi_init(TCGPluginInterface *tpi)
 }
 #else
 
+/* Maintains information for a recorded mnemonic or group string. */
+typedef struct
+{
+    const char *name; /* Name, used as key. */
+    int serial_idx;  /* Unique dense idx into op_count/group_count array. */
+    int cs_idx;      /* Capstone op/grp idx. */
+} str_hash_entry_t;
+
+
 /* Global capstone handle. Not synchronized. */
 static csh cs_handle;
 
 /* Shared globals. Must be synchrionized. */
-static uint64_t *group_count;
-static uint64_t *op_count;
-static uint64_t icount_total;
+static int op_current_idx;
+static uint64_t op_count[INS_MAX_COUNT];
+static GHashTable *op_hash;
+static str_hash_entry_t *op_entries[INS_MAX_COUNT];
+static int grp_current_idx;
+static uint64_t grp_count[GRP_MAX_COUNT];
+static GHashTable *grp_hash;
+static str_hash_entry_t *grp_entries[INS_MAX_COUNT];
 static uint64_t ld_bytes;
 static uint64_t st_bytes;
 
+static void free_str_hash_entry(gpointer data)
+{
+  str_hash_entry_t *entry = (str_hash_entry_t *)data;
+  g_free((gpointer)entry->name);
+  g_free(entry);
+}
+
+static int cmp_str_hash_entry_ptr(const void *a, const void *b)
+{
+    return strcmp((*(const str_hash_entry_t **)a)->name,
+                  (*(const str_hash_entry_t **)b)->name);
+}
+
+
 static void cpus_stopped(const TCGPluginInterface *tpi)
 {
-    unsigned int i;
+    int i;
+    uint64_t icount_total = 0;
+
+    qsort(&op_entries[0], op_current_idx, sizeof(str_hash_entry_t *),
+          cmp_str_hash_entry_ptr);
+    qsort(&grp_entries[0], grp_current_idx, sizeof(str_hash_entry_t *),
+          cmp_str_hash_entry_ptr);
 
     fprintf(tpi->output, "\nmnemonics_count:\n");
-    for (i = 0; i < CS_INS_COUNT; i++) {
-        if (op_count[i] > 0) {
-            if (i == 0) {
-                fprintf(tpi->output,
-                        "  _unknown_: %"PRIu64"\n",
-                        op_count[i]);
-            } else {
-                fprintf(tpi->output,
-                        "  %s: %"PRIu64"\n",
-                        cs_insn_name(cs_handle, i),
-                        op_count[i]);
-            }
-        }
+    for (i = 0; i < op_current_idx; i++) {
+        fprintf(tpi->output,
+                "  %s: %"PRIu64"\n",
+                op_entries[i]->name,
+                op_count[op_entries[i]->serial_idx]);
+        icount_total += op_count[i];
     }
     fprintf(tpi->output, "\ngroups_count:\n");
-    for (i = 0; i < CS_GRP_COUNT; i++) {
-        if (group_count[i] > 0) {
-            if (i == 0) {
-                fprintf(tpi->output,
-                        "  nogroup: %"PRIu64"\n",
-                        group_count[i]);
-            } else {
-                fprintf(tpi->output,
-                        "  cs.grp.%s.%s: %"PRIu64"\n",
-                        i < 128 ? "gen": CS_GROUPS_NAME,
-                        cs_group_name(cs_handle, i),
-                        group_count[i]);
-            }
-        }
+    for (i = 0; i < grp_current_idx; i++) {
+        fprintf(tpi->output,
+                "  %s: %"PRIu64"\n",
+                grp_entries[i]->name,
+                grp_count[grp_entries[i]->serial_idx]);
     }
     fprintf(tpi->output, "\nloaded_bytes: %"PRIu64"\n", ld_bytes);
     fprintf(tpi->output, "\nstored_bytes: %"PRIu64"\n", st_bytes);
     fprintf(tpi->output, "\ninstructions_total: %"PRIu64"\n", icount_total);
+    fflush(tpi->output);
+    g_hash_table_destroy(op_hash);
+    g_hash_table_destroy(grp_hash);
+
 }
 
-static void update_counters(uint64_t counter_ptr, uint64_t count,
-                            uint64_t counter_ptr2)
+static void update_counter(uint64_t counter_ptr, uint64_t count)
 {
     atomic_add((uint64_t *)counter_ptr, count);
-    if (counter_ptr2 != 0) atomic_add((uint64_t *)counter_ptr2, count);
 }
 
-static void gen_update_counters(const TCGPluginInterface *tpi, uint64_t *counter_ptr, uint64_t count, uint64_t *counter_ptr2)
+static void gen_update_counter(const TCGPluginInterface *tpi, uint64_t *counter_ptr, uint64_t count)
 {
     TCGArg args[3];
     TCGv_i64 tcgv_counter_ptr;
     TCGv_i64 tcgv_count;
-    TCGv_i64 tcgv_counter_ptr2;
 
     tcgv_counter_ptr = tcg_const_i64((uint64_t)(intptr_t)counter_ptr);
     tcgv_count = tcg_const_i64(1);
-    tcgv_counter_ptr2 = tcg_const_i64((uint64_t)(intptr_t)counter_ptr2);
 
     args[0] = GET_TCGV_I64(tcgv_counter_ptr);
     args[1] = GET_TCGV_I64(tcgv_count);
-    args[2] = GET_TCGV_I64(tcgv_counter_ptr2);
 
-    tcg_gen_callN(tpi->tcg_ctx, update_counters, TCG_CALL_DUMMY_ARG, 3, args);
+    tcg_gen_callN(tpi->tcg_ctx, update_counter, TCG_CALL_DUMMY_ARG, 2, args);
 
-    tcg_temp_free_i64(tcgv_counter_ptr2);
     tcg_temp_free_i64(tcgv_counter_ptr);
     tcg_temp_free_i64(tcgv_count);
+}
+
+static int insert_op_entry(const char *op_name, int cs_op_idx)
+{
+    /* Called from translation only, no need to synchronize. */
+    str_hash_entry_t *op_entry;
+
+    op_entry =
+        g_hash_table_lookup(op_hash, op_name);
+    if (op_entry == NULL) {
+        assert(op_current_idx < INS_MAX_COUNT);
+        op_entry = g_new(str_hash_entry_t, 1);
+        op_entry->name = g_strdup(op_name);
+        op_entry->serial_idx = op_current_idx;
+        op_entry->cs_idx = cs_op_idx;
+        g_hash_table_insert(op_hash,
+                            (gpointer)op_entry->name,
+                            op_entry);
+        op_entries[op_current_idx] = op_entry;
+        op_current_idx++;
+    }
+    return op_entry->serial_idx;
+}
+
+static int insert_grp_entry(const char *grp_name, int cs_grp_idx)
+{
+    str_hash_entry_t *grp_entry;
+
+    grp_entry =
+        g_hash_table_lookup(grp_hash, grp_name);
+    if (grp_entry == NULL) {
+        assert(grp_current_idx < INS_MAX_COUNT);
+        grp_entry = g_new(str_hash_entry_t, 1);
+        grp_entry->name = g_strdup(grp_name);
+        grp_entry->serial_idx = grp_current_idx;
+        grp_entry->cs_idx = cs_grp_idx;
+        g_hash_table_insert(grp_hash,
+                            (gpointer)grp_entry->name,
+                            grp_entry);
+        grp_entries[grp_current_idx] = grp_entry;
+        grp_current_idx++;
+    }
+    return grp_entry->serial_idx;
 }
 
 static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_opcode)
@@ -177,16 +240,14 @@ static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_op
     switch(tpi_opcode->operator) {
     case INDEX_op_qemu_ld_i32:
     case INDEX_op_qemu_ld_i64:
-        gen_update_counters(tpi, &ld_bytes,
-                            1 << (get_memop(tpi_opcode->opargs[2]) & MO_SIZE),
-                            NULL);
+        gen_update_counter(tpi, &ld_bytes,
+                           1 << (get_memop(tpi_opcode->opargs[2]) & MO_SIZE));
         return;
 
     case INDEX_op_qemu_st_i32:
     case INDEX_op_qemu_st_i64:
-        gen_update_counters(tpi, &st_bytes,
-                            1 << (get_memop(tpi_opcode->opargs[2]) & MO_SIZE),
-                            NULL);
+        gen_update_counter(tpi, &st_bytes,
+                           1 << (get_memop(tpi_opcode->opargs[2]) & MO_SIZE));
         return;
     case INDEX_op_insn_start:
         break;
@@ -199,22 +260,21 @@ static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_op
     if (count > 0) {
         cs_insn *insn = &insns[0];
         cs_detail *detail = insn->detail;
-        if (insn->id == 0 || insn->id >= CS_INS_COUNT) {
-            /* We may get an instruction id out of range, force it to 0 (unknown). */
-            gen_update_counters(tpi, &op_count[0], 1, &icount_total);
-        } else {
-            gen_update_counters(tpi, &op_count[insn->id], 1, &icount_total);
-        }
+        int serial_idx = insert_op_entry(insn->mnemonic, insn->id);
+        gen_update_counter(tpi, &op_count[serial_idx], 1);
         if (detail->groups_count > 0) {
             int n;
             for (n = 0; n < detail->groups_count; n++) {
                 int group = detail->groups[n];
+                int serial_idx;
                 assert(group < CS_GRP_COUNT);
-                gen_update_counters(tpi, &group_count[group], 1, NULL);
+                serial_idx = insert_grp_entry(cs_group_name(cs_handle, group), group);
+                gen_update_counter(tpi, &grp_count[serial_idx], 1);
             }
         } else {
             /* If not in any group, add to group 0 (nogroup). */
-            gen_update_counters(tpi, &group_count[0], 1, NULL);
+            int serial_idx = insert_grp_entry("nogroup", 0);
+            gen_update_counter(tpi, &grp_count[serial_idx], 1);
         }
         cs_free(insn, count);
     } else {
@@ -222,15 +282,17 @@ static void after_gen_opc(const TCGPluginInterface *tpi, const TPIOpCode *tpi_op
         uint64_t address;
         lookup_symbol3(tpi_opcode->pc, &symbol, &filename, &address);
         fprintf(tpi->output, "# WARNING: tcg/plugins/dyncount: unable to disassemble instruction at PC 0x%"PRIx64" (%s: %s + 0x%"PRIx64")\n", tpi_opcode->pc, filename, symbol, tpi_opcode->pc - address);
-        gen_update_counters(tpi, &op_count[0], 1, &icount_total);
-        gen_update_counters(tpi, &group_count[0], 1, NULL);
+        int serial_op_idx = insert_op_entry("_unknown_", 0);
+        int serial_grp_idx = insert_op_entry("nogroup", 0);
+        gen_update_counter(tpi, &op_count[serial_op_idx], 1);
+        gen_update_counter(tpi, &grp_count[serial_grp_idx], 1);
     }
 }
 
 void tpi_init(TCGPluginInterface *tpi)
 {
     TPI_INIT_VERSION_GENERIC(tpi);
-    TPI_DECL_FUNC_3(tpi, update_counters, void, i64, i64, i64);
+    TPI_DECL_FUNC_2(tpi, update_counter, void, i64, i64);
 
     if (cs_open(CS_ARCH, CS_MODE, &cs_handle) != CS_ERR_OK)
         abort();
@@ -240,8 +302,10 @@ void tpi_init(TCGPluginInterface *tpi)
     tpi->cpus_stopped = cpus_stopped;
     tpi->after_gen_opc = after_gen_opc;
 
-    group_count = g_malloc0(CS_GRP_COUNT * sizeof(uint64_t));
-    op_count = g_malloc0(CS_INS_COUNT * sizeof(uint64_t));
+    op_hash = g_hash_table_new_full(g_str_hash, g_str_equal, NULL,
+                                    free_str_hash_entry);
+    grp_hash = g_hash_table_new_full(g_str_hash, g_str_equal, NULL,
+                                     free_str_hash_entry);
 }
 
 #endif /* CONFIG_CAPSTONE */
