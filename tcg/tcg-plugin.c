@@ -37,6 +37,7 @@
 #include <glib.h>    /* glib2 objects/functions,*/
 #include <sys/sendfile.h> /* sendfile(2), */
 #include <execinfo.h>     /* backtrace(3), */
+#include <libgen.h>  /* dirname(3), */
 
 
 #include "tcg.h"
@@ -210,21 +211,29 @@ static void tcg_plugin_tpi_init(TCGPluginInterface *tpi)
     int status;
     ssize_t count;
     size_t size;
+    char *exec_dir;
 
     assert(tpi != NULL);
     assert(tpi->name != NULL);
 
     tcg_plugin_state_init();
 
+    exec_dir= qemu_get_exec_dir();
+
     /* Check if "name" refers to an installed plugin (short form).  */
-    if (tpi->name[0] != '.' && tpi->name[0] != '/') {
-        const char *format = CONFIG_QEMU_LIBEXECDIR "/" TARGET_NAME
-            "/" EMULATION_MODE "/tcg-plugin-%s.so";
-        size_t size = strlen(format) + strlen(tpi->name) - strlen("%s") + 1;
+    if (tpi->name[0] != '.' && tpi->name[0] != '/' &&
+        exec_dir != NULL && exec_dir[0] == '/') {
+        char *prefix;
+        const char *format;
+        size_t size;
 
+        prefix = dirname(exec_dir);
+        format = "%s/libexec/" TARGET_NAME "/" EMULATION_MODE "/tcg-plugin-%s.so";
+        size = strlen(format) + strlen(prefix) - strlen("%s") +
+            strlen(tpi->name) - strlen("%s") + 1;
         path = g_malloc0(size * sizeof(char));
-        snprintf(path, size, format, tpi->name);
-
+        snprintf(path, size, format, prefix, tpi->name);
+        g_free(exec_dir);
     } else {
         path = g_strdup(tpi->name);
     }

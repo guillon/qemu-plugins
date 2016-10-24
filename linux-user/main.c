@@ -4155,6 +4155,8 @@ int main(int argc, char **argv, char **envp)
     int ret;
     int execfd;
 
+    qemu_init_exec_dir(argv[0]);
+
     module_call_init(MODULE_INIT_QOM);
 
     if ((envlist = envlist_create()) == NULL) {
