@@ -192,7 +192,7 @@ typedef struct {
 #endif
 
 
-typedef void (*cache_miss_handler_t)();
+typedef void (*cache_miss_handler_t)(void);
 
 	/*
 	 * full specification of a cache
