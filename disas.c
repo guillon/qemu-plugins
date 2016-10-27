@@ -43,8 +43,44 @@ uint64_t find_symbol(const char *name, int is_elf_class64)
 
             return (uint64_t)SYMS(i, value);
         }
+
+#undef SYMS
     }
     return 0;
+}
+
+bool find_symbol_bounds(const char *name, bool is_elf_class64, uint64_t *start, uint64_t *size)
+{
+  struct syminfo *syminfo;
+  int i;
+
+  for (syminfo = syminfos; syminfo; syminfo = syminfo->next) {
+    struct elf64_sym *syms64 = NULL;
+    struct elf32_sym *syms32 = NULL;
+
+    if (is_elf_class64) {
+      syms64 = syminfo->disas_symtab.elf64;
+    }
+    else {
+      syms32 = syminfo->disas_symtab.elf32;
+    }
+
+#define SYMS(i, field) (is_elf_class64 ? syms64[(i)].st_ ## field  \
+                                       : syms32[(i)].st_ ## field)
+
+    for (i = 0; i < syminfo->disas_num_syms; i++) {
+      if (strcmp(name, syminfo->disas_strtab + SYMS(i, name))) {
+        continue;
+      }
+
+      *start = (uint64_t)SYMS(i, value);
+      *size  = (uint64_t)SYMS(i, size);
+      return true;
+    }
+
+#undef SYMS
+  }
+  return false;
 }
 
 /* On ARM, semi-hosting has no room for application exit code. To work
