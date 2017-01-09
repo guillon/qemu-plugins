@@ -801,6 +801,7 @@ void tcg_optimize(TCGContext *s);
 
 /* only used for debugging purposes */
 void tcg_dump_ops(TCGContext *s);
+void tcg_dump_op(TCGContext *s, const TCGOp *const op, FILE *dst);
 
 void dump_ops(const uint16_t *opc_buf, const TCGArg *opparam_buf);
 TCGv_i32 tcg_const_i32(int32_t val);
