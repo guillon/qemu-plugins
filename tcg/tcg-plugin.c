@@ -38,7 +38,7 @@
 #include <sys/sendfile.h> /* sendfile(2), */
 #include <execinfo.h>     /* backtrace(3), */
 #include <libgen.h>  /* dirname(3), */
-
+#include <stdarg.h>  /* va_arg(3) */
 
 #include "tcg.h"
 #include "tcg-op.h"
@@ -59,6 +59,7 @@ static struct {
     uint64_t low_pc;
     uint64_t high_pc;
     bool verbose;
+    bool multi_load; // whether loading a plugin multiple times is allowed. On by default.
 
     /* Ensure resources used by *_helper_code are protected from
        concurrent access when mutex_protected is true.  */
@@ -84,9 +85,28 @@ void tcg_plugin_load(const char *name)
     g_plugins_state.tpi_list = g_list_append(g_plugins_state.tpi_list, tpi);
 }
 
+/* Check if wanted is in list of expected strings passed as NULL terminated varargs */
+static bool stroneof(const char *wanted, ...) {
+    const char *expected;
+    bool found = false;
+
+    va_list ap;
+    va_start(ap, wanted);
+    while ((expected = va_arg(ap, const char *))) {
+        if (strcmp(wanted, expected) == 0) {
+            found = true;
+        }
+    }
+    va_end(ap);
+
+    return found;
+}
+
 /* Initialize global plugins state, unless already done. */
 static void tcg_plugin_state_init(void)
 {
+    const char *tmp;
+
     if (g_plugins_state.output != NULL) return;
 
     /* No TB chain with plugins as we must have an up to date
@@ -190,6 +210,15 @@ static void tcg_plugin_state_init(void)
         g_plugins_state.mutex_protected = (getenv("TPI_MUTEX_PROTECTED") != NULL);
         pthread_mutex_init(&g_plugins_state.helper_mutex, NULL);
     }
+
+    tmp = getenv("TPI_MULTI_LOAD");
+
+    if (tmp && stroneof(tmp, "NO", "no", "N", "n", "off", "false", NULL)) {
+        g_plugins_state.multi_load = false;
+    } else {
+        /// default to multi-load being enabled.
+        g_plugins_state.multi_load = true;
+    }
 }
 
 /* Load the dynamic shared object "name" and call its function
@@ -204,13 +233,9 @@ static void tcg_plugin_tpi_init(TCGPluginInterface *tpi)
     tpi_init_t tpi_init;
     char *path = NULL;
     void *handle = NULL;
-    struct stat plugin_info = {0};
     int plugin_fd = -1;
     int plugin_instance_fd = -1;
     char *plugin_instance_path = NULL;
-    int status;
-    ssize_t count;
-    size_t size;
     char *exec_dir;
 
     assert(tpi != NULL);
@@ -239,41 +264,49 @@ static void tcg_plugin_tpi_init(TCGPluginInterface *tpi)
     }
     tpi->path_name = path;
 
-    plugin_fd = open(path, O_RDONLY);
-    if (plugin_fd < 0) {
-        fprintf(stderr, "plugin: error: can't open plugin at %s: %s\n", path, strerror(errno));
-        goto error;
-    }
-
     /*
      * Make a copy of the plugin file in order to allow multiple loads
      * of the same plugin.
      */
-    plugin_instance_path = g_strdup("/tmp/qemu-plugin-XXXXXX");
-    tpi->instance_path_name = plugin_instance_path;
+    if (g_plugins_state.multi_load) {
+        struct stat plugin_info = {0};
+        ssize_t count, size;
+        int status;
 
-    plugin_instance_fd = mkstemp(plugin_instance_path);
-    if (plugin_instance_fd < 0) {
-        fprintf(stderr, "plugin: error: can't create temporary file: %s\n", strerror(errno));
-        goto error;
-    }
-
-    status = fstat(plugin_fd, &plugin_info);
-    if (status != 0) {
-        fprintf(stderr, "plugin: error: can't stat file at %s: %s\n", path, strerror(errno));
-        goto error;
-    }
-
-    size = plugin_info.st_size;
-    count = 0;
-    while (count < size) {
-        size -= count;
-        count = sendfile(plugin_instance_fd, plugin_fd, NULL, size);
-        if (count < 0) {
-            fprintf(stderr, "plugin: error: can't copy plugin file at %s: %s\n", path, strerror(errno));
+        plugin_fd = open(path, O_RDONLY);
+        if (plugin_fd < 0) {
+            fprintf(stderr, "plugin: error: can't open plugin at %s: %s\n", path, strerror(errno));
             goto error;
         }
+
+        plugin_instance_path = g_strdup("/tmp/qemu-plugin-XXXXXX");
+
+        plugin_instance_fd = mkstemp(plugin_instance_path);
+        if (plugin_instance_fd < 0) {
+            fprintf(stderr, "plugin: error: can't create temporary file: %s\n", strerror(errno));
+            goto error;
+        }
+
+        status = fstat(plugin_fd, &plugin_info);
+        if (status != 0) {
+            fprintf(stderr, "plugin: error: can't stat file at %s: %s\n", path, strerror(errno));
+            goto error;
+        }
+
+        size = plugin_info.st_size;
+        count = 0;
+        while (count < size) {
+            size -= count;
+            count = sendfile(plugin_instance_fd, plugin_fd, NULL, size);
+            if (count < 0) {
+                fprintf(stderr, "plugin: error: can't copy plugin file at %s: %s\n", path, strerror(errno));
+                goto error;
+            }
+        }
+    } else {
+        plugin_instance_path = g_strdup(path);
     }
+    tpi->instance_path_name = plugin_instance_path;
 
     /*
      * Load the dynamic shared object and retreive its symbol
@@ -393,7 +426,8 @@ static void tcg_plugin_tpi_init(TCGPluginInterface *tpi)
 
     close(plugin_fd);
     close(plugin_instance_fd);
-    unlink(plugin_instance_path);
+    if (g_plugins_state.multi_load)
+        unlink(plugin_instance_path);
 
     return;
 
@@ -409,7 +443,8 @@ error:
 
     if (plugin_instance_fd >= 0) {
         close(plugin_instance_fd);
-        unlink(plugin_instance_path);
+        if (g_plugins_state.multi_load)
+            unlink(plugin_instance_path);
     }
 
     if (handle != NULL)

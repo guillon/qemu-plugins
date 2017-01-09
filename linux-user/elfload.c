@@ -2053,7 +2053,7 @@ static int symfind(const void *s0, const void *s1)
     return result;
 }
 
-static const char *lookup_symbolxx(struct syminfo *s, target_ulong orig_addr, target_ulong *symbol_addr)
+static const char *lookup_symbolxx(struct syminfo *s, target_ulong orig_addr, target_ulong *symbol_addr, target_ulong *symbol_size)
 {
 #if ELF_CLASS == ELFCLASS32
     struct elf_sym *syms = s->disas_symtab.elf32;
@@ -2067,10 +2067,12 @@ static const char *lookup_symbolxx(struct syminfo *s, target_ulong orig_addr, ta
     sym = bsearch(&orig_addr, syms, s->disas_num_syms, sizeof(*syms), symfind);
     if (sym != NULL) {
         if (symbol_addr != NULL) *symbol_addr = sym->st_value;
+        if (symbol_size != NULL) *symbol_size = sym->st_size;
         return s->disas_strtab + sym->st_name;
     }
 
     if (symbol_addr != NULL) *symbol_addr = orig_addr;
+    if (symbol_size != NULL) *symbol_size = 0;
     return "";
 }
 

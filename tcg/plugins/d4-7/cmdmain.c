@@ -1538,7 +1538,7 @@ do1stats (d4cache *c)
 				demand_comp_data / NONZERO(demand_data),
 				c->comp_blockmiss[D4XREAD] / NONZERO(c->blockmiss[D4XREAD]),
 				c->comp_blockmiss[D4XWRITE] / NONZERO(c->blockmiss[D4XWRITE]),
-				c->comp_blockmiss[D4XMISC]) / NONZERO(c->blockmiss[D4XMISC]);
+				c->comp_blockmiss[D4XMISC] / NONZERO(c->blockmiss[D4XMISC]));
 
 			printf(	"   DB capacity fract	%12.4f	%12.4f	%12.4f	%12.4f	%12.4f	%12.4f\n",
 				demand_cap_alltype / NONZERO(demand_alltype),
