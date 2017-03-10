@@ -131,3 +131,6 @@ trace-dtrace-root.h
 trace-dtrace-root.dtrace
 trace-ust-all.h
 trace-ust-all.c
+/syscall_fwd_compat.h
+/qemu-version.h
+/qemu-version.h.tmp

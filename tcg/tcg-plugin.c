@@ -39,6 +39,7 @@
 #include <execinfo.h>     /* backtrace(3), */
 #include <libgen.h>  /* dirname(3), */
 #include <stdarg.h>  /* va_arg(3) */
+#include <inttypes.h>
 
 #include "tcg.h"
 #include "tcg-op.h"
@@ -73,6 +74,417 @@ static struct {
     GList *tpi_list;
 } g_plugins_state;
 
+static void TPIParam_ctor(TPIParam *p, const char *name, void *value_ptr,
+                          enum TPI_PARAM_TYPE type, const char *description)
+{
+    p->name = g_strdup(name);
+    p->type = type;
+    p->value_ptr = value_ptr;
+    p->description = g_strdup(description);
+}
+
+static void TPIParam_dtor(TPIParam *p)
+{
+    g_free(p->name);
+    g_free(p->description);
+}
+
+static int g_tree_compare_string_keys(const void *a, const void *b, void *data)
+{
+    (void)data;
+    return strcmp((const char *)a, (const char *)b);
+}
+
+static void g_tree_delete_TPIParam_value(void *data)
+{
+    TPIParam *p = (TPIParam *)data;
+    TPIParam_dtor(p);
+    g_free(p);
+}
+
+static TPIParam *get_parameter_pointer(const TCGPluginInterface *tpi,
+                                       const char *name)
+{
+    return (TPIParam *)g_tree_lookup(tpi->parameters, name);
+}
+
+static const char *param_type_to_string(enum TPI_PARAM_TYPE type)
+{
+    switch (type) {
+    case TPI_PARAM_TYPE_BOOL:
+        return "bool";
+        break;
+    case TPI_PARAM_TYPE_INT:
+        return "int";
+        break;
+    case TPI_PARAM_TYPE_UINT:
+        return "uint";
+        break;
+    case TPI_PARAM_TYPE_STRING:
+        return "string";
+        break;
+    case TPI_PARAM_TYPE_DOUBLE:
+        return "double";
+        break;
+    }
+
+    assert(false);
+    return "";
+}
+
+TCGPluginInterface *tpi_find_plugin(const char *name)
+{
+    if (!name)
+        return NULL;
+
+    for (GList *l = g_plugins_state.tpi_list; l != NULL; l = l->next) {
+        TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
+        if (strstr(tpi->name, name) != NULL)
+            return tpi;
+    }
+
+    return NULL;
+}
+
+static char *param_value_to_string(const TCGPluginInterface *tpi,
+                                   const char *name,
+                                   enum TPI_PARAM_TYPE type)
+{
+    GString *res = g_string_new(NULL);
+    bool has_result = false;
+
+    switch (type) {
+    case TPI_PARAM_TYPE_BOOL: {
+        bool value = false;
+        has_result = tpi_get_param_bool(tpi, name, &value);
+        g_string_append_printf(res, "%s", value ? "true" : "false");
+    } break;
+    case TPI_PARAM_TYPE_INT: {
+        int64_t value = 0;
+        has_result = tpi_get_param_int(tpi, name, &value);
+        g_string_append_printf(res, "%" PRId64, value);
+    } break;
+    case TPI_PARAM_TYPE_UINT: {
+        uint64_t value = 0;
+        has_result = tpi_get_param_uint(tpi, name, &value);
+        g_string_append_printf(res, "%" PRIu64, value);
+    } break;
+    case TPI_PARAM_TYPE_STRING: {
+        char *value = NULL;
+        has_result = tpi_get_param_string(tpi, name, &value);
+        g_string_append_printf(res, "\"%s\"", value);
+        g_free(value);
+    } break;
+    case TPI_PARAM_TYPE_DOUBLE: {
+        double value = 0;
+        has_result = tpi_get_param_double(tpi, name, &value);
+        g_string_append_printf(res, "%lf", value);
+    } break;
+    }
+
+    char *result = g_string_free(res, false);
+    if (has_result)
+        return result;
+
+    g_free(result);
+    return NULL;
+}
+
+void tpi_set_active(TCGPluginInterface *tpi, bool active)
+{
+    if (tpi->_active == active)
+        return;
+
+    tpi->_active = active;
+
+    /* flush translation cache on every cpu */
+    CPUState* cpu;
+    CPU_FOREACH(cpu)
+    {
+        tb_flush(cpu);
+    }
+
+    if (tpi->active_changed)
+        tpi->active_changed(active);
+}
+
+static bool command_enable_plugin(TCGPluginInterface *tpi,
+                                  char **answer)
+{
+    tpi_set_active(tpi, true);
+    return true;
+}
+
+static bool command_disable_plugin(TCGPluginInterface *tpi,
+                                   char **answer)
+{
+    tpi_set_active(tpi, false);
+    return true;
+}
+
+static int foreach_parameters_tree_get_parameters(void* key, void* value,
+                                                  void* data)
+{
+    const TPIParam *param = (const TPIParam *)value;
+    void **data_array = (void **)data;
+    GString *res = (GString *)(data_array[0]);
+    const TCGPluginInterface *tpi = (const TCGPluginInterface *)(data_array[1]);
+    bool first = (res->len == 1); /* "[" */
+
+    if (!first)
+        g_string_append(res, ",");
+    g_string_append_printf(res, "\"%s\": ", param->name);
+    g_string_append(res, "{");
+    g_string_append_printf(res, "\"description\": \"%s\", ",
+                           param->description);
+    g_string_append_printf(res, "\"type\": \"%s\", ",
+                           param_type_to_string(param->type));
+    char *param_value = param_value_to_string(tpi, param->name, param->type);
+    g_string_append_printf(res, "\"value\": %s", param_value);
+    g_free(param_value);
+    g_string_append(res, "}\n");
+
+    return 0;
+}
+
+static bool command_get_parameters(const TCGPluginInterface *tpi,
+                                   char **answer)
+{
+    GString *res = g_string_new(NULL);
+
+    void* data[] = {res, (void*)tpi};
+
+    g_string_append(res, "{");
+    g_tree_foreach(tpi->parameters, &foreach_parameters_tree_get_parameters,
+                   data);
+    g_string_append(res, "}");
+
+    *answer = g_string_free(res, false);
+    return true;
+}
+
+static bool command_set_parameter(const TCGPluginInterface *tpi, char **answer,
+                                  const char *param_name, const char *value_str)
+{
+    TPIParam *p = get_parameter_pointer(tpi, param_name);
+    if (!p) {
+        *answer = g_strdup("parameter not found");
+        return false;
+    }
+
+    bool bad_format = false;
+    bool accepted_value = false;
+
+    switch (p->type) {
+    case TPI_PARAM_TYPE_BOOL: {
+        bool value = false;
+        if (strcmp(value_str, "true") == 0 || strcmp(value_str, "1") == 0) {
+            value = true;
+        } else if (strcmp(value_str, "false") == 0 ||
+                   strcmp(value_str, "0") == 0) {
+            value = false;
+        } else {
+            bad_format = true;
+            goto end;
+        }
+        accepted_value = tpi_set_param_bool(tpi, param_name, value, answer);
+    } break;
+    case TPI_PARAM_TYPE_INT: {
+        int64_t value = 0;
+        if (sscanf(value_str, "%" SCNd64, &value) != 1) {
+            bad_format = true;
+            goto end;
+        }
+        accepted_value = tpi_set_param_int(tpi, param_name, value, answer);
+    } break;
+    case TPI_PARAM_TYPE_UINT: {
+        uint64_t value = 0;
+        if (sscanf(value_str, "%" SCNu64, &value) != 1) {
+            bad_format = true;
+            goto end;
+        }
+        accepted_value = tpi_set_param_uint(tpi, param_name, value, answer);
+    } break;
+    case TPI_PARAM_TYPE_STRING:
+        accepted_value =
+            tpi_set_param_string(tpi, param_name, value_str, answer);
+        break;
+    case TPI_PARAM_TYPE_DOUBLE: {
+        double value = 0;
+        if (sscanf(value_str, "%lf", &value) != 1) {
+            bad_format = true;
+            goto end;
+        }
+        accepted_value = tpi_set_param_double(tpi, param_name, value, answer);
+    } break;
+    }
+
+end:
+    if (bad_format) {
+        *answer = g_strdup("bad format for parameter");
+    }
+    return accepted_value && !bad_format;
+}
+
+/* return list of plugins and their status */
+static bool command_get_plugins(char **answer)
+{
+    GString *res = g_string_new(NULL);
+
+    g_string_append(res, "[");
+
+    bool first = true;
+    for (GList *l = g_plugins_state.tpi_list; l != NULL; l = l->next) {
+        const TCGPluginInterface *tpi = (const TCGPluginInterface *)l->data;
+        if (!first) {
+            g_string_append(res, ",");
+        } else {
+            first = false;
+        }
+        g_string_append_printf(res, "{\"name\": \"%s\", \"active\": %s}",
+                               tpi->name, tpi->_active ? "true" : "false");
+    }
+
+    g_string_append(res, "]");
+
+    *answer = g_string_free(res, false);
+    return true;
+}
+
+enum TPI_PLUGIN_COMMAND
+{
+    TPI_PLUGIN_COMMAND_GET_PLUGINS,
+    TPI_PLUGIN_COMMAND_GET_PARAMETERS,
+    TPI_PLUGIN_COMMAND_SET_PARAMETER,
+    TPI_PLUGIN_COMMAND_ENABLE_PLUGIN,
+    TPI_PLUGIN_COMMAND_DISABLE_PLUGIN,
+    TPI_PLUGIN_COMMAND_UNKNOWN
+};
+
+static enum TPI_PLUGIN_COMMAND string_to_plugin_command(const char *command)
+{
+    if (strcmp(command, "get-plugins") == 0) {
+        return TPI_PLUGIN_COMMAND_GET_PLUGINS;
+    } else if (strcmp(command, "get-parameters") == 0) {
+        return TPI_PLUGIN_COMMAND_GET_PARAMETERS;
+    } else if (strcmp(command, "set-parameter") == 0) {
+        return TPI_PLUGIN_COMMAND_SET_PARAMETER;
+    } else if (strcmp(command, "enable-plugin") == 0) {
+        return TPI_PLUGIN_COMMAND_ENABLE_PLUGIN;
+    } else if (strcmp(command, "disable-plugin") == 0) {
+        return TPI_PLUGIN_COMMAND_DISABLE_PLUGIN;
+    } else {
+        return TPI_PLUGIN_COMMAND_UNKNOWN;
+    }
+}
+
+static bool handle_command(enum TPI_PLUGIN_COMMAND command_type, char **answer,
+                           GList *args, unsigned int nb_args)
+{
+    /* check if command needs a plugin name */
+    TCGPluginInterface *tpi = NULL;
+    switch (command_type) {
+    case TPI_PLUGIN_COMMAND_GET_PLUGINS:
+    case TPI_PLUGIN_COMMAND_UNKNOWN:
+        break;
+    case TPI_PLUGIN_COMMAND_SET_PARAMETER:
+    case TPI_PLUGIN_COMMAND_GET_PARAMETERS:
+    case TPI_PLUGIN_COMMAND_ENABLE_PLUGIN:
+    case TPI_PLUGIN_COMMAND_DISABLE_PLUGIN:
+        if (nb_args < 1) {
+            *answer = g_strdup("expect plugin_name as first arg");
+            return false;
+        }
+        const char *plugin_name = (const char *)g_list_nth_data(args, 0);
+        tpi = tpi_find_plugin(plugin_name);
+        if (!tpi) {
+            *answer = g_strdup("plugin not found");
+            return false;
+        }
+    }
+
+    /* treat command */
+    switch (command_type) {
+    case TPI_PLUGIN_COMMAND_GET_PLUGINS:
+        if (nb_args != 0) {
+            *answer = g_strdup("expect 0 args");
+            return false;
+        }
+        return command_get_plugins(answer);
+        break;
+    case TPI_PLUGIN_COMMAND_GET_PARAMETERS: {
+        if (nb_args != 1) {
+            *answer = g_strdup("expect 1 arg, usage: plugin_name");
+            return false;
+        }
+        return command_get_parameters(tpi, answer);
+    } break;
+    case TPI_PLUGIN_COMMAND_SET_PARAMETER: {
+        if (nb_args != 3) {
+            *answer =
+                g_strdup("expect 3 arg, usage: plugin_name param_name value");
+            return false;
+        }
+        const char *param_name = (const char *)g_list_nth_data(args, 1);
+        const char *value = (const char *)g_list_nth_data(args, 2);
+        return command_set_parameter(tpi, answer, param_name, value);
+    } break;
+    case TPI_PLUGIN_COMMAND_ENABLE_PLUGIN: {
+        if (nb_args != 1) {
+            *answer = g_strdup("expect 1 arg, usage: plugin_name");
+            return false;
+        }
+        return command_enable_plugin(tpi, answer);
+    } break;
+    case TPI_PLUGIN_COMMAND_DISABLE_PLUGIN: {
+        if (nb_args != 1) {
+            *answer = g_strdup("expect 1 arg, usage: plugin_name");
+            return false;
+        }
+        return command_disable_plugin(tpi, answer);
+    } break;
+    case TPI_PLUGIN_COMMAND_UNKNOWN:
+        *answer = g_strdup("unknown command");
+        return false;
+        break;
+    }
+
+        return true;
+}
+
+bool tcg_plugin_treat_command(const char *command, char **answer)
+{
+    char *command_buffer = g_strdup(command);
+    bool success = false;
+
+    GList *command_elem = NULL;
+
+    /* split command in list of args */
+    const char *delim = " ";
+    char *save_ptr = NULL;
+    char *token = strtok_r(command_buffer, delim, &save_ptr);
+    while (token != NULL) {
+        command_elem = g_list_append(command_elem, token);
+        token = strtok_r(NULL, delim, &save_ptr);
+    }
+
+    if (command_elem == NULL) {
+        *answer = g_strdup("no command given");
+        goto end;
+    }
+
+    const char *command_name = (const char *)g_list_nth_data(command_elem, 0);
+    GList *args = g_list_nth(command_elem, 1);
+    unsigned int nb_args = g_list_length(args);
+    enum TPI_PLUGIN_COMMAND command_type =
+        string_to_plugin_command(command_name);
+    success = handle_command(command_type, answer, args, nb_args);
+
+end:
+    free(command_buffer);
+    g_list_free(command_elem);
+    return success;
+}
 
 void tcg_plugin_load(const char *name)
 {
@@ -351,11 +763,17 @@ static void tcg_plugin_tpi_init(TCGPluginInterface *tpi)
     tpi->low_pc = g_plugins_state.low_pc;
     tpi->high_pc = g_plugins_state.high_pc;
 
+    tpi->parameters = g_tree_new_full(g_tree_compare_string_keys, NULL, NULL,
+                                      g_tree_delete_TPIParam_value);
+
     /*
      * Tell the plugin to initialize itself.
      */
 
     tpi_init(tpi);
+
+    /* activate plugin by default */
+    tpi_set_active(tpi, true);
 
     /*
      * Perform some sanity checks to ensure this TCG plugin is
@@ -692,6 +1110,8 @@ void tcg_plugin_cpus_stopped(void)
     for (l = g_plugins_state.tpi_list; l != NULL; l = l->next)
     {
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
+        if (!tpi->_active)
+            continue;
         if (tcg_plugin_initialize(tpi))
             if (tpi->cpus_stopped)
                 TPI_CALLBACK_NOT_GENERIC(tpi, cpus_stopped);
@@ -705,6 +1125,8 @@ void tcg_plugin_before_gen_tb(CPUState *env, TranslationBlock *tb)
     for (l = g_plugins_state.tpi_list; l != NULL; l = l->next)
     {
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
+        if (!tpi->_active)
+            continue;
         if (tcg_plugin_initialize(tpi)) {
             tpi->_current_pc = tb->pc;
             tpi->_current_tb = tb;
@@ -713,6 +1135,8 @@ void tcg_plugin_before_gen_tb(CPUState *env, TranslationBlock *tb)
     for (l = g_plugins_state.tpi_list; l != NULL; l = l->next)
     {
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
+        if (!tpi->_active)
+            continue;
         if (tcg_plugin_initialize(tpi)) {
             tcg_plugin_tpi_before_gen_tb(tpi, env, tb);
         }
@@ -726,6 +1150,8 @@ void tcg_plugin_after_gen_tb(CPUState *env, TranslationBlock *tb)
     for (l = g_plugins_state.tpi_list; l != NULL; l = l->next)
     {
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
+        if (!tpi->_active)
+            continue;
         if (tcg_plugin_initialize(tpi)) {
             tcg_plugin_tpi_after_gen_tb(tpi, env, tb);
         }
@@ -733,6 +1159,8 @@ void tcg_plugin_after_gen_tb(CPUState *env, TranslationBlock *tb)
     for (l = g_plugins_state.tpi_list; l != NULL; l = l->next)
     {
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
+        if (!tpi->_active)
+            continue;
         if (tcg_plugin_initialize(tpi)) {
             tpi->_current_pc = 0;
             tpi->_current_tb = NULL;
@@ -747,6 +1175,8 @@ void tcg_plugin_after_gen_opc(TCGOp *opcode, TCGArg *opargs, uint8_t nb_args)
     for (l = g_plugins_state.tpi_list; l != NULL; l = l->next)
     {
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
+        if (!tpi->_active)
+            continue;
         if (tcg_plugin_initialize(tpi))
             tcg_plugin_tpi_after_gen_opc(tpi, opcode, opargs, nb_args);
     }
@@ -789,4 +1219,263 @@ extern uint32_t tpi_tb_size(const TranslationBlock* tb)
 extern uint32_t tpi_tb_icount(const TranslationBlock* tb)
 {
     return tb->icount;
+}
+
+static void add_parameter_to_plugin(const TCGPluginInterface *tpi,
+                                    const char *name, void *value_ptr,
+                                    void *default_value_ptr,
+                                    enum TPI_PARAM_TYPE type,
+                                    const char *description)
+{
+    assert(tpi);
+    assert(name);
+    assert(value_ptr);
+    assert(default_value_ptr);
+
+    switch (type) {
+    case TPI_PARAM_TYPE_BOOL:
+        *(bool *)(value_ptr) = *(bool *)(default_value_ptr);
+        break;
+    case TPI_PARAM_TYPE_INT:
+        *(int64_t *)(value_ptr) = *(int64_t *)(default_value_ptr);
+        break;
+    case TPI_PARAM_TYPE_UINT:
+        *(uint64_t *)(value_ptr) = *(uint64_t *)(default_value_ptr);
+        break;
+    case TPI_PARAM_TYPE_STRING:
+        *(char **)(value_ptr) = g_strdup(*(const char **)(default_value_ptr));
+        break;
+    case TPI_PARAM_TYPE_DOUBLE:
+        *(double *)(value_ptr) = *(double *)(default_value_ptr);
+        break;
+    }
+
+    TPIParam *param = g_malloc0(sizeof(TPIParam));
+    TPIParam_ctor(param, name, value_ptr, type, description);
+
+    g_tree_replace(tpi->parameters, param->name, param);
+}
+
+void tpi_declare_param_bool(const TCGPluginInterface *tpi, const char *name,
+                            bool *value_ptr, bool default_value,
+                            const char *description)
+{
+    add_parameter_to_plugin(tpi, name, value_ptr, &default_value,
+                            TPI_PARAM_TYPE_BOOL, description);
+}
+
+void tpi_declare_param_uint(const TCGPluginInterface *tpi, const char *name,
+                            uint64_t *value_ptr, uint64_t default_value,
+                            const char *description)
+{
+    add_parameter_to_plugin(tpi, name, value_ptr, &default_value,
+                            TPI_PARAM_TYPE_UINT, description);
+}
+
+void tpi_declare_param_int(const TCGPluginInterface *tpi, const char *name,
+                           int64_t *value_ptr, int64_t default_value,
+                           const char *description)
+{
+    add_parameter_to_plugin(tpi, name, value_ptr, &default_value,
+                            TPI_PARAM_TYPE_INT, description);
+}
+
+void tpi_declare_param_double(const TCGPluginInterface *tpi, const char *name,
+                              double *value_ptr, double default_value,
+                              const char *description)
+{
+    add_parameter_to_plugin(tpi, name, value_ptr, &default_value,
+                            TPI_PARAM_TYPE_DOUBLE, description);
+}
+
+void tpi_declare_param_string(const TCGPluginInterface *tpi, const char *name,
+                              char **value_ptr, const char *default_value,
+                              const char *description)
+{
+    add_parameter_to_plugin(tpi, name, value_ptr, &default_value,
+                            TPI_PARAM_TYPE_STRING, description);
+}
+
+static bool set_parameter_value(const TCGPluginInterface *tpi, const char *name,
+                                void *new_value_ptr, char **error)
+{
+    TPIParam *p = get_parameter_pointer(tpi, name);
+
+    char *tmp_error = NULL;
+
+    if (!p) {
+        tmp_error = g_strdup("parameter does not exist");
+        goto error;
+    }
+
+    switch (p->type) {
+    case TPI_PARAM_TYPE_BOOL: {
+        bool value = *(bool *)new_value_ptr;
+        bool *value_ptr = (bool *)p->value_ptr;
+        if (tpi->check_param_bool &&
+            !tpi->check_param_bool(tpi, name, *value_ptr, value, &tmp_error))
+            goto error;
+        *value_ptr = value;
+    } break;
+    case TPI_PARAM_TYPE_INT: {
+        int64_t value = *(int64_t *)new_value_ptr;
+        int64_t *value_ptr = (int64_t *)p->value_ptr;
+        if (tpi->check_param_int &&
+            !tpi->check_param_int(tpi, name, *value_ptr, value, &tmp_error))
+            goto error;
+        *value_ptr = value;
+    } break;
+    case TPI_PARAM_TYPE_UINT: {
+        uint64_t value = *(uint64_t *)new_value_ptr;
+        uint64_t *value_ptr = (uint64_t *)p->value_ptr;
+        if (tpi->check_param_uint &&
+            !tpi->check_param_uint(tpi, name, *value_ptr, value, &tmp_error))
+            goto error;
+        *value_ptr = value;
+    } break;
+    case TPI_PARAM_TYPE_STRING: {
+        const char *value = *(const char **)new_value_ptr;
+        char **value_ptr = (char **)p->value_ptr;
+        if (tpi->check_param_string &&
+            !tpi->check_param_string(tpi, name, *value_ptr, value, &tmp_error))
+            goto error;
+        g_free(*value_ptr);
+        *value_ptr = g_strdup(value);
+    } break;
+    case TPI_PARAM_TYPE_DOUBLE: {
+        double value = *(double *)new_value_ptr;
+        double *value_ptr = (double *)p->value_ptr;
+        if (tpi->check_param_double &&
+            !tpi->check_param_double(tpi, name, *value_ptr, value, &tmp_error))
+            goto error;
+        *value_ptr = value;
+    } break;
+    }
+
+    return true;
+error:
+    if (error == NULL)
+        g_free(tmp_error);
+    else
+        *error = tmp_error;
+
+    return false;
+}
+
+bool tpi_set_param_bool(const TCGPluginInterface *tpi, const char *name,
+                        bool value, char **error)
+{
+    return set_parameter_value(tpi, name, &value, error);
+}
+
+bool tpi_set_param_uint(const TCGPluginInterface *tpi, const char *name,
+                        uint64_t value, char **error)
+{
+    return set_parameter_value(tpi, name, &value, error);
+}
+
+bool tpi_set_param_int(const TCGPluginInterface *tpi, const char *name,
+                       int64_t value, char **error)
+{
+    return set_parameter_value(tpi, name, &value, error);
+}
+
+bool tpi_set_param_double(const TCGPluginInterface *tpi, const char *name,
+                          double value, char **error)
+{
+    return set_parameter_value(tpi, name, &value, error);
+}
+
+bool tpi_set_param_string(const TCGPluginInterface *tpi, const char *name,
+                          const char *value, char **error)
+{
+    return set_parameter_value(tpi, name, &value, error);
+}
+
+static bool get_parameter_value(const TCGPluginInterface *tpi,
+                                 const char *name, void *value_ptr)
+{
+    TPIParam *p = get_parameter_pointer(tpi, name);
+    if (!p)
+        return false;
+
+    switch (p->type) {
+    case TPI_PARAM_TYPE_BOOL: {
+        bool value = false;
+        if (!tpi->get_param_bool || !tpi->get_param_bool(tpi, name, &value)) {
+            value = *(bool *)p->value_ptr;
+        }
+        *(bool *)value_ptr = value;
+    } break;
+    case TPI_PARAM_TYPE_INT: {
+        int64_t value = 0;
+        if (!tpi->get_param_int || !tpi->get_param_int(tpi, name, &value)) {
+            value = *(int64_t *)p->value_ptr;
+        }
+        *(int64_t *)value_ptr = value;
+    } break;
+    case TPI_PARAM_TYPE_UINT: {
+        uint64_t value = 0;
+        if (!tpi->get_param_uint || !tpi->get_param_uint(tpi, name, &value)) {
+            value = *(uint64_t *)p->value_ptr;
+        }
+        *(uint64_t *)value_ptr = value;
+    } break;
+    case TPI_PARAM_TYPE_STRING: {
+        char *value = NULL;
+        if (!tpi->get_param_string ||
+            !tpi->get_param_string(tpi, name, &value)) {
+            value = g_strdup(*(const char **)p->value_ptr);
+        }
+        *(char **)value_ptr = value;
+    } break;
+    case TPI_PARAM_TYPE_DOUBLE: {
+        double value = 0;
+        if (!tpi->get_param_double ||
+            !tpi->get_param_double(tpi, name, &value)) {
+            value = *(double *)p->value_ptr;
+        }
+        *(double *)value_ptr = value;
+    } break;
+    }
+
+    return true;
+}
+
+bool tpi_get_param_bool(const TCGPluginInterface *tpi, const char *name,
+                        bool *value)
+{
+    return get_parameter_value(tpi, name, value);
+}
+
+bool tpi_get_param_uint(const TCGPluginInterface *tpi, const char *name,
+                        uint64_t *value)
+{
+    return get_parameter_value(tpi, name, value);
+}
+
+bool tpi_get_param_int(const TCGPluginInterface *tpi, const char *name,
+                       int64_t *value)
+{
+    return get_parameter_value(tpi, name, value);
+}
+
+bool tpi_get_param_double(const TCGPluginInterface *tpi, const char *name,
+                          double *value)
+{
+    return get_parameter_value(tpi, name, value);
+}
+
+bool tpi_get_param_string(const TCGPluginInterface *tpi, const char *name,
+                          char **value)
+{
+    return get_parameter_value(tpi, name, value);
+}
+
+void tcg_plugin_initialize_all(void)
+{
+    for (GList *l = g_plugins_state.tpi_list; l != NULL; l = l->next) {
+        TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
+        tcg_plugin_initialize(tpi);
+    }
 }

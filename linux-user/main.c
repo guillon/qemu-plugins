@@ -4878,6 +4878,10 @@ int main(int argc, char **argv, char **envp)
     ts->heap_limit = 0;
 #endif
 
+    /* initialize plugins to allow tpi_init to be called.
+     * Allows plugin to declare their parameters. */
+    tcg_plugin_initialize_all();
+
     if (gdbstub_port) {
         if (gdbserver_start(gdbstub_port) < 0) {
             fprintf(stderr, "qemu: could not open gdbserver on port %d\n",

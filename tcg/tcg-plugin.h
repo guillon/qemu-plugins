@@ -27,6 +27,8 @@
 #ifndef TCG_PLUGIN_H
 #define TCG_PLUGIN_H
 
+#include <glib.h>
+
 #include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qom/cpu.h"
@@ -47,6 +49,7 @@
 #ifdef CONFIG_TCG_PLUGIN
     bool tcg_plugin_enabled(void);
     void tcg_plugin_load(const char *name);
+    void tcg_plugin_initialize_all(void);
     void tcg_plugin_cpus_stopped(void);
     void tcg_plugin_before_gen_tb(CPUState *env, TranslationBlock *tb);
     void tcg_plugin_after_gen_tb(CPUState *env, TranslationBlock *tb);
@@ -55,6 +58,7 @@
 #else
 #   define tcg_plugin_enabled() false
 #   define tcg_plugin_load(dso)
+#   define tcg_plugin_initialize_all()
 #   define tcg_plugin_cpus_stopped()
 #   define tcg_plugin_before_gen_tb(env, tb)
 #   define tcg_plugin_after_gen_tb(env, tb)
@@ -65,6 +69,8 @@
 /***********************************************************************
  * TCG plugin interface.
  */
+
+extern bool tcg_plugin_treat_command(const char* command, char** answer);
 
 /* This structure shall be 64 bits, see call_tb_helper_code() for
  * details.  */
@@ -93,12 +99,30 @@ typedef struct
     void *data;
 } TPIOpCode;
 
+enum TPI_PARAM_TYPE
+{
+    TPI_PARAM_TYPE_BOOL,
+    TPI_PARAM_TYPE_INT,
+    TPI_PARAM_TYPE_UINT,
+    TPI_PARAM_TYPE_STRING,
+    TPI_PARAM_TYPE_DOUBLE,
+};
+
+typedef struct
+{
+    char *name;
+    enum TPI_PARAM_TYPE type;
+    void *value_ptr;
+    char *description;
+} TPIParam;
+
 struct TCGPluginInterface;
 typedef struct TCGPluginInterface TCGPluginInterface;
 
 typedef void (* tpi_cpus_stopped_t)(const TCGPluginInterface *tpi);
 
 typedef void (* tpi_before_gen_tb_t)(const TCGPluginInterface *tpi);
+
 typedef void (* tpi_after_gen_tb_t)(const TCGPluginInterface *tpi);
 
 typedef void (* tpi_after_gen_opc_t)(const TCGPluginInterface *tpi, const TPIOpCode *opcode);
@@ -115,7 +139,57 @@ typedef void (* tpi_pre_tb_helper_data_t)(const TCGPluginInterface *tpi,
                                           uint64_t *data1, uint64_t *data2,
                                           const TranslationBlock* tb);
 
-#define TPI_VERSION 7
+/* callback to get access to a parameter.
+ * Allows a plugin to compute dynamically a value when parameter is asked.
+ * If false is returned, value is read from location given at parameter
+ * declaration. */
+typedef bool (*tpi_get_param_bool_t)(const TCGPluginInterface *tpi,
+                                     const char *name, bool *value);
+typedef bool (*tpi_get_param_uint_t)(const TCGPluginInterface *tpi,
+                                     const char *name, uint64_t *value);
+typedef bool (*tpi_get_param_int_t)(const TCGPluginInterface *tpi,
+                                    const char *name, int64_t *value);
+typedef bool (*tpi_get_param_string_t)(const TCGPluginInterface *tpi,
+                                       const char *name, char **value);
+typedef bool (*tpi_get_param_double_t)(const TCGPluginInterface *tpi,
+                                       const char *name, double *value);
+
+/* callback to check if new value of a parameter is correct. */
+typedef bool (*tpi_check_param_bool_t)(const TCGPluginInterface *tpi,
+                                       const char *name,
+                                       bool old_value,
+                                       bool new_value,
+                                       char **error);
+
+typedef bool (*tpi_check_param_int_t)(const TCGPluginInterface *tpi,
+                                      const char *name,
+                                      int64_t old_value,
+                                      int64_t new_value,
+                                      char **error);
+
+typedef bool (*tpi_check_param_uint_t)(const TCGPluginInterface *tpi,
+                                       const char *name,
+                                       uint64_t old_value,
+                                       uint64_t new_value,
+                                       char **error);
+
+typedef bool (*tpi_check_param_string_t)(const TCGPluginInterface *tpi,
+                                         const char *name,
+                                         const char *old_value,
+                                         const char *new_value,
+                                         char **error);
+
+typedef bool (*tpi_check_param_double_t)(const TCGPluginInterface *tpi,
+                                         const char *name,
+                                         double old_value,
+                                         double new_value,
+                                         char **error);
+
+/* callback called when plugin was set active/inactive */
+typedef void (*tpi_active_changed_t)(bool new_state);
+
+#define TPI_VERSION 8
+
 struct TCGPluginInterface
 {
     /* Compatibility information.  */
@@ -144,6 +218,7 @@ struct TCGPluginInterface
 
     /* Some private state. */
     bool _in_gen_tpi_helper;
+    bool _active;
     uint64_t _current_pc;
     const TranslationBlock *_current_tb;
     TCGArg *_tb_info;
@@ -159,6 +234,24 @@ struct TCGPluginInterface
     tpi_pre_tb_helper_data_t pre_tb_helper_data;
     tpi_after_gen_opc_t after_gen_opc;
     tpi_decode_instr_t decode_instr;
+
+    /* Parameters callbacks */
+    tpi_check_param_bool_t check_param_bool;
+    tpi_check_param_int_t check_param_int;
+    tpi_check_param_uint_t check_param_uint;
+    tpi_check_param_string_t check_param_string;
+    tpi_check_param_double_t check_param_double;
+    tpi_get_param_bool_t get_param_bool;
+    tpi_get_param_int_t get_param_int;
+    tpi_get_param_uint_t get_param_uint;
+    tpi_get_param_string_t get_param_string;
+    tpi_get_param_double_t get_param_double;
+
+    /* Active callback */
+    tpi_active_changed_t active_changed;
+
+    /* Parameters */
+    GTree* parameters; /* string -> TPIParam */
 };
 
 #define TPI_INIT_VERSION(tpi) do {                                     \
@@ -189,7 +282,7 @@ struct TCGPluginInterface
    }
    void after_gen_opc(TCGPluginInterface *tpi,...) {
      ...
-     tcg_gen_callN(tpi->tcg_ctx, myfunction, GET_TCGV_I64(tcgv_ret), 2, args); 
+     tcg_gen_callN(tpi->tcg_ctx, myfunction, GET_TCGV_I64(tcgv_ret), 2, args);
      ...
    }
    Implementation note: the structure defined in _TPI_TCGHelperInfo_struct
@@ -331,6 +424,71 @@ static inline uint32_t tpi_nb_cpus(const TCGPluginInterface *tpi);
  */
 extern void tpi_exec_lock(const TCGPluginInterface *tpi);
 extern void tpi_exec_unlock(const TCGPluginInterface *tpi);
+
+/*
+ * Activate or deactivate a plugin.
+ * Flush translation cache on all cpus.
+ */
+extern void tpi_set_active(TCGPluginInterface *tpi, bool active);
+
+/*
+ * Find plugin from name.
+ * Name string must be found in name field of plugin.
+ * First occurence is returned.
+ */
+extern TCGPluginInterface *tpi_find_plugin(const char* name);
+
+/*
+ * Declare parameters functions.
+ */
+extern void tpi_declare_param_bool(const TCGPluginInterface *tpi,
+                                   const char *name, bool *value_ptr,
+                                   bool default_value, const char *description);
+extern void tpi_declare_param_uint(const TCGPluginInterface *tpi,
+                                   const char *name, uint64_t *value_ptr,
+                                   uint64_t default_value,
+                                   const char *description);
+extern void tpi_declare_param_int(const TCGPluginInterface *tpi,
+                                  const char *name, int64_t *value_ptr,
+                                  int64_t default_value,
+                                  const char *description);
+extern void tpi_declare_param_string(const TCGPluginInterface *tpi,
+                                     const char *name, char **value_ptr,
+                                     const char *default_value,
+                                     const char *description);
+extern void tpi_declare_param_double(const TCGPluginInterface *tpi,
+                                     const char *name, double *value_ptr,
+                                     double default_value,
+                                     const char *description);
+
+/*
+ * Parameters set/get functions.
+ * Set uses check_param callback if available.
+ * Get uses get_param callback if available.
+ */
+extern bool tpi_set_param_bool(const TCGPluginInterface *tpi, const char *name,
+                               bool value, char **error);
+extern bool tpi_set_param_uint(const TCGPluginInterface *tpi, const char *name,
+                               uint64_t value, char **error);
+extern bool tpi_set_param_int(const TCGPluginInterface *tpi, const char *name,
+                              int64_t value, char **error);
+extern bool tpi_set_param_string(const TCGPluginInterface *tpi,
+                                 const char *name, const char *value,
+                                 char **error);
+extern bool tpi_set_param_double(const TCGPluginInterface *tpi,
+                                 const char *name, double value,
+                                 char **error);
+extern bool tpi_get_param_bool(const TCGPluginInterface *tpi, const char *name,
+                               bool *value);
+extern bool tpi_get_param_uint(const TCGPluginInterface *tpi, const char *name,
+                               uint64_t *value);
+extern bool tpi_get_param_int(const TCGPluginInterface *tpi, const char *name,
+                              int64_t *value);
+extern bool tpi_get_param_string(const TCGPluginInterface *tpi,
+                                 const char *name,
+                                 char **value);
+extern bool tpi_get_param_double(const TCGPluginInterface *tpi,
+                                 const char *name, double *value);
 
 /*
  * Guest to host address and loads.

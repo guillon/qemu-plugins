@@ -97,4 +97,12 @@ void tpi_init(TCGPluginInterface *tpi)
 
     icount_total = g_malloc0(tpi->nb_cpus * sizeof(uint64_t));
     icount_total_args = g_malloc0(tpi->nb_cpus * sizeof(TCGArg *));
+
+    for (unsigned int i = 0; i < tpi->nb_cpus; ++i) {
+        char name[] = "cpu_icount_X";
+        unsigned int len = strlen(name);
+        name[len - 1] = '0' + i;
+        tpi_declare_param_uint(tpi, name, icount_total + i, 0,
+                               "number of instructions per cpu");
+    }
 }

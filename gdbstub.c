@@ -1165,6 +1165,35 @@ static int gdb_handle_packet(GDBState *s, const char *line_buf)
             break;
         }
 #endif /* !CONFIG_USER_ONLY */
+        const char* plugins_prefix = "qemu.plugins";
+        if (strncmp(p, plugins_prefix, strlen(plugins_prefix)) == 0) {
+            char separator = p[strlen(plugins_prefix)];
+            if (separator != ';')
+            {
+                put_packet(s, "KO;bad syntax");
+                break;
+            }
+
+            char *command_answer = NULL;
+            bool success = tcg_plugin_treat_command(
+                p + strlen(plugins_prefix) + 1, &command_answer);
+
+            if (!command_answer)
+                command_answer = g_strdup("");
+            char *answer = g_malloc0(strlen(command_answer) + 1 + 3);
+
+            if (success)
+                strcpy(answer, "OK;");
+            else
+                strcpy(answer, "KO;");
+
+            strcpy(answer + 3, command_answer);
+
+            put_packet(s, answer);
+            g_free(answer);
+            g_free(command_answer);
+            break;
+        }
         if (is_query_packet(p, "Supported", ':')) {
             snprintf(buf, sizeof(buf), "PacketSize=%x", MAX_PACKET_LENGTH);
             cc = CPU_GET_CLASS(first_cpu);

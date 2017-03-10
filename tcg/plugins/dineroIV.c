@@ -275,6 +275,25 @@ static void setup_caches_list(d4cache *instr_cache, d4cache *data_cache)
     }
 }
 
+static bool get_cache_misses(const TCGPluginInterface *tpi, const char *name,
+                             uint64_t *value)
+{
+    if (strcmp(name, "cache_misses") != 0)
+        return false;
+
+    *value = 0;
+
+    for (int type_idx = 0; type_idx < TYPE_NUM; type_idx++) {
+        for (int cache_idx = 0; cache_idx < caches_num; cache_idx++) {
+            double misses =
+                caches_list[cache_idx]->miss[index2dinero(type_idx)];
+            *value += misses;
+        }
+    }
+
+    return true;
+}
+
 static void dineroiv_sumup(FILE *output)
 {
     int cache_idx;
@@ -574,4 +593,10 @@ void tpi_init(TCGPluginInterface *tpi)
         fprintf(output, "---Copyright (C) 1985, 1989 Mark D. Hill.  All rights reserved.\n");
         fprintf(output, "---See -copyright option for details\n");
     }
+
+    static uint64_t cache_misses_fake;
+    tpi_declare_param_uint(tpi, "cache_misses", &cache_misses_fake, 0,
+                           "dynamically return cache_misses");
+    /* register special cache misses parameter */
+    tpi->get_param_uint = &get_cache_misses;
 }
