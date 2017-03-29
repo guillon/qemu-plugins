@@ -325,6 +325,7 @@ bool gdb_has_xml;
 #ifdef CONFIG_USER_ONLY
 /* XXX: This is not thread safe.  Do we care?  */
 static int gdbserver_fd = -1;
+static int gdbserver_port = -1;
 
 static int get_char(GDBState *s)
 {
@@ -1149,6 +1150,21 @@ static int gdb_handle_packet(GDBState *s, const char *line_buf)
             put_packet(s, buf);
             break;
         }
+        else if (!strcmp(p,"qemu.wait_for_reattach")) {
+            /* Wait for remote gdb to reconnect - allow to dump/restore
+             * qemu process without active TCP connection */
+            close(gdbserver_state->fd);
+            gdbserver_state->fd = -1;
+            close(gdbserver_fd);
+            gdbserver_fd = -1;
+
+            gdb_breakpoint_remove_all();
+            gdbserver_start(gdbserver_port);
+            CPU_FOREACH(cpu) {
+                gdb_handlesig(cpu, 0); /* stop all cpu */
+            }
+            break;
+        }
 #else /* !CONFIG_USER_ONLY */
         else if (strncmp(p, "Rcmd,", 5) == 0) {
             int len = strlen(p + 5);
@@ -1678,6 +1694,7 @@ int gdbserver_start(int port)
     if (gdbserver_fd < 0)
         return -1;
     /* accept connections */
+    gdbserver_port = port;
     gdb_accept();
     return 0;
 }
