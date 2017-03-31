@@ -14,32 +14,13 @@
 
 #include "qemu/fprintf-fn.h"
 
-#if defined(__arm__) || defined(__sparc__) || defined(__mips__) || defined(__hppa__) || defined(__ia64__)
-#define WORDS_ALIGNED
-#endif
-
 #define TFR(expr) do { if ((expr) != -1) break; } while (errno == EINTR)
 
 #include "qemu/option.h"
-#include "qemu/host-utils.h"
 
-void cpu_ticks_init(void);
-
-/* icount */
-void configure_icount(QemuOpts *opts, Error **errp);
-extern int use_icount;
-extern int icount_align_option;
-/* drift information for info jit command */
-extern int64_t max_delay;
-extern int64_t max_advance;
-void dump_drift_info(FILE *f, fprintf_function cpu_fprintf);
-
-#include "qemu/bswap.h"
-
-/* FIXME: Remove NEED_CPU_H.  */
-#ifdef NEED_CPU_H
-#include "cpu.h"
-#endif /* !defined(NEED_CPU_H) */
+/* Copyright string for -version arguments, About dialogs, etc */
+#define QEMU_COPYRIGHT "Copyright (c) 2003-2016 " \
+    "Fabrice Bellard and the QEMU Project developers"
 
 /* main function, renamed */
 #if defined(CONFIG_COCOA)
@@ -100,9 +81,6 @@ bool tcg_enabled(void);
 
 void cpu_exec_init_all(void);
 
-/* Unblock cpu */
-void qemu_cpu_kick_self(void);
-
 /* Count the number of fetched instructions.  */
 extern int count_ifetch;
 void show_all_ifetch_counters(void);
@@ -110,16 +88,6 @@ void show_all_ifetch_counters(void);
 /* Number of fetched instructions per second.  */
 extern uint64_t clock_ifetch;
 uint64_t convert_string_to_frequency(const char *string);
-
-/* work queue */
-struct qemu_work_item {
-    struct qemu_work_item *next;
-    void (*func)(void *data);
-    void *data;
-    int done;
-    bool free;
-};
-
 
 /**
  * Sends a (part of) iovec down a socket, yielding when the socket is full, or

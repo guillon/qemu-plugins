@@ -23,9 +23,14 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu-common.h"
+#include "cpu.h"
+#include "exec/exec-all.h"
 #include "tcg.h"
 #include "tcg-op.h"
 #include "tcg-plugin.h"
+#include "trace-tcg.h"
+#include "trace/mem.h"
 
 /* Reduce the number of ifdefs below.  This assumes that all uses of
    TCGV_HIGH and TCGV_LOW are properly protected by a conditional that
@@ -57,7 +62,7 @@ static void tcg_emit_op(TCGContext *ctx, TCGOpcode opc, int args)
     int pi = oi - 1;
 
     tcg_debug_assert(oi < OPC_BUF_SIZE);
-    ctx->gen_last_op_idx = oi;
+    ctx->gen_op_buf[0].prev = oi;
     ctx->gen_next_op_idx = ni;
 
     ctx->gen_op_buf[oi] = (TCGOp){
@@ -1868,6 +1873,9 @@ void tcg_gen_goto_tb(unsigned idx)
 
 static inline TCGMemOp tcg_canonicalize_memop(TCGMemOp op, bool is64, bool st)
 {
+    /* Trigger the asserts within as early as possible.  */
+    (void)get_alignment_bits(op);
+
     switch (op & MO_SIZE) {
     case MO_8:
         op &= ~MO_BSWAP;
@@ -1929,12 +1937,16 @@ static void gen_ldst_i64(TCGOpcode opc, TCGv_i64 val, TCGv addr,
 void tcg_gen_qemu_ld_i32(TCGv_i32 val, TCGv addr, TCGArg idx, TCGMemOp memop)
 {
     memop = tcg_canonicalize_memop(memop, 0, 0);
+    trace_guest_mem_before_tcg(tcg_ctx.cpu, tcg_ctx.tcg_env,
+                               addr, trace_mem_get_info(memop, 0));
     gen_ldst_i32(INDEX_op_qemu_ld_i32, val, addr, memop, idx);
 }
 
 void tcg_gen_qemu_st_i32(TCGv_i32 val, TCGv addr, TCGArg idx, TCGMemOp memop)
 {
     memop = tcg_canonicalize_memop(memop, 0, 1);
+    trace_guest_mem_before_tcg(tcg_ctx.cpu, tcg_ctx.tcg_env,
+                               addr, trace_mem_get_info(memop, 1));
     gen_ldst_i32(INDEX_op_qemu_st_i32, val, addr, memop, idx);
 }
 
@@ -1951,6 +1963,8 @@ void tcg_gen_qemu_ld_i64(TCGv_i64 val, TCGv addr, TCGArg idx, TCGMemOp memop)
     }
 
     memop = tcg_canonicalize_memop(memop, 1, 0);
+    trace_guest_mem_before_tcg(tcg_ctx.cpu, tcg_ctx.tcg_env,
+                               addr, trace_mem_get_info(memop, 0));
     gen_ldst_i64(INDEX_op_qemu_ld_i64, val, addr, memop, idx);
 }
 
@@ -1962,5 +1976,7 @@ void tcg_gen_qemu_st_i64(TCGv_i64 val, TCGv addr, TCGArg idx, TCGMemOp memop)
     }
 
     memop = tcg_canonicalize_memop(memop, 1, 1);
+    trace_guest_mem_before_tcg(tcg_ctx.cpu, tcg_ctx.tcg_env,
+                               addr, trace_mem_get_info(memop, 1));
     gen_ldst_i64(INDEX_op_qemu_st_i64, val, addr, memop, idx);
 }
