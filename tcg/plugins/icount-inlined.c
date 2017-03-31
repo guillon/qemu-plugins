@@ -84,7 +84,7 @@ static void before_gen_tb(const TCGPluginInterface *tpi)
 static void after_gen_tb(const TCGPluginInterface *tpi)
 {
     /* Patch parameter value.  */
-    *icount_total_args[tpi->env->cpu_index] = tpi->tb->icount;
+    *icount_total_args[tpi->env->cpu_index] = tpi_tb_icount(tpi->tb);
 }
 
 void tpi_init(TCGPluginInterface *tpi)

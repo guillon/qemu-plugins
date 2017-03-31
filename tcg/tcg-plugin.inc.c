@@ -67,32 +67,6 @@ static inline uint64_t tpi_thread_self(const TCGPluginInterface *tpi)
     return (uint64_t)pthread_self();
 }
 
-static inline TranslationBlock *tpi_current_tb(const TCGPluginInterface *tpi)
-{
-    (void)tpi;
-    return (TranslationBlock *)tpi_current_cpu(tpi)->current_tb;
-}
-
-static inline uint64_t tpi_current_tb_address(const TCGPluginInterface *tpi)
-{
-    (void)tpi;
-    return (uint64_t)tpi_current_cpu(tpi)->current_tb->pc;
-}
-
-static inline uint32_t tpi_current_tb_size(const TCGPluginInterface *tpi)
-{
-    (void)tpi;
-    return (uint32_t)tpi_current_cpu(tpi)->current_tb->size;
-
-}
-
-static inline uint32_t tpi_current_tb_icount(const TCGPluginInterface *tpi)
-{
-    (void)tpi;
-    return (uint32_t)tpi_current_cpu(tpi)->current_tb->icount;
-
-}
-
 static inline CPUState *tpi_current_cpu(const TCGPluginInterface *tpi)
 {
     (void)tpi;

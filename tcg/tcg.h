@@ -57,7 +57,7 @@
  * and up to 4 + N parameters on 64-bit archs
  * (N = number of input arguments + output arguments).  */
 #define MAX_OPC_PARAM (4 + (MAX_OPC_PARAM_PER_ARG * MAX_OPC_PARAM_ARGS))
-#define OPC_BUF_SIZE (640 * TCG_PLUGIN_OPS_FACTOR)
+#define OPC_BUF_SIZE (340 * TCG_PLUGIN_OPS_FACTOR)
 #define OPC_MAX_SIZE (OPC_BUF_SIZE - MAX_OP_PER_INSTR)
 
 #define OPPARAM_BUF_SIZE (OPC_BUF_SIZE * MAX_OPC_PARAM)

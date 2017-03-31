@@ -470,9 +470,11 @@ static void tcg_plugin_tpi_before_gen_tb(TCGPluginInterface *tpi,
         TCGv_i64 info;
         TCGv_i64 address;
         TCGv_i64 tpi_ptr;
+        TCGv_i64 tb_ptr;
         static int iii;
 
         tpi_ptr = tcg_const_i64((uint64_t)tpi);
+        tb_ptr = tcg_const_i64((uint64_t)tb);
 
         address = tcg_const_i64((uint64_t)tb->pc);
 
@@ -488,7 +490,7 @@ static void tcg_plugin_tpi_before_gen_tb(TCGPluginInterface *tpi,
         tpi->_tb_data2 = &tpi->tcg_ctx->gen_opparam_buf[tpi->tcg_ctx->gen_next_parm_idx + 1];
         data2 = tcg_const_i64(0);
 
-        gen_helper_tcg_plugin_pre_tb(tpi_ptr, address, info, data1, data2);
+        gen_helper_tcg_plugin_pre_tb(tpi_ptr, address, info, data1, data2, tb_ptr);
 
         tcg_temp_free_i64(data2);
         tcg_temp_free_i64(data1);
@@ -529,7 +531,7 @@ static void tcg_plugin_tpi_after_gen_tb(TCGPluginInterface *tpi,
         uint64_t data2 = 0;
 
         if (tpi->pre_tb_helper_data) {
-            TPI_CALLBACK_NOT_GENERIC(tpi, pre_tb_helper_data, *(TPIHelperInfo *)tpi->_tb_info, tb->pc, &data1, &data2);
+            TPI_CALLBACK_NOT_GENERIC(tpi, pre_tb_helper_data, *(TPIHelperInfo *)tpi->_tb_info, tb->pc, &data1, &data2, tb);
         }
 
 #if TCG_TARGET_REG_BITS == 64
@@ -598,7 +600,8 @@ static void tcg_plugin_tpi_after_gen_opc(TCGPluginInterface *tpi,
  * way.  */
 void helper_tcg_plugin_pre_tb(uint64_t tpi_ptr,
                               uint64_t address, uint64_t info,
-                              uint64_t data1, uint64_t data2)
+                              uint64_t data1, uint64_t data2,
+                              uint64_t tb_ptr)
 {
     int error;
 
@@ -613,10 +616,11 @@ void helper_tcg_plugin_pre_tb(uint64_t tpi_ptr,
     }
 
     TCGPluginInterface *tpi = (TCGPluginInterface *)(intptr_t)tpi_ptr;
+    const TranslationBlock *tb = (TranslationBlock *)(intptr_t)tb_ptr;
     if (tcg_plugin_initialize(tpi))
         TPI_CALLBACK_NOT_GENERIC(tpi, pre_tb_helper_code,
                                  *(TPIHelperInfo *)&info,
-                                 address, data1, data2);
+                                 address, data1, data2, tb);
 end:
     if (g_plugins_state.mutex_protected) {
         pthread_mutex_unlock(&g_plugins_state.helper_mutex);
@@ -734,4 +738,19 @@ void tpi_exec_unlock(const TCGPluginInterface *tpi)
                 strerror(err));
         abort();
     }
+}
+
+uint64_t tpi_tb_address(const TranslationBlock* tb)
+{
+    return tb->pc;
+}
+
+extern uint32_t tpi_tb_size(const TranslationBlock* tb)
+{
+    return tb->size;
+}
+
+extern uint32_t tpi_tb_icount(const TranslationBlock* tb)
+{
+    return tb->icount;
 }

@@ -47,6 +47,9 @@
 #define DEF_HELPER_FLAGS_5(name, flags, ret, t1, t2, t3, t4, t5)           \
     dh_ctype(ret) HELPER(name) (dh_ctype(t1), dh_ctype(t2), dh_ctype(t3), dh_ctype(t4), dh_ctype(t5));
 
+#define DEF_HELPER_FLAGS_6(name, flags, ret, t1, t2, t3, t4, t5, t6)       \
+    dh_ctype(ret) HELPER(name) (dh_ctype(t1), dh_ctype(t2), dh_ctype(t3), dh_ctype(t4), dh_ctype(t5), dh_ctype(t6));
+
 #include "tcg-runtime.h"
 
 

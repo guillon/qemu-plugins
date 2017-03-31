@@ -107,13 +107,15 @@ typedef void (* tpi_decode_instr_t)(const TCGPluginInterface *tpi, uint64_t pc);
 
 typedef void (* tpi_pre_tb_helper_code_t)(const TCGPluginInterface *tpi,
                                           TPIHelperInfo info, uint64_t address,
-                                          uint64_t data1, uint64_t data2);
+                                          uint64_t data1, uint64_t data2,
+                                          const TranslationBlock* tb);
 
 typedef void (* tpi_pre_tb_helper_data_t)(const TCGPluginInterface *tpi,
                                           TPIHelperInfo info, uint64_t address,
-                                          uint64_t *data1, uint64_t *data2);
+                                          uint64_t *data1, uint64_t *data2,
+                                          const TranslationBlock* tb);
 
-#define TPI_VERSION 6
+#define TPI_VERSION 7
 struct TCGPluginInterface
 {
     /* Compatibility information.  */
@@ -294,13 +296,12 @@ void tpi_init(TCGPluginInterface *tpi);
 static inline FILE *tpi_output(const TCGPluginInterface *tpi);
 
 /*
- * Translation blocks accessors.
- * Available at translation time and execution time.
+ * Translation block accesors
+ * Not static so plugins do not depend on definition of TranslationBlock.
  */
-static inline TranslationBlock *tpi_current_tb(const TCGPluginInterface *tpi);
-static inline uint64_t tpi_current_tb_address(const TCGPluginInterface *tpi);
-static inline uint32_t tpi_current_tb_size(const TCGPluginInterface *tpi);
-static inline uint32_t tpi_current_tb_icount(const TCGPluginInterface *tpi);
+extern uint64_t tpi_tb_address(const TranslationBlock* tb);
+extern uint32_t tpi_tb_size(const TranslationBlock* tb);
+extern uint32_t tpi_tb_icount(const TranslationBlock* tb);
 
 /*
  * Thread related identifiers.
@@ -341,5 +342,6 @@ static inline uint64_t tpi_guest_load64(const TCGPluginInterface *tpi, uint64_t 
 static inline uint32_t tpi_guest_load32(const TCGPluginInterface *tpi, uint64_t guest_address);
 
 #include "tcg-plugin.inc.c"
+#include "exec/exec-all.h" /* TranslationBlock */
 
 #endif /* TCG_PLUGIN_H */

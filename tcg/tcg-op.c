@@ -46,7 +46,7 @@ extern TCGv_i32 TCGV_HIGH_link_error(TCGv_i64);
 /* Local tcg-plugin after_gen_opc helpers. */
 static inline void TCG_PLUGIN_POST_GEN_OPC(TCGContext *ctx, size_t nb_args)
 {
-    tcg_plugin_after_gen_opc(&ctx->gen_op_buf[ctx->gen_last_op_idx],
+    tcg_plugin_after_gen_opc(&ctx->gen_op_buf[ctx->gen_op_buf[0].prev],
                              &ctx->gen_opparam_buf[ctx->gen_next_parm_idx - nb_args],
                              nb_args);
 }
