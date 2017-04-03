@@ -25,6 +25,7 @@
 #include "qemu-version.h"
 #include "qemu/cutils.h"
 #include "qemu/help_option.h"
+#include "qemu/uuid.h"
 
 #ifdef CONFIG_SECCOMP
 #include "sysemu/seccomp.h"
@@ -96,6 +97,7 @@ extern void tcg_plugin_load(const char *);
 #include "audio/audio.h"
 #include "migration/migration.h"
 #include "sysemu/cpus.h"
+#include "migration/colo.h"
 #include "sysemu/kvm.h"
 #include "qapi/qmp/qjson.h"
 #include "qemu/option.h"
@@ -116,7 +118,6 @@ extern void tcg_plugin_load(const char *);
 #include "trace.h"
 #include "trace/control.h"
 #include "qemu/queue.h"
-#include "sysemu/cpus.h"
 #include "sysemu/arch_init.h"
 
 #include "ui/qemu-spice.h"
@@ -128,6 +129,7 @@ extern void tcg_plugin_load(const char *);
 #include "crypto/init.h"
 #include "sysemu/replay.h"
 #include "qapi/qmp/qerror.h"
+#include "sysemu/iothread.h"
 
 #define MAX_VIRTIO_CONSOLES 1
 #define MAX_SCLP_CONSOLES 1
@@ -188,10 +190,10 @@ uint8_t qemu_extra_params_fw[2];
 
 int icount_align_option;
 
-/* The bytes in qemu_uuid[] are in the order specified by RFC4122, _not_ in the
+/* The bytes in qemu_uuid are in the order specified by RFC4122, _not_ in the
  * little-endian "wire format" described in the SMBIOS 2.6 specification.
  */
-uint8_t qemu_uuid[16];
+QemuUUID qemu_uuid;
 bool qemu_uuid_set;
 
 static NotifierList exit_notifiers =
@@ -223,6 +225,7 @@ static struct {
     { .driver = "isa-serial",           .flag = &default_serial    },
     { .driver = "isa-parallel",         .flag = &default_parallel  },
     { .driver = "isa-fdc",              .flag = &default_floppy    },
+    { .driver = "floppy",               .flag = &default_floppy    },
     { .driver = "ide-cd",               .flag = &default_cdrom     },
     { .driver = "ide-hd",               .flag = &default_cdrom     },
     { .driver = "ide-drive",            .flag = &default_cdrom     },
@@ -513,6 +516,43 @@ static QemuOptsList qemu_fw_cfg_opts = {
     },
 };
 
+#ifdef CONFIG_LIBISCSI
+static QemuOptsList qemu_iscsi_opts = {
+    .name = "iscsi",
+    .head = QTAILQ_HEAD_INITIALIZER(qemu_iscsi_opts.head),
+    .desc = {
+        {
+            .name = "user",
+            .type = QEMU_OPT_STRING,
+            .help = "username for CHAP authentication to target",
+        },{
+            .name = "password",
+            .type = QEMU_OPT_STRING,
+            .help = "password for CHAP authentication to target",
+        },{
+            .name = "password-secret",
+            .type = QEMU_OPT_STRING,
+            .help = "ID of the secret providing password for CHAP "
+                    "authentication to target",
+        },{
+            .name = "header-digest",
+            .type = QEMU_OPT_STRING,
+            .help = "HeaderDigest setting. "
+                    "{CRC32C|CRC32C-NONE|NONE-CRC32C|NONE}",
+        },{
+            .name = "initiator-name",
+            .type = QEMU_OPT_STRING,
+            .help = "Initiator iqn name to use when connecting",
+        },{
+            .name = "timeout",
+            .type = QEMU_OPT_NUMBER,
+            .help = "Request timeout in seconds (default 0 = no timeout)",
+        },
+        { /* end of list */ }
+    },
+};
+#endif
+
 /**
  * Get machine options
  *
@@ -580,6 +620,7 @@ static const RunStateTransition runstate_transitions_def[] = {
     { RUN_STATE_INMIGRATE, RUN_STATE_FINISH_MIGRATE },
     { RUN_STATE_INMIGRATE, RUN_STATE_PRELAUNCH },
     { RUN_STATE_INMIGRATE, RUN_STATE_POSTMIGRATE },
+    { RUN_STATE_INMIGRATE, RUN_STATE_COLO },
 
     { RUN_STATE_INTERNAL_ERROR, RUN_STATE_PAUSED },
     { RUN_STATE_INTERNAL_ERROR, RUN_STATE_FINISH_MIGRATE },
@@ -592,6 +633,7 @@ static const RunStateTransition runstate_transitions_def[] = {
     { RUN_STATE_PAUSED, RUN_STATE_RUNNING },
     { RUN_STATE_PAUSED, RUN_STATE_FINISH_MIGRATE },
     { RUN_STATE_PAUSED, RUN_STATE_PRELAUNCH },
+    { RUN_STATE_PAUSED, RUN_STATE_COLO},
 
     { RUN_STATE_POSTMIGRATE, RUN_STATE_RUNNING },
     { RUN_STATE_POSTMIGRATE, RUN_STATE_FINISH_MIGRATE },
@@ -604,9 +646,12 @@ static const RunStateTransition runstate_transitions_def[] = {
     { RUN_STATE_FINISH_MIGRATE, RUN_STATE_RUNNING },
     { RUN_STATE_FINISH_MIGRATE, RUN_STATE_POSTMIGRATE },
     { RUN_STATE_FINISH_MIGRATE, RUN_STATE_PRELAUNCH },
+    { RUN_STATE_FINISH_MIGRATE, RUN_STATE_COLO},
 
     { RUN_STATE_RESTORE_VM, RUN_STATE_RUNNING },
     { RUN_STATE_RESTORE_VM, RUN_STATE_PRELAUNCH },
+
+    { RUN_STATE_COLO, RUN_STATE_RUNNING },
 
     { RUN_STATE_RUNNING, RUN_STATE_DEBUG },
     { RUN_STATE_RUNNING, RUN_STATE_INTERNAL_ERROR },
@@ -618,6 +663,7 @@ static const RunStateTransition runstate_transitions_def[] = {
     { RUN_STATE_RUNNING, RUN_STATE_SHUTDOWN },
     { RUN_STATE_RUNNING, RUN_STATE_WATCHDOG },
     { RUN_STATE_RUNNING, RUN_STATE_GUEST_PANICKED },
+    { RUN_STATE_RUNNING, RUN_STATE_COLO},
 
     { RUN_STATE_SAVE_VM, RUN_STATE_RUNNING },
 
@@ -630,10 +676,12 @@ static const RunStateTransition runstate_transitions_def[] = {
     { RUN_STATE_SUSPENDED, RUN_STATE_RUNNING },
     { RUN_STATE_SUSPENDED, RUN_STATE_FINISH_MIGRATE },
     { RUN_STATE_SUSPENDED, RUN_STATE_PRELAUNCH },
+    { RUN_STATE_SUSPENDED, RUN_STATE_COLO},
 
     { RUN_STATE_WATCHDOG, RUN_STATE_RUNNING },
     { RUN_STATE_WATCHDOG, RUN_STATE_FINISH_MIGRATE },
     { RUN_STATE_WATCHDOG, RUN_STATE_PRELAUNCH },
+    { RUN_STATE_WATCHDOG, RUN_STATE_COLO},
 
     { RUN_STATE_GUEST_PANICKED, RUN_STATE_RUNNING },
     { RUN_STATE_GUEST_PANICKED, RUN_STATE_FINISH_MIGRATE },
@@ -752,6 +800,7 @@ void vm_start(void)
     if (runstate_is_running()) {
         qapi_event_send_stop(&error_abort);
     } else {
+        replay_enable_events();
         cpu_enable_ticks();
         runstate_set(RUN_STATE_RUNNING);
         vm_state_notify(1, RUN_STATE_RUNNING);
@@ -1642,8 +1691,12 @@ static void qemu_kill_report(void)
              */
             error_report("terminating on signal %d", shutdown_signal);
         } else {
-            error_report("terminating on signal %d from pid " FMT_pid,
-                         shutdown_signal, shutdown_pid);
+            char *shutdown_cmd = qemu_get_pid_name(shutdown_pid);
+
+            error_report("terminating on signal %d from pid " FMT_pid " (%s)",
+                         shutdown_signal, shutdown_pid,
+                         shutdown_cmd ? shutdown_cmd : "<unknown process>");
+            g_free(shutdown_cmd);
         }
         shutdown_signal = -1;
     }
@@ -1746,6 +1799,11 @@ void qemu_system_guest_panicked(void)
     }
     qapi_event_send_guest_panicked(GUEST_PANIC_ACTION_PAUSE, &error_abort);
     vm_stop(RUN_STATE_GUEST_PANICKED);
+    if (!no_shutdown) {
+        qapi_event_send_guest_panicked(GUEST_PANIC_ACTION_POWEROFF,
+                                       &error_abort);
+        qemu_system_shutdown_request();
+    }
 }
 
 void qemu_system_reset_request(void)
@@ -1921,7 +1979,7 @@ static void main_loop(void)
 
 static void version(void)
 {
-    printf("QEMU emulator version " QEMU_VERSION QEMU_PKGVERSION ", "
+    printf("QEMU emulator version " QEMU_VERSION QEMU_PKGVERSION "\n"
            QEMU_COPYRIGHT "\n");
 }
 
@@ -2332,7 +2390,7 @@ static int chardev_init_func(void *opaque, QemuOpts *opts, Error **errp)
 {
     Error *local_err = NULL;
 
-    qemu_chr_new_from_opts(opts, NULL, &local_err);
+    qemu_chr_new_from_opts(opts, &local_err);
     if (local_err) {
         error_report_err(local_err);
         return -1;
@@ -2370,8 +2428,9 @@ static int mon_init_func(void *opaque, QemuOpts *opts, Error **errp)
     if (qemu_opt_get_bool(opts, "pretty", 0))
         flags |= MONITOR_USE_PRETTY;
 
-    if (qemu_opt_get_bool(opts, "default", 0))
-        flags |= MONITOR_IS_DEFAULT;
+    if (qemu_opt_get_bool(opts, "default", 0)) {
+        error_report("option 'default' does nothing and is deprecated");
+    }
 
     chardev = qemu_opt_get(opts, "chardev");
     chr = qemu_chr_find(chardev);
@@ -2380,7 +2439,6 @@ static int mon_init_func(void *opaque, QemuOpts *opts, Error **errp)
         exit(1);
     }
 
-    qemu_chr_fe_claim_no_fail(chr);
     monitor_init(chr, flags);
     return 0;
 }
@@ -2391,16 +2449,12 @@ static void monitor_parse(const char *optarg, const char *mode, bool pretty)
     QemuOpts *opts;
     const char *p;
     char label[32];
-    int def = 0;
 
     if (strstart(optarg, "chardev:", &p)) {
         snprintf(label, sizeof(label), "%s", p);
     } else {
         snprintf(label, sizeof(label), "compat_monitor%d",
                  monitor_device_index);
-        if (monitor_device_index == 0) {
-            def = 1;
-        }
         opts = qemu_chr_parse_compat(label, optarg);
         if (!opts) {
             error_report("parse error: %s", optarg);
@@ -2412,8 +2466,6 @@ static void monitor_parse(const char *optarg, const char *mode, bool pretty)
     qemu_opt_set(opts, "mode", mode, &error_abort);
     qemu_opt_set(opts, "chardev", label, &error_abort);
     qemu_opt_set_bool(opts, "pretty", pretty, &error_abort);
-    if (def)
-        qemu_opt_set(opts, "default", "on", &error_abort);
     monitor_device_index++;
 }
 
@@ -2477,7 +2529,7 @@ static int serial_parse(const char *devname)
         exit(1);
     }
     snprintf(label, sizeof(label), "serial%d", index);
-    serial_hds[index] = qemu_chr_new(label, devname, NULL);
+    serial_hds[index] = qemu_chr_new(label, devname);
     if (!serial_hds[index]) {
         error_report("could not connect serial device"
                      " to character backend '%s'", devname);
@@ -2499,7 +2551,7 @@ static int parallel_parse(const char *devname)
         exit(1);
     }
     snprintf(label, sizeof(label), "parallel%d", index);
-    parallel_hds[index] = qemu_chr_new(label, devname, NULL);
+    parallel_hds[index] = qemu_chr_new(label, devname);
     if (!parallel_hds[index]) {
         error_report("could not connect parallel device"
                      " to character backend '%s'", devname);
@@ -2530,7 +2582,7 @@ static int virtcon_parse(const char *devname)
     qemu_opt_set(dev_opts, "driver", "virtconsole", &error_abort);
 
     snprintf(label, sizeof(label), "virtcon%d", index);
-    virtcon_hds[index] = qemu_chr_new(label, devname, NULL);
+    virtcon_hds[index] = qemu_chr_new(label, devname);
     if (!virtcon_hds[index]) {
         error_report("could not connect virtio console"
                      " to character backend '%s'", devname);
@@ -2563,7 +2615,7 @@ static int sclp_parse(const char *devname)
     qemu_opt_set(dev_opts, "driver", "sclpconsole", &error_abort);
 
     snprintf(label, sizeof(label), "sclpcon%d", index);
-    sclp_hds[index] = qemu_chr_new(label, devname, NULL);
+    sclp_hds[index] = qemu_chr_new(label, devname);
     if (!sclp_hds[index]) {
         error_report("could not connect sclp console"
                      " to character backend '%s'", devname);
@@ -2579,7 +2631,7 @@ static int debugcon_parse(const char *devname)
 {
     QemuOpts *opts;
 
-    if (!qemu_chr_new("debugcon", devname, NULL)) {
+    if (!qemu_chr_new("debugcon", devname)) {
         exit(1);
     }
     opts = qemu_opts_create(qemu_find_opts("device"), "debugcon", 1, NULL);
@@ -2767,17 +2819,16 @@ static int machine_set_property(void *opaque,
 {
     Object *obj = OBJECT(opaque);
     Error *local_err = NULL;
-    char *c, *qom_name;
+    char *p, *qom_name;
 
     if (strcmp(name, "type") == 0) {
         return 0;
     }
 
     qom_name = g_strdup(name);
-    c = qom_name;
-    while (*c++) {
-        if (*c == '_') {
-            *c = '-';
+    for (p = qom_name; *p; p++) {
+        if (*p == '_') {
+            *p = '-';
         }
     }
 
@@ -2813,7 +2864,22 @@ static bool object_create_initial(const char *type)
     if (g_str_equal(type, "filter-buffer") ||
         g_str_equal(type, "filter-dump") ||
         g_str_equal(type, "filter-mirror") ||
-        g_str_equal(type, "filter-redirector")) {
+        g_str_equal(type, "filter-redirector") ||
+        g_str_equal(type, "colo-compare") ||
+        g_str_equal(type, "filter-rewriter")) {
+        return false;
+    }
+
+    /* Memory allocation by backends needs to be done
+     * after configure_accelerator() (due to the tcg_enabled()
+     * checks at memory_region_init_*()).
+     *
+     * Also, allocation of large amounts of memory may delay
+     * chardev initialization for too long, and trigger timeouts
+     * on software that waits for a monitor socket to be created
+     * (e.g. libvirt).
+     */
+    if (g_str_has_prefix(type, "memory-backend-")) {
         return false;
     }
 
@@ -2973,6 +3039,9 @@ int main(int argc, char **argv, char **envp)
     Error *err = NULL;
     bool list_data_dirs = false;
 
+    module_call_init(MODULE_INIT_TRACE);
+
+    qemu_init_cpu_list();
     qemu_init_cpu_loop();
     qemu_mutex_lock_iothread();
 
@@ -2981,11 +3050,13 @@ int main(int argc, char **argv, char **envp)
     qemu_init_exec_dir(argv[0]);
 
     module_call_init(MODULE_INIT_QOM);
+    module_call_init(MODULE_INIT_QAPI);
 
     qemu_add_opts(&qemu_drive_opts);
     qemu_add_drive_opts(&qemu_legacy_drive_opts);
     qemu_add_drive_opts(&qemu_common_drive_opts);
     qemu_add_drive_opts(&qemu_drive_opts);
+    qemu_add_drive_opts(&bdrv_runtime_opts);
     qemu_add_opts(&qemu_chardev_opts);
     qemu_add_opts(&qemu_device_opts);
     qemu_add_opts(&qemu_netdev_opts);
@@ -3010,6 +3081,9 @@ int main(int argc, char **argv, char **envp)
     qemu_add_opts(&qemu_icount_opts);
     qemu_add_opts(&qemu_semihosting_config_opts);
     qemu_add_opts(&qemu_fw_cfg_opts);
+#ifdef CONFIG_LIBISCSI
+    qemu_add_opts(&qemu_iscsi_opts);
+#endif
     module_call_init(MODULE_INIT_OPTS);
 
     runstate_init();
@@ -3732,7 +3806,7 @@ int main(int argc, char **argv, char **envp)
                 cursor_hide = 0;
                 break;
             case QEMU_OPTION_uuid:
-                if(qemu_uuid_parse(optarg, qemu_uuid) < 0) {
+                if (qemu_uuid_parse(optarg, &qemu_uuid) < 0) {
                     error_report("failed to parse UUID string: wrong format");
                     exit(1);
                 }
@@ -4009,6 +4083,11 @@ int main(int argc, char **argv, char **envp)
 
     os_daemonize();
 
+    if (pid_file && qemu_create_pidfile(pid_file) != 0) {
+        error_report("could not acquire pid file: %s", strerror(errno));
+        exit(1);
+    }
+
     if (qemu_init_main_loop(&main_loop_err)) {
         error_report_err(main_loop_err);
         exit(1);
@@ -4043,6 +4122,16 @@ int main(int argc, char **argv, char **envp)
     }
     object_property_add_child(object_get_root(), "machine",
                               OBJECT(current_machine), &error_abort);
+
+    if (machine_class->minimum_page_bits) {
+        if (!set_preferred_target_page_bits(machine_class->minimum_page_bits)) {
+            /* This would be a board error: specifying a minimum smaller than
+             * a target's compile-time fixed setting.
+             */
+            g_assert_not_reached();
+        }
+    }
+
     cpu_exec_init_all();
 
     if (machine_class->hw_version) {
@@ -4281,11 +4370,6 @@ int main(int argc, char **argv, char **envp)
     }
 #endif
 
-    if (pid_file && qemu_create_pidfile(pid_file) != 0) {
-        error_report("could not acquire pid file: %s", strerror(errno));
-        exit(1);
-    }
-
     if (qemu_opts_foreach(qemu_find_opts("device"),
                           device_help_func, NULL, NULL)) {
         exit(0);
@@ -4347,11 +4431,6 @@ int main(int argc, char **argv, char **envp)
         exit(1);
     }
 
-    if (!linux_boot && qemu_opt_get(machine_opts, "dtb")) {
-        error_report("-dtb only allowed with -kernel option");
-        exit(1);
-    }
-
     if (semihosting_enabled() && !semihosting_get_argc() && kernel_filename) {
         /* fall back to the -kernel/-append */
         semihosting_arg_fallback(kernel_filename, kernel_cmdline);
@@ -4379,6 +4458,8 @@ int main(int argc, char **argv, char **envp)
         qemu_opts_set(net, NULL, "type", "user", &error_abort);
 #endif
     }
+
+    colo_info_init();
 
     if (net_init_clients() < 0) {
         exit(1);
@@ -4625,16 +4706,13 @@ int main(int argc, char **argv, char **envp)
 
     os_setup_post();
 
-    trace_init_vcpu_events();
     main_loop();
     replay_disable_events();
+    iothread_stop_all();
 
     bdrv_close_all();
     pause_all_vcpus();
     res_free();
-#ifdef CONFIG_TPM
-    tpm_cleanup();
-#endif
 
     /* vhost-user must be cleaned up before chardevs.  */
     net_cleanup();
