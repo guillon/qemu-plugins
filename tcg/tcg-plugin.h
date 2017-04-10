@@ -188,12 +188,13 @@ typedef bool (*tpi_check_param_double_t)(const TCGPluginInterface *tpi,
 /* callback called when plugin was set active/inactive */
 typedef void (*tpi_active_changed_t)(bool new_state);
 
-#define TPI_VERSION 8
+#define TPI_VERSION 9 
 
 struct TCGPluginInterface
 {
     /* Compatibility information.  */
     int32_t version;
+    int32_t id;
     const char *name;
     const char *path_name;
     const char *instance_path_name;
@@ -433,10 +434,11 @@ extern void tpi_set_active(TCGPluginInterface *tpi, bool active);
 
 /*
  * Find plugin from name.
- * Name string must be found in name field of plugin.
+ * @name string must be found in name field of plugin.
+ * If name is NULL, find plugin with @id.
  * First occurence is returned.
  */
-extern TCGPluginInterface *tpi_find_plugin(const char* name);
+extern TCGPluginInterface *tpi_find_plugin(const char *name, uint32_t id);
 
 /*
  * Declare parameters functions.

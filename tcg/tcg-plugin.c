@@ -132,15 +132,20 @@ static const char *param_type_to_string(enum TPI_PARAM_TYPE type)
     return "";
 }
 
-TCGPluginInterface *tpi_find_plugin(const char *name)
+TCGPluginInterface *tpi_find_plugin(const char *name, uint32_t id)
 {
-    if (!name)
-        return NULL;
-
     for (GList *l = g_plugins_state.tpi_list; l != NULL; l = l->next) {
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
-        if (strstr(tpi->name, name) != NULL)
-            return tpi;
+        if (name)
+        {
+            if (strstr(tpi->name, name) != NULL)
+                return tpi;
+        }
+        else
+        {
+            if (tpi->id == id)
+                return tpi;
+        }
     }
 
     return NULL;
@@ -341,8 +346,12 @@ static bool command_get_plugins(char **answer)
         } else {
             first = false;
         }
-        g_string_append_printf(res, "{\"name\": \"%s\", \"active\": %s}",
-                               tpi->name, tpi->_active ? "true" : "false");
+        g_string_append_printf(res, "{\"name\": \"%s\","
+                                    "\"id\": %d,"
+                                    "\"active\": %s}",
+                                      tpi->name,
+                                      tpi->id,
+                                      tpi->_active ? "true" : "false");
     }
 
     g_string_append(res, "]");
@@ -396,7 +405,25 @@ static bool handle_command(enum TPI_PLUGIN_COMMAND command_type, char **answer,
             return false;
         }
         const char *plugin_name = (const char *)g_list_nth_data(args, 0);
-        tpi = tpi_find_plugin(plugin_name);
+        uint32_t plugin_id = -1;
+
+        bool name_is_id = true;
+        for (const char *it = plugin_name; it && *it; ++it)
+        {
+            if (!isdigit(*it))
+            {
+                name_is_id = false;
+                break;
+            }
+        }
+
+        if (name_is_id)
+        {
+            plugin_id = atoi(plugin_name);
+            plugin_name = NULL;
+        }
+
+        tpi = tpi_find_plugin(plugin_name, plugin_id);
         if (!tpi) {
             *answer = g_strdup("plugin not found");
             return false;
@@ -492,9 +519,14 @@ void tcg_plugin_load(const char *name)
 
     assert(name != NULL);
 
+    static uint32_t unique_id = 0;
+
     tpi = (TCGPluginInterface *)g_malloc0(sizeof(TCGPluginInterface));
     tpi->name = (char *)g_strdup(name);
+    tpi->id = unique_id;
     g_plugins_state.tpi_list = g_list_append(g_plugins_state.tpi_list, tpi);
+
+    ++unique_id;
 }
 
 /* Check if wanted is in list of expected strings passed as NULL terminated varargs */

@@ -141,8 +141,13 @@ void tpi_init(TCGPluginInterface *tpi)
     tpi_declare_param_string(tpi, "param_string", &param_string, "Welcome!",
                              "String param");
 
-    TCGPluginInterface *me = tpi_find_plugin("param");
-    assert(me);
+    TCGPluginInterface *me = NULL;
+    me = tpi_find_plugin(NULL, -1);
+    assert(!me);
+    me = tpi_find_plugin(NULL, tpi->id);
+    assert(me == tpi);
+    me = tpi_find_plugin("param", -1);
+    assert(me == tpi);
 
     bool b = false;
     uint64_t u = 0;
