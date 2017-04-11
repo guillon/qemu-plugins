@@ -279,7 +279,12 @@ static void tcg_plugin_tpi_init(TCGPluginInterface *tpi)
      * Load the dynamic shared object and retreive its symbol
      * "tpi_init".
      */
+//#define NEED_GDB_BACKTRACE_PLUGIN
+#ifdef NEED_GDB_BACKTRACE_PLUGIN
+    handle = dlopen(path, RTLD_NOW);
+#else
     handle = dlopen(plugin_instance_path, RTLD_NOW);
+#endif
     if (!handle) {
         fprintf(stderr, "plugin: error: can't load plugin at %s  %s\n", plugin_instance_path,
                 dlerror());
