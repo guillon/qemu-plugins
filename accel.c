@@ -33,7 +33,6 @@
 #include "sysemu/qtest.h"
 #include "hw/xen/xen.h"
 #include "qom/object.h"
-#include "hw/boards.h"
 
 int tcg_tb_size;
 static bool tcg_allowed = true;
@@ -77,7 +76,7 @@ static int accel_init_machine(AccelClass *acc, MachineState *ms)
     return ret;
 }
 
-int configure_accelerator(MachineState *ms)
+void configure_accelerator(MachineState *ms)
 {
     const char *p;
     char buf[10];
@@ -128,8 +127,6 @@ int configure_accelerator(MachineState *ms)
     if (init_failed) {
         fprintf(stderr, "Back to %s accelerator.\n", acc->name);
     }
-
-    return !accel_initialised;
 }
 
 

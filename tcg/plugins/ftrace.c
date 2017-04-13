@@ -335,15 +335,16 @@ static void potential_return(const TCGPluginInterface *tpi, uint64_t address, ui
 }
 
 static void pre_tb_helper_code(const TCGPluginInterface *tpi, TPIHelperInfo info,
-			   uint64_t address, uint64_t data1, uint64_t data2)
+			   uint64_t address, uint64_t data1, uint64_t data2,
+               const TranslationBlock* tb)
 {
     const char *symbol = (const char *)(uintptr_t)data1;
     const char *filename = (const char *)(uintptr_t)data2;
     uint64_t tb_size, tb_address;
     uint64_t potential_return_address;
 
-    tb_address = tpi_current_tb_address(tpi);
-    tb_size = tpi_current_tb_size(tpi);
+    tb_address = tpi_tb_address(tb);
+    tb_size = tpi_tb_size(tb);
     potential_return_address = tb_address + tb_size;
 
     /* Any TB start address is a potential point of return. */
@@ -360,7 +361,8 @@ static void pre_tb_helper_code(const TCGPluginInterface *tpi, TPIHelperInfo info
 
 static void pre_tb_helper_data(const TCGPluginInterface *tpi,
                                TPIHelperInfo info, uint64_t address,
-                               uint64_t *data1, uint64_t *data2)
+                               uint64_t *data1, uint64_t *data2,
+                               const TranslationBlock* tb)
 {
     const char *symbol = NULL;
     const char *filename = NULL;

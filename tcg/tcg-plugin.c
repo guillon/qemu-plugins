@@ -279,7 +279,12 @@ static void tcg_plugin_tpi_init(TCGPluginInterface *tpi)
      * Load the dynamic shared object and retreive its symbol
      * "tpi_init".
      */
+//#define NEED_GDB_BACKTRACE_PLUGIN
+#ifdef NEED_GDB_BACKTRACE_PLUGIN
+    handle = dlopen(path, RTLD_NOW);
+#else
     handle = dlopen(plugin_instance_path, RTLD_NOW);
+#endif
     if (!handle) {
         fprintf(stderr, "plugin: error: can't load plugin at %s  %s\n", plugin_instance_path,
                 dlerror());
@@ -441,11 +446,9 @@ static bool tcg_plugin_initialize(TCGPluginInterface *tpi)
 #define TPI_CALLBACK_NOT_GENERIC(tpi, callback, ...)       \
     do {                                                   \
         if (!tpi->is_generic) {                            \
-            tpi->env = tpi->_current_env;                  \
             tpi->tb = tpi->_current_tb;                    \
         }                                                  \
         tpi->callback(tpi, ##__VA_ARGS__);                 \
-        tpi->env = NULL;                                   \
         tpi->tb = NULL;                                    \
     } while (0);
 
@@ -470,9 +473,11 @@ static void tcg_plugin_tpi_before_gen_tb(TCGPluginInterface *tpi,
         TCGv_i64 info;
         TCGv_i64 address;
         TCGv_i64 tpi_ptr;
+        TCGv_i64 tb_ptr;
         static int iii;
 
         tpi_ptr = tcg_const_i64((uint64_t)tpi);
+        tb_ptr = tcg_const_i64((uint64_t)tb);
 
         address = tcg_const_i64((uint64_t)tb->pc);
 
@@ -488,7 +493,7 @@ static void tcg_plugin_tpi_before_gen_tb(TCGPluginInterface *tpi,
         tpi->_tb_data2 = &tpi->tcg_ctx->gen_opparam_buf[tpi->tcg_ctx->gen_next_parm_idx + 1];
         data2 = tcg_const_i64(0);
 
-        gen_helper_tcg_plugin_pre_tb(tpi_ptr, address, info, data1, data2);
+        gen_helper_tcg_plugin_pre_tb(tpi_ptr, address, info, data1, data2, tb_ptr);
 
         tcg_temp_free_i64(data2);
         tcg_temp_free_i64(data1);
@@ -511,7 +516,7 @@ static void tcg_plugin_tpi_after_gen_tb(TCGPluginInterface *tpi,
 
     if (tpi->pre_tb_helper_code) {
         /* Patch helper_tcg_plugin_tb*() parameters.  */
-        ((TPIHelperInfo *)tpi->_tb_info)->cpu_index = env->cpu_index;
+        ((TPIHelperInfo *)tpi->_tb_info)->cpu_index = tpi_current_cpu_index(tpi);
         ((TPIHelperInfo *)tpi->_tb_info)->size = tb->size;
 #if TCG_TARGET_REG_BITS == 64
         ((TPIHelperInfo *)tpi->_tb_info)->icount = tb->icount;
@@ -529,7 +534,7 @@ static void tcg_plugin_tpi_after_gen_tb(TCGPluginInterface *tpi,
         uint64_t data2 = 0;
 
         if (tpi->pre_tb_helper_data) {
-            TPI_CALLBACK_NOT_GENERIC(tpi, pre_tb_helper_data, *(TPIHelperInfo *)tpi->_tb_info, tb->pc, &data1, &data2);
+            TPI_CALLBACK_NOT_GENERIC(tpi, pre_tb_helper_data, *(TPIHelperInfo *)tpi->_tb_info, tb->pc, &data1, &data2, tb);
         }
 
 #if TCG_TARGET_REG_BITS == 64
@@ -579,7 +584,7 @@ static void tcg_plugin_tpi_after_gen_opc(TCGPluginInterface *tpi,
     nb_args = MIN(nb_args, TPI_MAX_OP_ARGS);
 
     tpi_opcode.pc   = tpi->_current_pc;
-    tpi_opcode.cpu_index = tpi->_current_env->cpu_index;
+    tpi_opcode.cpu_index = tpi_current_cpu_index(tpi);
     tpi_opcode.nb_args = nb_args;
 
     tpi_opcode.operator = opcode->opc;
@@ -598,7 +603,8 @@ static void tcg_plugin_tpi_after_gen_opc(TCGPluginInterface *tpi,
  * way.  */
 void helper_tcg_plugin_pre_tb(uint64_t tpi_ptr,
                               uint64_t address, uint64_t info,
-                              uint64_t data1, uint64_t data2)
+                              uint64_t data1, uint64_t data2,
+                              uint64_t tb_ptr)
 {
     int error;
 
@@ -613,10 +619,11 @@ void helper_tcg_plugin_pre_tb(uint64_t tpi_ptr,
     }
 
     TCGPluginInterface *tpi = (TCGPluginInterface *)(intptr_t)tpi_ptr;
+    const TranslationBlock *tb = (TranslationBlock *)(intptr_t)tb_ptr;
     if (tcg_plugin_initialize(tpi))
         TPI_CALLBACK_NOT_GENERIC(tpi, pre_tb_helper_code,
                                  *(TPIHelperInfo *)&info,
-                                 address, data1, data2);
+                                 address, data1, data2, tb);
 end:
     if (g_plugins_state.mutex_protected) {
         pthread_mutex_unlock(&g_plugins_state.helper_mutex);
@@ -665,7 +672,6 @@ void tcg_plugin_before_gen_tb(CPUState *env, TranslationBlock *tb)
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
         if (tcg_plugin_initialize(tpi)) {
             tpi->_current_pc = tb->pc;
-            tpi->_current_env = env;
             tpi->_current_tb = tb;
         }
     }
@@ -694,7 +700,6 @@ void tcg_plugin_after_gen_tb(CPUState *env, TranslationBlock *tb)
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
         if (tcg_plugin_initialize(tpi)) {
             tpi->_current_pc = 0;
-            tpi->_current_env = NULL;
             tpi->_current_tb = NULL;
         }
     }
@@ -734,4 +739,19 @@ void tpi_exec_unlock(const TCGPluginInterface *tpi)
                 strerror(err));
         abort();
     }
+}
+
+uint64_t tpi_tb_address(const TranslationBlock* tb)
+{
+    return tb->pc;
+}
+
+extern uint32_t tpi_tb_size(const TranslationBlock* tb)
+{
+    return tb->size;
+}
+
+extern uint32_t tpi_tb_icount(const TranslationBlock* tb)
+{
+    return tb->icount;
 }

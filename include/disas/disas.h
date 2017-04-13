@@ -1,9 +1,11 @@
-#ifndef _QEMU_DISAS_H
-#define _QEMU_DISAS_H
+#ifndef QEMU_DISAS_H
+#define QEMU_DISAS_H
 
 #include "qemu-common.h"
 
 #ifdef NEED_CPU_H
+#include "cpu.h"
+
 /* Disassemble this for me please... (debugging). */
 void disas(FILE *out, void *code, unsigned long size);
 void target_disas(FILE *out, CPUState *cpu, target_ulong code,
@@ -46,4 +48,4 @@ extern uint64_t find_symbol(const char *name, int is_elf_class64);
 extern uint64_t exit_code;
 extern uint64_t exit_addr;
 
-#endif /* _QEMU_DISAS_H */
+#endif /* QEMU_DISAS_H */

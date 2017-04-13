@@ -14,6 +14,7 @@
 #include "hw/qdev.h"
 #include "hw/ptimer.h"
 #include "qemu/main-loop.h"
+#include "qemu/log.h"
 
 /* Common timer implementation.  */
 
@@ -170,7 +171,7 @@ static arm_timer_state *arm_timer_init(uint32_t freq)
     s->control = TIMER_CTRL_IE;
 
     bh = qemu_bh_new(arm_timer_tick, s);
-    s->timer = ptimer_init(bh);
+    s->timer = ptimer_init(bh, PTIMER_POLICY_DEFAULT);
     vmstate_register(NULL, -1, &vmstate_arm_timer, s);
     return s;
 }

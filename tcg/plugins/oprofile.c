@@ -82,7 +82,8 @@ static gint compare_pc_hash_entries (gconstpointer a, gconstpointer b)
 
 
 static void tb_helper_func(const TCGPluginInterface *tpi, TPIHelperInfo info,
-			   uint64_t address, uint64_t data1, uint64_t data2)
+			   uint64_t address, uint64_t data1, uint64_t data2,
+               const TranslationBlock* tb)
 {
   if (data1 != 0 && info.icount != 0)
     {
@@ -131,7 +132,8 @@ int64_equal(gconstpointer v1,
 }
 
 static void tb_helper_data(const TCGPluginInterface *tpi, TPIHelperInfo info,
-			   uint64_t address, uint64_t *data1, uint64_t *data2)
+			   uint64_t address, uint64_t *data1, uint64_t *data2,
+               const TranslationBlock* tb)
 {
   struct sym_hash_entry *sym_hash_entry;
   const char *symbol, *filename;

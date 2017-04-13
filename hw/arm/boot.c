@@ -9,11 +9,13 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include <libfdt.h>
 #include "hw/hw.h"
 #include "hw/arm/arm.h"
 #include "hw/arm/linux-boot-if.h"
 #include "sysemu/kvm.h"
 #include "sysemu/sysemu.h"
+#include "sysemu/numa.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
 #include "elf.h"
@@ -405,6 +407,9 @@ static int load_dtb(hwaddr addr, const struct arm_boot_info *binfo,
     void *fdt = NULL;
     int size, rc;
     uint32_t acells, scells;
+    char *nodename;
+    unsigned int i;
+    hwaddr mem_base, mem_len;
 
     if (binfo->dtb_filename) {
         char *filename;
@@ -456,12 +461,55 @@ static int load_dtb(hwaddr addr, const struct arm_boot_info *binfo,
         goto fail;
     }
 
-    rc = qemu_fdt_setprop_sized_cells(fdt, "/memory", "reg",
-                                      acells, binfo->loader_start,
-                                      scells, binfo->ram_size);
+    if (nb_numa_nodes > 0) {
+        /*
+         * Turn the /memory node created before into a NOP node, then create
+         * /memory@addr nodes for all numa nodes respectively.
+         */
+        qemu_fdt_nop_node(fdt, "/memory");
+        mem_base = binfo->loader_start;
+        for (i = 0; i < nb_numa_nodes; i++) {
+            mem_len = numa_info[i].node_mem;
+            nodename = g_strdup_printf("/memory@%" PRIx64, mem_base);
+            qemu_fdt_add_subnode(fdt, nodename);
+            qemu_fdt_setprop_string(fdt, nodename, "device_type", "memory");
+            rc = qemu_fdt_setprop_sized_cells(fdt, nodename, "reg",
+                                              acells, mem_base,
+                                              scells, mem_len);
+            if (rc < 0) {
+                fprintf(stderr, "couldn't set %s/reg for node %d\n", nodename,
+                        i);
+                goto fail;
+            }
+
+            qemu_fdt_setprop_cell(fdt, nodename, "numa-node-id", i);
+            mem_base += mem_len;
+            g_free(nodename);
+        }
+    } else {
+        Error *err = NULL;
+
+        rc = fdt_path_offset(fdt, "/memory");
+        if (rc < 0) {
+            qemu_fdt_add_subnode(fdt, "/memory");
+        }
+
+        if (!qemu_fdt_getprop(fdt, "/memory", "device_type", NULL, &err)) {
+            qemu_fdt_setprop_string(fdt, "/memory", "device_type", "memory");
+        }
+
+        rc = qemu_fdt_setprop_sized_cells(fdt, "/memory", "reg",
+                                          acells, binfo->loader_start,
+                                          scells, binfo->ram_size);
+        if (rc < 0) {
+            fprintf(stderr, "couldn't set /memory/reg\n");
+            goto fail;
+        }
+    }
+
+    rc = fdt_path_offset(fdt, "/chosen");
     if (rc < 0) {
-        fprintf(stderr, "couldn't set /memory/reg\n");
-        goto fail;
+        qemu_fdt_add_subnode(fdt, "/chosen");
     }
 
     if (binfo->kernel_cmdline && *binfo->kernel_cmdline) {
@@ -742,6 +790,8 @@ static void arm_load_kernel_notify(Notifier *notifier, void *data)
      */
     assert(!(info->secure_board_setup && kvm_enabled()));
 
+    info->dtb_filename = qemu_opt_get(qemu_get_machine_opts(), "dtb");
+
     /* Load the kernel.  */
     if (!info->kernel_filename || info->firmware_loaded) {
 
@@ -801,8 +851,6 @@ static void arm_load_kernel_notify(Notifier *notifier, void *data)
         kernel_load_offset = KERNEL_LOAD_ADDR;
         elf_machine = EM_ARM;
     }
-
-    info->dtb_filename = qemu_opt_get(qemu_get_machine_opts(), "dtb");
 
     if (!info->secondary_cpu_reset_hook) {
         info->secondary_cpu_reset_hook = default_reset_secondary;
