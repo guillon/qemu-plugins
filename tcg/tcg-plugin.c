@@ -441,11 +441,9 @@ static bool tcg_plugin_initialize(TCGPluginInterface *tpi)
 #define TPI_CALLBACK_NOT_GENERIC(tpi, callback, ...)       \
     do {                                                   \
         if (!tpi->is_generic) {                            \
-            tpi->env = tpi->_current_env;                  \
             tpi->tb = tpi->_current_tb;                    \
         }                                                  \
         tpi->callback(tpi, ##__VA_ARGS__);                 \
-        tpi->env = NULL;                                   \
         tpi->tb = NULL;                                    \
     } while (0);
 
@@ -513,7 +511,7 @@ static void tcg_plugin_tpi_after_gen_tb(TCGPluginInterface *tpi,
 
     if (tpi->pre_tb_helper_code) {
         /* Patch helper_tcg_plugin_tb*() parameters.  */
-        ((TPIHelperInfo *)tpi->_tb_info)->cpu_index = env->cpu_index;
+        ((TPIHelperInfo *)tpi->_tb_info)->cpu_index = tpi_current_cpu_index(tpi);
         ((TPIHelperInfo *)tpi->_tb_info)->size = tb->size;
 #if TCG_TARGET_REG_BITS == 64
         ((TPIHelperInfo *)tpi->_tb_info)->icount = tb->icount;
@@ -581,7 +579,7 @@ static void tcg_plugin_tpi_after_gen_opc(TCGPluginInterface *tpi,
     nb_args = MIN(nb_args, TPI_MAX_OP_ARGS);
 
     tpi_opcode.pc   = tpi->_current_pc;
-    tpi_opcode.cpu_index = tpi->_current_env->cpu_index;
+    tpi_opcode.cpu_index = tpi_current_cpu_index(tpi);
     tpi_opcode.nb_args = nb_args;
 
     tpi_opcode.operator = opcode->opc;
@@ -669,7 +667,6 @@ void tcg_plugin_before_gen_tb(CPUState *env, TranslationBlock *tb)
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
         if (tcg_plugin_initialize(tpi)) {
             tpi->_current_pc = tb->pc;
-            tpi->_current_env = env;
             tpi->_current_tb = tb;
         }
     }
@@ -698,7 +695,6 @@ void tcg_plugin_after_gen_tb(CPUState *env, TranslationBlock *tb)
         TCGPluginInterface *tpi = (TCGPluginInterface *)l->data;
         if (tcg_plugin_initialize(tpi)) {
             tpi->_current_pc = 0;
-            tpi->_current_env = NULL;
             tpi->_current_tb = NULL;
         }
     }

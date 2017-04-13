@@ -140,13 +140,11 @@ struct TCGPluginInterface
 
     /* Parameters for non-generic plugins.  */
     bool is_generic;
-    const CPUState *env;
     const TranslationBlock *tb;
 
     /* Some private state. */
     bool _in_gen_tpi_helper;
     uint64_t _current_pc;
-    const CPUState *_current_env;
     const TranslationBlock *_current_tb;
     TCGArg *_tb_info;
     TCGArg *_tb_data1;

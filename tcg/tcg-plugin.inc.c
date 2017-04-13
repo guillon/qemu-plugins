@@ -86,7 +86,11 @@ static inline CPUArchState *tpi_current_cpu_arch(const TCGPluginInterface *tpi)
 static inline uint32_t tpi_current_cpu_index(const TCGPluginInterface *tpi)
 {
     (void)tpi;
+#ifdef CONFIG_USER_ONLY
+    return 0; /* cpu_index is incremented for each thread, ignore that */
+#else
     return (uint32_t)tpi_current_cpu(tpi)->cpu_index;
+#endif
 }
 
 static inline uint32_t tpi_nb_cpus(const TCGPluginInterface *tpi)
