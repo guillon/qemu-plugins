@@ -502,6 +502,11 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
             qemu_mutex_unlock_iothread();
             return true;
         }
+        if (interrupt_request & CPU_INTERRUPT_WAIT) {
+            cpu->interrupt_request &= ~CPU_INTERRUPT_WAIT;
+            cpu->exception_index = EXCP_WAIT;
+            cpu_loop_exit(cpu);
+        }
         if (replay_mode == REPLAY_MODE_PLAY && !replay_has_interrupt()) {
             /* Do nothing */
         } else if (interrupt_request & CPU_INTERRUPT_HALT) {

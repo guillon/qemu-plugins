@@ -32,6 +32,7 @@
 #define EXCP_HALTED     0x10003 /* cpu is halted (waiting for external event) */
 #define EXCP_YIELD      0x10004 /* cpu wants to yield timeslice to another */
 #define EXCP_ATOMIC     0x10005 /* stop-the-world and emulate atomic */
+#define EXCP_WAIT       0x10006 /* wait for condition on cpu */
 
 /* some important defines:
  *
@@ -308,6 +309,8 @@ CPUArchState *cpu_copy(CPUArchState *env);
 #define CPU_INTERRUPT_TGT_INT_2   0x2000
 
 /* First unused bit: 0x4000.  */
+/* Block cpu while condition not reached.  */
+#define CPU_INTERRUPT_WAIT       0x4000
 
 /* The set of all bits that should be masked when single-stepping.  */
 #define CPU_INTERRUPT_SSTEP_MASK \

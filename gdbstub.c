@@ -323,6 +323,47 @@ static GDBState *gdbserver_state;
 bool gdb_has_xml;
 
 #ifdef CONFIG_USER_ONLY
+
+static pthread_mutex_t block_cpus_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool cpus_blocked = false;
+
+static void block_cpus(void)
+{
+    if (cpus_blocked)
+        return;
+
+    CPUState* current = gdbserver_state->c_cpu;
+
+    cpus_blocked = true;
+    pthread_mutex_lock(&block_cpus_mutex);
+
+    CPUState* cpu;
+    CPU_FOREACH(cpu)
+    {
+        if (cpu == current)
+            continue;
+
+        cpu->wait_condition = true;
+        cpu->wait_mutex_to_lock = &block_cpus_mutex;
+        cpu_interrupt(cpu, CPU_INTERRUPT_WAIT);
+    }
+}
+
+static void unblock_cpus(void)
+{
+    if (!cpus_blocked)
+        return;
+
+    CPUState* cpu;
+    CPU_FOREACH(cpu)
+    {
+        cpu->wait_condition = false;
+    }
+
+    pthread_mutex_unlock(&block_cpus_mutex);
+    cpus_blocked = false;
+}
+
 /* XXX: This is not thread safe.  Do we care?  */
 static int gdbserver_fd = -1;
 static int gdbserver_port = -1;
@@ -383,6 +424,7 @@ static inline void gdb_continue(GDBState *s)
 {
 #ifdef CONFIG_USER_ONLY
     s->running_state = 1;
+    unblock_cpus();
 #else
     if (!runstate_needs_reset()) {
         vm_start();
@@ -1159,10 +1201,9 @@ static int gdb_handle_packet(GDBState *s, const char *line_buf)
             gdbserver_fd = -1;
 
             gdb_breakpoint_remove_all();
+            block_cpus();
             gdbserver_start(gdbserver_port);
-            CPU_FOREACH(cpu) {
-                gdb_handlesig(cpu, 0); /* stop all cpu */
-            }
+            gdb_handlesig(s->c_cpu, 0); // handle packet after connection
             break;
         }
 #else /* !CONFIG_USER_ONLY */
@@ -1571,6 +1612,8 @@ gdb_handlesig(CPUState *cpu, int sig)
         snprintf(buf, sizeof(buf), "S%02x", target_signal_to_gdb(sig));
         put_packet(s, buf);
     }
+
+    block_cpus();
     /* put_packet() might have detected that the peer terminated the
        connection.  */
     if (s->fd < 0) {
@@ -1696,6 +1739,7 @@ int gdbserver_start(int port)
     /* accept connections */
     gdbserver_port = port;
     gdb_accept();
+
     return 0;
 }
 

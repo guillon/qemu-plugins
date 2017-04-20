@@ -329,6 +329,10 @@ struct CPUState {
     bool unplug;
     bool crash_occurred;
     bool exit_request;
+
+    bool wait_condition;
+    pthread_mutex_t* wait_mutex_to_lock;
+
     /* updates protected by BQL */
     uint32_t interrupt_request;
     int singlestep_enabled;
