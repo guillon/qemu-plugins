@@ -67,6 +67,7 @@ d4cache *d4_allcaches;
 extern void d4_invblock (d4cache *, int stacknum, d4stacknode *);
 extern void d4_invinfcache (d4cache *, const d4memref *);
 
+static void dummy_cache_miss_handler() {}
 
 /*
  * Create a new cache
@@ -88,6 +89,7 @@ d4new (d4cache *larger)
 		c->flags = D4F_MEM;
 		c->assoc = 1;	/* not used, but helps avoid compiler warnings */
 	}
+	c->cache_miss_handler = dummy_cache_miss_handler;
 	c->link = d4_allcaches;
 	d4_allcaches = c;	/* d4customize depends on this LIFO order */
 	return c;

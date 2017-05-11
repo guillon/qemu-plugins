@@ -192,7 +192,7 @@ typedef struct {
 #endif
 
 
-
+typedef void (*cache_miss_handler_t)(void);
 
 	/*
 	 * full specification of a cache
@@ -276,6 +276,8 @@ typedef struct d4_cache_struct {
 	double cap_blockmiss  [2 * D4NUMACCESSTYPES];
 	double conf_miss      [2 * D4NUMACCESSTYPES];	/* conflict misses */
 	double conf_blockmiss [2 * D4NUMACCESSTYPES];
+
+	cache_miss_handler_t cache_miss_handler;
 
 	double multiblock;
 	double bytes_read;
