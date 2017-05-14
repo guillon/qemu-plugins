@@ -55,11 +55,14 @@
 #else
 #define CS_GROUPS_NAME ""
 #endif
-#else
-#error "capstone library required"
 #endif /* CONFIG_CAPSTONE */
 
+
+#ifdef CONFIG_CAPSTONE
+
 static FILE *output;
+
+static bool no_colors;
 
 static csh cs_handle;
 
@@ -80,10 +83,9 @@ struct address_table_entry
     uint64_t count;
 };
 
-static void after_exec_opc(uint64_t pc, uint64_t count)
+static void after_exec_opc(uint64_t count_ptr)
 {
-    uint64_t *address_table_value = (uint64_t *)count;
-    (*address_table_value)++;
+    (*(uint64_t *)count_ptr)++;
 }
 
 static void after_gen_opc(
@@ -123,10 +125,9 @@ static void after_gen_opc(
     }
 
     // insert call to after_exec_opc
-    TCGArg args[2] = {
-        GET_TCGV_I64(tcg_const_i64(tpi_opcode->pc)),
-        GET_TCGV_I64(tcg_const_i64((uint64_t)address_table_entry)) };
-    tcg_gen_callN(tpi->tcg_ctx, after_exec_opc, TCG_CALL_DUMMY_ARG, 2, args);
+    TCGArg args[] = {
+        GET_TCGV_I64(tcg_const_i64((uint64_t)&address_table_entry->count)) };
+    tcg_gen_callN(tpi->tcg_ctx, after_exec_opc, TCG_CALL_DUMMY_ARG, 1, args);
 }
 
 static void output_symbol_coverage(
@@ -146,25 +147,25 @@ static void output_symbol_coverage(
         struct address_table_entry *value =
             g_hash_table_lookup(address_table, (uint64_t *)insn->address);
         uint64_t count = value ? value->count : 0;
-#if 0
-        fprintf(output, "%8ld | 0x%"PRIx64":\t %s\t %s\n",
-                count, insn->address, insn->mnemonic, insn->op_str);
-#else
-        fprintf(output, "%s%8ld%s | 0x%"PRIx64":\t %s%s\t %s%s\n",
-                count ? "\033[1;32m" : "\033[1;30m",
-                count,
-                "\033[1;30m",
-                insn->address,
-                count ? "\033[1;32m" : "\033[1;30m",
-                insn->mnemonic, insn->op_str,
-                "\033[0;37m"
+        if (no_colors)
+            fprintf(output, "%8ld | 0x%"PRIx64":\t %s\t %s\n",
+                    count, insn->address, insn->mnemonic, insn->op_str);
+        else
+            fprintf(output, "%s%8ld%s | 0x%"PRIx64":\t %s%s\t %s%s\n",
+                    count ? "\033[1;32m" : "\033[1;30m",
+                    count,
+                    "\033[1;30m",
+                    insn->address,
+                    count ? "\033[1;32m" : "\033[1;30m",
+                    insn->mnemonic, insn->op_str,
+                    "\033[0;37m"
             );
-#endif
     }
 }
 
 static void cpus_stopped(const TCGPluginInterface *tpi)
 {
+    no_colors = getenv("COVERAGE_NO_COLORS") != NULL;
     // output coverage for each symbol
     g_hash_table_foreach(symbol_table, output_symbol_coverage, (gpointer)tpi);
     // clean everything
@@ -177,7 +178,7 @@ static void cpus_stopped(const TCGPluginInterface *tpi)
 void tpi_init(TCGPluginInterface *tpi)
 {
     TPI_INIT_VERSION_GENERIC(tpi);
-    TPI_DECL_FUNC_2(tpi, after_exec_opc, void, i64, i64);
+    TPI_DECL_FUNC_1(tpi, after_exec_opc, void, i64);
 
     tpi->after_gen_opc  = after_gen_opc;
     tpi->cpus_stopped = cpus_stopped;
@@ -195,3 +196,4 @@ void tpi_init(TCGPluginInterface *tpi)
 }
 
 
+#endif /* CONFIG_CAPSTONE */
