@@ -63,6 +63,7 @@
 static FILE *output;
 
 static bool no_colors;
+static bool coveralls_output;
 
 static csh cs_handle;
 
@@ -142,16 +143,23 @@ static void output_symbol_coverage(
     size_t size = symbol_entry->symbol_size;
     uint64_t address = symbol_entry->symbol_address;
 
-    fprintf(output, "// symbol %s\n", symbol);
+    if (coveralls_output) {
+        fprintf(output, "\"%s\":\n", symbol);
+        fprintf(output, "  - [ null, \"// symbol %s\" ]\n", symbol);
+    } else
+        fprintf(output, "// symbol %s\n", symbol);
     while (cs_disasm_iter(cs_handle, &code, &size, &address, insn)) {
         struct address_table_entry *value =
             g_hash_table_lookup(address_table, (uint64_t *)insn->address);
         uint64_t count = value ? value->count : 0;
         if (no_colors)
-            fprintf(output, "%8ld | 0x%"PRIx64":\t %s\t %s\n",
+            fprintf(output, "%8" PRIu64 " | 0x%" PRIx64 ":\t %s\t %s\n",
+                    count, insn->address, insn->mnemonic, insn->op_str);
+        else if (coveralls_output)
+            fprintf(output, "  - [ %" PRIu64 ", \"// 0x%"PRIx64":\t %s\t %s\" ]\n",
                     count, insn->address, insn->mnemonic, insn->op_str);
         else
-            fprintf(output, "%s%8ld%s | 0x%"PRIx64":\t %s%s\t %s%s\n",
+            fprintf(output, "%s%8" PRIu64 "%s | 0x%"PRIx64":\t %s%s\t %s%s\n",
                     count ? "\033[1;32m" : "\033[1;30m",
                     count,
                     "\033[1;30m",
@@ -166,6 +174,7 @@ static void output_symbol_coverage(
 static void cpus_stopped(const TCGPluginInterface *tpi)
 {
     no_colors = getenv("COVERAGE_NO_COLORS") != NULL;
+    coveralls_output = getenv("COVERAGE_COVERALLS") != NULL;
     // output coverage for each symbol
     g_hash_table_foreach(symbol_table, output_symbol_coverage, (gpointer)tpi);
     // clean everything
