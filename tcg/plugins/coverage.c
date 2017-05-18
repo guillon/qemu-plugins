@@ -1,6 +1,6 @@
 /*
- * TCG plugin for QEMU: for each executed block, print its address and
- *                      the name of the function if available.
+ * TCG plugin for QEMU: coverage plugin for QEMU
+ *                      output each instruction with hit count
  *
  * Copyright (C) 2011 STMicroelectronics
  *
@@ -36,13 +36,13 @@
 #if CS_API_MAJOR < 3 /* Check compatibility with capstone 3.x. */
 #error "capstone library >= 3.x required"
 #endif
-#if defined(TARGET_I386)
-#define CS_ARCH CS_ARCH_X86
-#define CS_MODE CS_MODE_32
-#define CS_GROUPS_NAME "x86"
-#elif defined(TARGET_X86_64)
+#if defined(TARGET_X86_64)
 #define CS_ARCH CS_ARCH_X86
 #define CS_MODE CS_MODE_64
+#define CS_GROUPS_NAME "x86"
+#elif defined(TARGET_I386)
+#define CS_ARCH CS_ARCH_X86
+#define CS_MODE CS_MODE_32
 #define CS_GROUPS_NAME "x86"
 #elif defined(TARGET_AARCH64)
 #define CS_ARCH CS_ARCH_ARM64
