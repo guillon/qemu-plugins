@@ -1183,12 +1183,14 @@ static int gdb_handle_packet(GDBState *s, const char *line_buf)
         else if (strcmp(p, "Offsets") == 0) {
             TaskState *ts = s->c_cpu->opaque;
 
+            /* for PIE executable, program_offset is not 0,
+               thus add it to offset returned to gdb */
             snprintf(buf, sizeof(buf),
                      "Text=" TARGET_ABI_FMT_lx ";Data=" TARGET_ABI_FMT_lx
                      ";Bss=" TARGET_ABI_FMT_lx,
-                     ts->info->code_offset,
-                     ts->info->data_offset,
-                     ts->info->data_offset);
+                     ts->info->code_offset + ts->info->program_offset,
+                     ts->info->data_offset + ts->info->program_offset,
+                     ts->info->data_offset + ts->info->program_offset);
             put_packet(s, buf);
             break;
         }

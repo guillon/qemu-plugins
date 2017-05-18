@@ -2075,6 +2075,10 @@ static void load_elf_image(const char *image_name, int image_fd,
     }
 #endif
 
+    /* load_bias will be erased for executable with interpreter load_bias,
+     * keep original one in program_offset */
+    info->program_offset = load_bias;
+
     info->load_bias = load_bias;
     info->load_addr = load_addr;
     info->entry = ehdr->e_entry + load_bias;
