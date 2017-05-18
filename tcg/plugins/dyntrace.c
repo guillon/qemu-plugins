@@ -39,13 +39,13 @@
 #error "dyncount plugin required capstone library >= 3.x. Please install from http://www.capstone-engine.org/."
 #endif
 
-#if defined(TARGET_I386)
-#define CS_ARCH CS_ARCH_X86
-#define CS_MODE CS_MODE_32
-#define CS_GROUPS_NAME "x86"
-#elif defined(TARGET_X86_64)
+#if defined(TARGET_X86_64)
 #define CS_ARCH CS_ARCH_X86
 #define CS_MODE CS_MODE_64
+#define CS_GROUPS_NAME "x86"
+#elif defined(TARGET_I386)
+#define CS_ARCH CS_ARCH_X86
+#define CS_MODE CS_MODE_32
 #define CS_GROUPS_NAME "x86"
 #elif defined(TARGET_AARCH64)
 #define CS_ARCH CS_ARCH_ARM64
