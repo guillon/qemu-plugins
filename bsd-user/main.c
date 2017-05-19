@@ -1124,7 +1124,7 @@ int main(int argc, char **argv)
 #endif
 
     if (gdbstub_port) {
-        gdbserver_start (gdbstub_port);
+        gdbserver_start (gdbstub_port, filename);
         gdb_handlesig(cpu, 0);
     }
     cpu_loop(env);

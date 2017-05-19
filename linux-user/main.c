@@ -4892,7 +4892,7 @@ int main(int argc, char **argv, char **envp)
     tcg_plugin_initialize_all();
 
     if (gdbstub_port) {
-        if (gdbserver_start(gdbstub_port) < 0) {
+        if (gdbserver_start(gdbstub_port, filename) < 0) {
             fprintf(stderr, "qemu: could not open gdbserver on port %d\n",
                     gdbstub_port);
             exit(EXIT_FAILURE);

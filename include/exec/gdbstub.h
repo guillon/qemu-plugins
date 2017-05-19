@@ -107,7 +107,7 @@ static inline int gdb_get_reg64(uint8_t *mem_buf, uint64_t val)
 #endif
 
 #ifdef CONFIG_USER_ONLY
-int gdbserver_start(int);
+int gdbserver_start(int, const char* bin_name);
 #else
 int gdbserver_start(const char *port);
 #endif

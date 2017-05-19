@@ -326,6 +326,7 @@ bool gdb_has_xml;
 
 static pthread_mutex_t block_cpus_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool cpus_blocked = false;
+static const char* current_bin_name;
 
 static void block_cpus(void)
 {
@@ -1204,7 +1205,7 @@ static int gdb_handle_packet(GDBState *s, const char *line_buf)
 
             gdb_breakpoint_remove_all();
             block_cpus();
-            gdbserver_start(gdbserver_port);
+            gdbserver_start(gdbserver_port, current_bin_name);
             gdb_handlesig(s->c_cpu, 0); // handle packet after connection
             break;
         }
@@ -1259,6 +1260,7 @@ static int gdb_handle_packet(GDBState *s, const char *line_buf)
             if (cc->gdb_core_xml_file != NULL) {
                 pstrcat(buf, sizeof(buf), ";qXfer:features:read+");
             }
+            pstrcat(buf, sizeof(buf), ";qXfer:exec-file:read+");
             put_packet(s, buf);
             break;
         }
@@ -1305,6 +1307,14 @@ static int gdb_handle_packet(GDBState *s, const char *line_buf)
             put_packet_binary(s, buf, len + 1);
             break;
         }
+#ifdef CONFIG_USER_ONLY
+        if (strncmp(p, "Xfer:exec-file:read:", 20) == 0) {
+            snprintf(buf, sizeof(buf),
+                     "l%s", current_bin_name ? current_bin_name:"");
+            put_packet(s, buf);
+            break;
+        }
+#endif
         if (is_query_packet(p, "Attached", ':')) {
             put_packet(s, GDB_ATTACHED);
             break;
@@ -1733,7 +1743,7 @@ static int gdbserver_open(int port)
     return fd;
 }
 
-int gdbserver_start(int port)
+int gdbserver_start(int port, const char* bin_name)
 {
     gdbserver_fd = gdbserver_open(port);
     if (gdbserver_fd < 0)
@@ -1741,6 +1751,18 @@ int gdbserver_start(int port)
     /* accept connections */
     gdbserver_port = port;
     gdb_accept();
+
+    /* update binary name */
+    if (current_bin_name)
+    {
+        free((char*)current_bin_name);
+        current_bin_name = NULL;
+    }
+
+    if (bin_name)
+    {
+        current_bin_name = realpath(bin_name, NULL);
+    }
 
     return 0;
 }
