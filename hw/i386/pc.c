@@ -67,6 +67,8 @@
 #include "qapi/visitor.h"
 #include "qapi-visit.h"
 #include "qom/cpu.h"
+#include "hw/nmi.h"
+#include "hw/i386/intel_iommu.h"
 
 /* debug PC/ISA interrupts */
 //#define DEBUG_IRQ
@@ -160,13 +162,15 @@ int cpu_get_pic_interrupt(CPUX86State *env)
     X86CPU *cpu = x86_env_get_cpu(env);
     int intno;
 
-    intno = apic_get_interrupt(cpu->apic_state);
-    if (intno >= 0) {
-        return intno;
-    }
-    /* read the irq from the PIC */
-    if (!apic_accept_pic_intr(cpu->apic_state)) {
-        return -1;
+    if (!kvm_irqchip_in_kernel()) {
+        intno = apic_get_interrupt(cpu->apic_state);
+        if (intno >= 0) {
+            return intno;
+        }
+        /* read the irq from the PIC */
+        if (!apic_accept_pic_intr(cpu->apic_state)) {
+            return -1;
+        }
     }
 
     intno = pic_read_irq(isa_pic);
@@ -179,7 +183,7 @@ static void pic_irq_request(void *opaque, int irq, int level)
     X86CPU *cpu = X86_CPU(cs);
 
     DPRINTF("pic_irqs: %s irq %d\n", level? "raise" : "lower", irq);
-    if (cpu->apic_state) {
+    if (cpu->apic_state && !kvm_irqchip_in_kernel()) {
         CPU_FOREACH(cs) {
             cpu = X86_CPU(cs);
             if (apic_accept_pic_intr(cpu->apic_state)) {
@@ -380,7 +384,7 @@ ISADevice *pc_find_fdc0(void)
         error_report("warning: multiple floppy disk controllers with "
                      "iobase=0x3f0 have been found");
         error_printf("the one being picked for CMOS setup might not reflect "
-                     "your intent");
+                     "your intent\n");
     }
 
     return state.floppy;
@@ -396,13 +400,13 @@ static void pc_cmos_init_late(void *opaque)
     int i, trans;
 
     val = 0;
-    if (ide_get_geometry(arg->idebus[0], 0,
-                         &cylinders, &heads, &sectors) >= 0) {
+    if (arg->idebus[0] && ide_get_geometry(arg->idebus[0], 0,
+                                           &cylinders, &heads, &sectors) >= 0) {
         cmos_init_hd(s, 0x19, 0x1b, cylinders, heads, sectors);
         val |= 0xf0;
     }
-    if (ide_get_geometry(arg->idebus[0], 1,
-                         &cylinders, &heads, &sectors) >= 0) {
+    if (arg->idebus[0] && ide_get_geometry(arg->idebus[0], 1,
+                                           &cylinders, &heads, &sectors) >= 0) {
         cmos_init_hd(s, 0x1a, 0x24, cylinders, heads, sectors);
         val |= 0x0f;
     }
@@ -414,7 +418,8 @@ static void pc_cmos_init_late(void *opaque)
            geometry.  It is always such that: 1 <= sects <= 63, 1
            <= heads <= 16, 1 <= cylinders <= 16383. The BIOS
            geometry can be different if a translation is done. */
-        if (ide_get_geometry(arg->idebus[i / 2], i % 2,
+        if (arg->idebus[i / 2] &&
+            ide_get_geometry(arg->idebus[i / 2], i % 2,
                              &cylinders, &heads, &sectors) >= 0) {
             trans = ide_get_bios_chs_trans(arg->idebus[i / 2], i % 2) - 1;
             assert((trans & ~3) == 0);
@@ -470,9 +475,6 @@ void pc_cmos_init(PCMachineState *pcms,
     rtc_set_memory(s, 0x5c, val >> 8);
     rtc_set_memory(s, 0x5d, val >> 16);
 
-    /* set the number of CPU */
-    rtc_set_memory(s, 0x5f, smp_cpus - 1);
-
     object_property_add_link(OBJECT(pcms), "rtc_state",
                              TYPE_ISA_DEVICE,
                              (Object **)&pcms->rtc,
@@ -504,7 +506,7 @@ typedef struct Port92State {
 
     MemoryRegion io;
     uint8_t outport;
-    qemu_irq *a20_out;
+    qemu_irq a20_out;
 } Port92State;
 
 static void port92_write(void *opaque, hwaddr addr, uint64_t val,
@@ -515,7 +517,7 @@ static void port92_write(void *opaque, hwaddr addr, uint64_t val,
 
     DPRINTF("port92: write 0x%02" PRIx64 "\n", val);
     s->outport = val;
-    qemu_set_irq(*s->a20_out, (val >> 1) & 1);
+    qemu_set_irq(s->a20_out, (val >> 1) & 1);
     if ((val & 1) && !(oldval & 1)) {
         qemu_system_reset_request();
     }
@@ -532,11 +534,9 @@ static uint64_t port92_read(void *opaque, hwaddr addr,
     return ret;
 }
 
-static void port92_init(ISADevice *dev, qemu_irq *a20_out)
+static void port92_init(ISADevice *dev, qemu_irq a20_out)
 {
-    Port92State *s = PORT92(dev);
-
-    s->a20_out = a20_out;
+    qdev_connect_gpio_out_named(DEVICE(dev), PORT92_A20_LINE, 0, a20_out);
 }
 
 static const VMStateDescription vmstate_port92_isa = {
@@ -573,6 +573,8 @@ static void port92_initfn(Object *obj)
     memory_region_init_io(&s->io, OBJECT(s), &port92_ops, s, "port92", 1);
 
     s->outport = 0;
+
+    qdev_init_gpio_out_named(DEVICE(obj), &s->a20_out, PORT92_A20_LINE, 1);
 }
 
 static void port92_realizefn(DeviceState *dev, Error **errp)
@@ -699,16 +701,21 @@ static uint32_t x86_cpu_apic_id_from_index(unsigned int cpu_index)
     }
 }
 
-static void pc_build_smbios(FWCfgState *fw_cfg)
+static void pc_build_smbios(PCMachineState *pcms)
 {
     uint8_t *smbios_tables, *smbios_anchor;
     size_t smbios_tables_len, smbios_anchor_len;
     struct smbios_phys_mem_area *mem_array;
     unsigned i, array_count;
+    MachineState *ms = MACHINE(pcms);
+    X86CPU *cpu = X86_CPU(ms->possible_cpus->cpus[0].cpu);
+
+    /* tell smbios about cpuid version and features */
+    smbios_set_cpuid(cpu->env.cpuid_version, cpu->env.features[FEAT_1_EDX]);
 
     smbios_tables = smbios_get_table_legacy(&smbios_tables_len);
     if (smbios_tables) {
-        fw_cfg_add_bytes(fw_cfg, FW_CFG_SMBIOS_ENTRIES,
+        fw_cfg_add_bytes(pcms->fw_cfg, FW_CFG_SMBIOS_ENTRIES,
                          smbios_tables, smbios_tables_len);
     }
 
@@ -729,9 +736,9 @@ static void pc_build_smbios(FWCfgState *fw_cfg)
     g_free(mem_array);
 
     if (smbios_anchor) {
-        fw_cfg_add_file(fw_cfg, "etc/smbios/smbios-tables",
+        fw_cfg_add_file(pcms->fw_cfg, "etc/smbios/smbios-tables",
                         smbios_tables, smbios_tables_len);
-        fw_cfg_add_file(fw_cfg, "etc/smbios/smbios-anchor",
+        fw_cfg_add_file(pcms->fw_cfg, "etc/smbios/smbios-anchor",
                         smbios_anchor, smbios_anchor_len);
     }
 }
@@ -743,28 +750,25 @@ static FWCfgState *bochs_bios_init(AddressSpace *as, PCMachineState *pcms)
     int i, j;
 
     fw_cfg = fw_cfg_init_io_dma(FW_CFG_IO_BASE, FW_CFG_IO_BASE + 4, as);
+    fw_cfg_add_i16(fw_cfg, FW_CFG_NB_CPUS, pcms->boot_cpus);
 
     /* FW_CFG_MAX_CPUS is a bit confusing/problematic on x86:
      *
-     * SeaBIOS needs FW_CFG_MAX_CPUS for CPU hotplug, but the CPU hotplug
-     * QEMU<->SeaBIOS interface is not based on the "CPU index", but on the APIC
-     * ID of hotplugged CPUs[1]. This means that FW_CFG_MAX_CPUS is not the
-     * "maximum number of CPUs", but the "limit to the APIC ID values SeaBIOS
-     * may see".
+     * For machine types prior to 1.8, SeaBIOS needs FW_CFG_MAX_CPUS for
+     * building MPTable, ACPI MADT, ACPI CPU hotplug and ACPI SRAT table,
+     * that tables are based on xAPIC ID and QEMU<->SeaBIOS interface
+     * for CPU hotplug also uses APIC ID and not "CPU index".
+     * This means that FW_CFG_MAX_CPUS is not the "maximum number of CPUs",
+     * but the "limit to the APIC ID values SeaBIOS may see".
      *
-     * So, this means we must not use max_cpus, here, but the maximum possible
-     * APIC ID value, plus one.
-     *
-     * [1] The only kind of "CPU identifier" used between SeaBIOS and QEMU is
-     *     the APIC ID, not the "CPU index"
+     * So for compatibility reasons with old BIOSes we are stuck with
+     * "etc/max-cpus" actually being apic_id_limit
      */
     fw_cfg_add_i16(fw_cfg, FW_CFG_MAX_CPUS, (uint16_t)pcms->apic_id_limit);
     fw_cfg_add_i64(fw_cfg, FW_CFG_RAM_SIZE, (uint64_t)ram_size);
     fw_cfg_add_bytes(fw_cfg, FW_CFG_ACPI_TABLES,
                      acpi_tables, acpi_tables_len);
     fw_cfg_add_i32(fw_cfg, FW_CFG_IRQ0_OVERRIDE, kvm_allows_irq0_override());
-
-    pc_build_smbios(fw_cfg);
 
     fw_cfg_add_bytes(fw_cfg, FW_CFG_E820_TABLE,
                      &e820_reserve, sizeof(e820_reserve));
@@ -781,11 +785,9 @@ static FWCfgState *bochs_bios_init(AddressSpace *as, PCMachineState *pcms)
     for (i = 0; i < max_cpus; i++) {
         unsigned int apic_id = x86_cpu_apic_id_from_index(i);
         assert(apic_id < pcms->apic_id_limit);
-        for (j = 0; j < nb_numa_nodes; j++) {
-            if (test_bit(i, numa_info[j].node_cpu)) {
-                numa_fw_cfg[apic_id + 1] = cpu_to_le64(j);
-                break;
-            }
+        j = numa_get_node_for_cpu(i);
+        if (j < nb_numa_nodes) {
+            numa_fw_cfg[apic_id + 1] = cpu_to_le64(j);
         }
     }
     for (i = 0; i < nb_numa_nodes; i++) {
@@ -813,11 +815,26 @@ static long get_file_size(FILE *f)
     return size;
 }
 
+/* setup_data types */
+#define SETUP_NONE     0
+#define SETUP_E820_EXT 1
+#define SETUP_DTB      2
+#define SETUP_PCI      3
+#define SETUP_EFI      4
+
+struct setup_data {
+    uint64_t next;
+    uint32_t type;
+    uint32_t len;
+    uint8_t data[0];
+} __attribute__((packed));
+
 static void load_linux(PCMachineState *pcms,
                        FWCfgState *fw_cfg)
 {
     uint16_t protocol;
     int setup_size, kernel_size, initrd_size = 0, cmdline_size;
+    int dtb_size, setup_data_offset;
     uint32_t initrd_max;
     uint8_t header[8192], *setup, *kernel, *initrd_data;
     hwaddr real_addr, prot_addr, cmdline_addr, initrd_addr = 0;
@@ -825,8 +842,10 @@ static void load_linux(PCMachineState *pcms,
     char *vmode;
     MachineState *machine = MACHINE(pcms);
     PCMachineClass *pcmc = PC_MACHINE_GET_CLASS(pcms);
+    struct setup_data *setup_data;
     const char *kernel_filename = machine->kernel_filename;
     const char *initrd_filename = machine->initrd_filename;
+    const char *dtb_filename = machine->dtb;
     const char *kernel_cmdline = machine->kernel_cmdline;
 
     /* Align to 16 bytes as a paranoia measure */
@@ -989,6 +1008,35 @@ static void load_linux(PCMachineState *pcms,
         exit(1);
     }
     fclose(f);
+
+    /* append dtb to kernel */
+    if (dtb_filename) {
+        if (protocol < 0x209) {
+            fprintf(stderr, "qemu: Linux kernel too old to load a dtb\n");
+            exit(1);
+        }
+
+        dtb_size = get_image_size(dtb_filename);
+        if (dtb_size <= 0) {
+            fprintf(stderr, "qemu: error reading dtb %s: %s\n",
+                    dtb_filename, strerror(errno));
+            exit(1);
+        }
+
+        setup_data_offset = QEMU_ALIGN_UP(kernel_size, 16);
+        kernel_size = setup_data_offset + sizeof(struct setup_data) + dtb_size;
+        kernel = g_realloc(kernel, kernel_size);
+
+        stq_p(header+0x250, prot_addr + setup_data_offset);
+
+        setup_data = (struct setup_data *)(kernel + setup_data_offset);
+        setup_data->next = 0;
+        setup_data->type = cpu_to_le32(SETUP_DTB);
+        setup_data->len = cpu_to_le32(dtb_size);
+
+        load_image_size(dtb_filename, setup_data->data, dtb_size);
+    }
+
     memcpy(setup, header, MIN(sizeof(header), setup_size));
 
     fw_cfg_add_i32(fw_cfg, FW_CFG_KERNEL_ADDR, prot_addr);
@@ -999,8 +1047,13 @@ static void load_linux(PCMachineState *pcms,
     fw_cfg_add_i32(fw_cfg, FW_CFG_SETUP_SIZE, setup_size);
     fw_cfg_add_bytes(fw_cfg, FW_CFG_SETUP_DATA, setup, setup_size);
 
-    option_rom[nb_option_roms].name = "linuxboot.bin";
-    option_rom[nb_option_roms].bootindex = 0;
+    if (fw_cfg_dma_enabled(fw_cfg)) {
+        option_rom[nb_option_roms].name = "linuxboot_dma.bin";
+        option_rom[nb_option_roms].bootindex = 0;
+    } else {
+        option_rom[nb_option_roms].name = "linuxboot.bin";
+        option_rom[nb_option_roms].bootindex = 0;
+    }
     nb_option_roms++;
 }
 
@@ -1040,50 +1093,31 @@ void pc_acpi_smi_interrupt(void *opaque, int irq, int level)
     }
 }
 
-static X86CPU *pc_new_cpu(const char *cpu_model, int64_t apic_id,
-                          Error **errp)
+static void pc_new_cpu(const char *typename, int64_t apic_id, Error **errp)
 {
-    X86CPU *cpu = NULL;
+    Object *cpu = NULL;
     Error *local_err = NULL;
 
-    cpu = cpu_x86_create(cpu_model, &local_err);
-    if (local_err != NULL) {
-        goto out;
-    }
+    cpu = object_new(typename);
 
-    object_property_set_int(OBJECT(cpu), apic_id, "apic-id", &local_err);
-    object_property_set_bool(OBJECT(cpu), true, "realized", &local_err);
+    object_property_set_int(cpu, apic_id, "apic-id", &local_err);
+    object_property_set_bool(cpu, true, "realized", &local_err);
 
-out:
+    object_unref(cpu);
     if (local_err) {
         error_propagate(errp, local_err);
-        object_unref(OBJECT(cpu));
-        cpu = NULL;
     }
-    return cpu;
 }
 
 void pc_hot_add_cpu(const int64_t id, Error **errp)
 {
-    X86CPU *cpu;
-    MachineState *machine = MACHINE(qdev_get_machine());
+    ObjectClass *oc;
+    MachineState *ms = MACHINE(qdev_get_machine());
     int64_t apic_id = x86_cpu_apic_id_from_index(id);
     Error *local_err = NULL;
 
     if (id < 0) {
         error_setg(errp, "Invalid CPU id: %" PRIi64, id);
-        return;
-    }
-
-    if (cpu_exists(apic_id)) {
-        error_setg(errp, "Unable to add CPU: %" PRIi64
-                   ", it already exists", id);
-        return;
-    }
-
-    if (id >= max_cpus) {
-        error_setg(errp, "Unable to add CPU: %" PRIi64
-                   ", max allowed: %d", id, max_cpus - 1);
         return;
     }
 
@@ -1094,19 +1128,25 @@ void pc_hot_add_cpu(const int64_t id, Error **errp)
         return;
     }
 
-    cpu = pc_new_cpu(machine->cpu_model, apic_id, &local_err);
+    assert(ms->possible_cpus->cpus[0].cpu); /* BSP is always present */
+    oc = OBJECT_CLASS(CPU_GET_CLASS(ms->possible_cpus->cpus[0].cpu));
+    pc_new_cpu(object_class_get_name(oc), apic_id, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
         return;
     }
-    object_unref(OBJECT(cpu));
 }
 
 void pc_cpus_init(PCMachineState *pcms)
 {
     int i;
-    X86CPU *cpu = NULL;
+    CPUClass *cc;
+    ObjectClass *oc;
+    const char *typename;
+    gchar **model_pieces;
+    const CPUArchIdList *possible_cpus;
     MachineState *machine = MACHINE(pcms);
+    MachineClass *mc = MACHINE_GET_CLASS(pcms);
 
     /* init CPUs */
     if (machine->cpu_model == NULL) {
@@ -1117,6 +1157,22 @@ void pc_cpus_init(PCMachineState *pcms)
 #endif
     }
 
+    model_pieces = g_strsplit(machine->cpu_model, ",", 2);
+    if (!model_pieces[0]) {
+        error_report("Invalid/empty CPU model name");
+        exit(1);
+    }
+
+    oc = cpu_class_by_name(TYPE_X86_CPU, model_pieces[0]);
+    if (oc == NULL) {
+        error_report("Unable to find CPU definition: %s", model_pieces[0]);
+        exit(1);
+    }
+    typename = object_class_get_name(oc);
+    cc = CPU_CLASS(oc);
+    cc->parse_features(typename, model_pieces[1], &error_fatal);
+    g_strfreev(model_pieces);
+
     /* Calculates the limit to CPU APIC ID values
      *
      * Limit for the APIC ID value, so that all
@@ -1125,36 +1181,53 @@ void pc_cpus_init(PCMachineState *pcms)
      * This is used for FW_CFG_MAX_CPUS. See comments on bochs_bios_init().
      */
     pcms->apic_id_limit = x86_cpu_apic_id_from_index(max_cpus - 1) + 1;
-    if (pcms->apic_id_limit > ACPI_CPU_HOTPLUG_ID_LIMIT) {
-        error_report("max_cpus is too large. APIC ID of last CPU is %u",
-                     pcms->apic_id_limit - 1);
-        exit(1);
+    possible_cpus = mc->possible_cpu_arch_ids(machine);
+    for (i = 0; i < smp_cpus; i++) {
+        pc_new_cpu(typename, possible_cpus->cpus[i].arch_id, &error_fatal);
     }
-
-    pcms->possible_cpus = g_malloc0(sizeof(CPUArchIdList) +
-                                    sizeof(CPUArchId) * max_cpus);
-    for (i = 0; i < max_cpus; i++) {
-        pcms->possible_cpus->cpus[i].arch_id = x86_cpu_apic_id_from_index(i);
-        pcms->possible_cpus->len++;
-        if (i < smp_cpus) {
-            cpu = pc_new_cpu(machine->cpu_model, x86_cpu_apic_id_from_index(i),
-                             &error_fatal);
-            pcms->possible_cpus->cpus[i].cpu = CPU(cpu);
-            object_unref(OBJECT(cpu));
-        }
-    }
-
-    /* tell smbios about cpuid version and features */
-    smbios_set_cpuid(cpu->env.cpuid_version, cpu->env.features[FEAT_1_EDX]);
 }
 
-/* pci-info ROM file. Little endian format */
-typedef struct PcRomPciInfo {
-    uint64_t w32_min;
-    uint64_t w32_max;
-    uint64_t w64_min;
-    uint64_t w64_max;
-} PcRomPciInfo;
+static void pc_build_feature_control_file(PCMachineState *pcms)
+{
+    MachineState *ms = MACHINE(pcms);
+    X86CPU *cpu = X86_CPU(ms->possible_cpus->cpus[0].cpu);
+    CPUX86State *env = &cpu->env;
+    uint32_t unused, ecx, edx;
+    uint64_t feature_control_bits = 0;
+    uint64_t *val;
+
+    cpu_x86_cpuid(env, 1, 0, &unused, &unused, &ecx, &edx);
+    if (ecx & CPUID_EXT_VMX) {
+        feature_control_bits |= FEATURE_CONTROL_VMXON_ENABLED_OUTSIDE_SMX;
+    }
+
+    if ((edx & (CPUID_EXT2_MCE | CPUID_EXT2_MCA)) ==
+        (CPUID_EXT2_MCE | CPUID_EXT2_MCA) &&
+        (env->mcg_cap & MCG_LMCE_P)) {
+        feature_control_bits |= FEATURE_CONTROL_LMCE;
+    }
+
+    if (!feature_control_bits) {
+        return;
+    }
+
+    val = g_malloc(sizeof(*val));
+    *val = cpu_to_le64(feature_control_bits | FEATURE_CONTROL_LOCKED);
+    fw_cfg_add_file(pcms->fw_cfg, "etc/msr_feature_control", val, sizeof(*val));
+}
+
+static void rtc_set_cpus_count(ISADevice *rtc, uint16_t cpus_count)
+{
+    if (cpus_count > 0xff) {
+        /* If the number of CPUs can't be represented in 8 bits, the
+         * BIOS must use "FW_CFG_NB_CPUS". Set RTC field to 0 just
+         * to make old BIOSes fail more predictably.
+         */
+        rtc_set_memory(rtc, 0x5f, 0);
+    } else {
+        rtc_set_memory(rtc, 0x5f, cpus_count - 1);
+    }
+}
 
 static
 void pc_machine_done(Notifier *notifier, void *data)
@@ -1162,6 +1235,9 @@ void pc_machine_done(Notifier *notifier, void *data)
     PCMachineState *pcms = container_of(notifier,
                                         PCMachineState, machine_done);
     PCIBus *bus = pcms->bus;
+
+    /* set the number of CPUs */
+    rtc_set_cpus_count(pcms->rtc, pcms->boot_cpus);
 
     if (bus) {
         int extra_hosts = 0;
@@ -1181,11 +1257,30 @@ void pc_machine_done(Notifier *notifier, void *data)
     }
 
     acpi_setup();
+    if (pcms->fw_cfg) {
+        pc_build_smbios(pcms);
+        pc_build_feature_control_file(pcms);
+        /* update FW_CFG_NB_CPUS to account for -device added CPUs */
+        fw_cfg_modify_i16(pcms->fw_cfg, FW_CFG_NB_CPUS, pcms->boot_cpus);
+    }
+
+    if (pcms->apic_id_limit > 255) {
+        IntelIOMMUState *iommu = INTEL_IOMMU_DEVICE(x86_iommu_get_default());
+
+        if (!iommu || !iommu->x86_iommu.intr_supported ||
+            iommu->intr_eim != ON_OFF_AUTO_ON) {
+            error_report("current -smp configuration requires "
+                         "Extended Interrupt Mode enabled. "
+                         "You can add an IOMMU using: "
+                         "-device intel-iommu,intremap=on,eim=on");
+            exit(EXIT_FAILURE);
+        }
+    }
 }
 
 void pc_guest_info_init(PCMachineState *pcms)
 {
-    int i, j;
+    int i;
 
     pcms->apic_xrupt_override = kvm_allows_irq0_override();
     pcms->numa_nodes = nb_numa_nodes;
@@ -1193,20 +1288,6 @@ void pc_guest_info_init(PCMachineState *pcms)
                                     sizeof *pcms->node_mem);
     for (i = 0; i < nb_numa_nodes; i++) {
         pcms->node_mem[i] = numa_info[i].node_mem;
-    }
-
-    pcms->node_cpu = g_malloc0(pcms->apic_id_limit *
-                                     sizeof *pcms->node_cpu);
-
-    for (i = 0; i < max_cpus; i++) {
-        unsigned int apic_id = x86_cpu_apic_id_from_index(i);
-        assert(apic_id < pcms->apic_id_limit);
-        for (j = 0; j < nb_numa_nodes; j++) {
-            if (test_bit(i, numa_info[j].node_cpu)) {
-                pcms->node_cpu[apic_id] = j;
-                break;
-            }
-        }
     }
 
     pcms->machine_done.notify = pc_machine_done;
@@ -1258,11 +1339,13 @@ void xen_load_linux(PCMachineState *pcms)
     assert(MACHINE(pcms)->kernel_filename != NULL);
 
     fw_cfg = fw_cfg_init_io(FW_CFG_IO_BASE);
+    fw_cfg_add_i16(fw_cfg, FW_CFG_NB_CPUS, pcms->boot_cpus);
     rom_set_fw(fw_cfg);
 
     load_linux(pcms, fw_cfg);
     for (i = 0; i < nb_option_roms; i++) {
         assert(!strcmp(option_rom[i].name, "linuxboot.bin") ||
+               !strcmp(option_rom[i].name, "linuxboot_dma.bin") ||
                !strcmp(option_rom[i].name, "multiboot.bin"));
         rom_add_option(option_rom[i].name, option_rom[i].bootindex);
     }
@@ -1395,6 +1478,9 @@ void pc_memory_init(PCMachineState *pcms,
         rom_add_option(option_rom[i].name, option_rom[i].bootindex);
     }
     pcms->fw_cfg = fw_cfg;
+
+    /* Init default IOAPIC address space */
+    pcms->ioapic_as = &address_space_memory;
 }
 
 qemu_irq pc_allocate_cpu_irq(void)
@@ -1442,6 +1528,7 @@ void pc_basic_device_init(ISABus *isa_bus, qemu_irq *gsi,
                           ISADevice **rtc_state,
                           bool create_fdctrl,
                           bool no_vmport,
+                          bool has_pit,
                           uint32_t hpet_irqs)
 {
     int i;
@@ -1495,7 +1582,7 @@ void pc_basic_device_init(ISABus *isa_bus, qemu_irq *gsi,
 
     qemu_register_boot_set(pc_boot_set, *rtc_state);
 
-    if (!xen_enabled()) {
+    if (!xen_enabled() && has_pit) {
         if (kvm_pit_in_kernel()) {
             pit = kvm_pit_init(isa_bus, 0x40);
         } else {
@@ -1508,12 +1595,12 @@ void pc_basic_device_init(ISABus *isa_bus, qemu_irq *gsi,
         pcspk_init(isa_bus, pit);
     }
 
-    serial_hds_isa_init(isa_bus, MAX_SERIAL_PORTS);
+    serial_hds_isa_init(isa_bus, 0, MAX_SERIAL_PORTS);
     parallel_hds_isa_init(isa_bus, MAX_PARALLEL_PORTS);
 
     a20_line = qemu_allocate_irqs(handle_a20_line_change, first_cpu, 2);
     i8042 = isa_create_simple(isa_bus, "i8042");
-    i8042_setup_a20_line(i8042, &a20_line[0]);
+    i8042_setup_a20_line(i8042, a20_line[0]);
     if (!no_vmport) {
         vmport_init(isa_bus);
         vmmouse = isa_try_create(isa_bus, "vmmouse");
@@ -1526,7 +1613,8 @@ void pc_basic_device_init(ISABus *isa_bus, qemu_irq *gsi,
         qdev_init_nofail(dev);
     }
     port92 = isa_create_simple(isa_bus, "port92");
-    port92_init(port92, &a20_line[1]);
+    port92_init(port92, a20_line[1]);
+    g_free(a20_line);
 
     DMA_init(isa_bus, 0);
 
@@ -1561,9 +1649,15 @@ void pc_pci_device_init(PCIBus *pci_bus)
     int max_bus;
     int bus;
 
+    /* Note: if=scsi is deprecated with PC machine types */
     max_bus = drive_get_max_bus(IF_SCSI);
     for (bus = 0; bus <= max_bus; bus++) {
         pci_create_simple(pci_bus, -1, "lsi53c895a");
+        /*
+         * By not creating frontends here, we make
+         * scsi_legacy_handle_cmdline() create them, and warn that
+         * this usage is deprecated.
+         */
     }
 }
 
@@ -1618,6 +1712,15 @@ static void pc_dimm_plug(HotplugHandler *hotplug_dev,
         goto out;
     }
 
+    if (object_dynamic_cast(OBJECT(dev), TYPE_NVDIMM)) {
+        if (!pcms->acpi_nvdimm_state.is_enabled) {
+            error_setg(&local_err,
+                       "nvdimm is not enabled: missing 'nvdimm' in '-M'");
+            goto out;
+        }
+        nvdimm_plug(&pcms->acpi_nvdimm_state);
+    }
+
     hhc = HOTPLUG_HANDLER_GET_CLASS(pcms->acpi_dev);
     hhc->plug(HOTPLUG_HANDLER(pcms->acpi_dev), dev, &error_abort);
 out:
@@ -1634,6 +1737,12 @@ static void pc_dimm_unplug_request(HotplugHandler *hotplug_dev,
     if (!pcms->acpi_dev) {
         error_setg(&local_err,
                    "memory hotplug is not enabled: missing acpi device");
+        goto out;
+    }
+
+    if (object_dynamic_cast(OBJECT(dev), TYPE_NVDIMM)) {
+        error_setg(&local_err,
+                   "nvdimm device hot unplug is not supported yet.");
         goto out;
     }
 
@@ -1676,42 +1785,213 @@ static int pc_apic_cmp(const void *a, const void *b)
    return apic_a->arch_id - apic_b->arch_id;
 }
 
+/* returns pointer to CPUArchId descriptor that matches CPU's apic_id
+ * in ms->possible_cpus->cpus, if ms->possible_cpus->cpus has no
+ * entry corresponding to CPU's apic_id returns NULL.
+ */
+static CPUArchId *pc_find_cpu_slot(MachineState *ms, uint32_t id, int *idx)
+{
+    CPUArchId apic_id, *found_cpu;
+
+    apic_id.arch_id = id;
+    found_cpu = bsearch(&apic_id, ms->possible_cpus->cpus,
+        ms->possible_cpus->len, sizeof(*ms->possible_cpus->cpus),
+        pc_apic_cmp);
+    if (found_cpu && idx) {
+        *idx = found_cpu - ms->possible_cpus->cpus;
+    }
+    return found_cpu;
+}
+
 static void pc_cpu_plug(HotplugHandler *hotplug_dev,
                         DeviceState *dev, Error **errp)
 {
-    CPUClass *cc = CPU_GET_CLASS(dev);
-    CPUArchId apic_id, *found_cpu;
+    CPUArchId *found_cpu;
     HotplugHandlerClass *hhc;
     Error *local_err = NULL;
+    X86CPU *cpu = X86_CPU(dev);
     PCMachineState *pcms = PC_MACHINE(hotplug_dev);
 
-    if (!dev->hotplugged) {
-        goto out;
+    if (pcms->acpi_dev) {
+        hhc = HOTPLUG_HANDLER_GET_CLASS(pcms->acpi_dev);
+        hhc->plug(HOTPLUG_HANDLER(pcms->acpi_dev), dev, &local_err);
+        if (local_err) {
+            goto out;
+        }
     }
 
-    if (!pcms->acpi_dev) {
-        error_setg(&local_err,
-                   "cpu hotplug is not enabled: missing acpi device");
+    /* increment the number of CPUs */
+    pcms->boot_cpus++;
+    if (pcms->rtc) {
+        rtc_set_cpus_count(pcms->rtc, pcms->boot_cpus);
+    }
+    if (pcms->fw_cfg) {
+        fw_cfg_modify_i16(pcms->fw_cfg, FW_CFG_NB_CPUS, pcms->boot_cpus);
+    }
+
+    found_cpu = pc_find_cpu_slot(MACHINE(pcms), cpu->apic_id, NULL);
+    found_cpu->cpu = OBJECT(dev);
+out:
+    error_propagate(errp, local_err);
+}
+static void pc_cpu_unplug_request_cb(HotplugHandler *hotplug_dev,
+                                     DeviceState *dev, Error **errp)
+{
+    int idx = -1;
+    HotplugHandlerClass *hhc;
+    Error *local_err = NULL;
+    X86CPU *cpu = X86_CPU(dev);
+    PCMachineState *pcms = PC_MACHINE(hotplug_dev);
+
+    pc_find_cpu_slot(MACHINE(pcms), cpu->apic_id, &idx);
+    assert(idx != -1);
+    if (idx == 0) {
+        error_setg(&local_err, "Boot CPU is unpluggable");
         goto out;
     }
 
     hhc = HOTPLUG_HANDLER_GET_CLASS(pcms->acpi_dev);
-    hhc->plug(HOTPLUG_HANDLER(pcms->acpi_dev), dev, &local_err);
+    hhc->unplug_request(HOTPLUG_HANDLER(pcms->acpi_dev), dev, &local_err);
+
     if (local_err) {
         goto out;
     }
 
-    /* increment the number of CPUs */
-    rtc_set_memory(pcms->rtc, 0x5f, rtc_get_memory(pcms->rtc, 0x5f) + 1);
-
-    apic_id.arch_id = cc->get_arch_id(CPU(dev));
-    found_cpu = bsearch(&apic_id, pcms->possible_cpus->cpus,
-        pcms->possible_cpus->len, sizeof(*pcms->possible_cpus->cpus),
-        pc_apic_cmp);
-    assert(found_cpu);
-    found_cpu->cpu = CPU(dev);
-out:
+ out:
     error_propagate(errp, local_err);
+
+}
+
+static void pc_cpu_unplug_cb(HotplugHandler *hotplug_dev,
+                             DeviceState *dev, Error **errp)
+{
+    CPUArchId *found_cpu;
+    HotplugHandlerClass *hhc;
+    Error *local_err = NULL;
+    X86CPU *cpu = X86_CPU(dev);
+    PCMachineState *pcms = PC_MACHINE(hotplug_dev);
+
+    hhc = HOTPLUG_HANDLER_GET_CLASS(pcms->acpi_dev);
+    hhc->unplug(HOTPLUG_HANDLER(pcms->acpi_dev), dev, &local_err);
+
+    if (local_err) {
+        goto out;
+    }
+
+    found_cpu = pc_find_cpu_slot(MACHINE(pcms), cpu->apic_id, NULL);
+    found_cpu->cpu = NULL;
+    object_unparent(OBJECT(dev));
+
+    /* decrement the number of CPUs */
+    pcms->boot_cpus--;
+    /* Update the number of CPUs in CMOS */
+    rtc_set_cpus_count(pcms->rtc, pcms->boot_cpus);
+    fw_cfg_modify_i16(pcms->fw_cfg, FW_CFG_NB_CPUS, pcms->boot_cpus);
+ out:
+    error_propagate(errp, local_err);
+}
+
+static void pc_cpu_pre_plug(HotplugHandler *hotplug_dev,
+                            DeviceState *dev, Error **errp)
+{
+    int idx;
+    CPUState *cs;
+    CPUArchId *cpu_slot;
+    X86CPUTopoInfo topo;
+    X86CPU *cpu = X86_CPU(dev);
+    PCMachineState *pcms = PC_MACHINE(hotplug_dev);
+
+    /* if APIC ID is not set, set it based on socket/core/thread properties */
+    if (cpu->apic_id == UNASSIGNED_APIC_ID) {
+        int max_socket = (max_cpus - 1) / smp_threads / smp_cores;
+
+        if (cpu->socket_id < 0) {
+            error_setg(errp, "CPU socket-id is not set");
+            return;
+        } else if (cpu->socket_id > max_socket) {
+            error_setg(errp, "Invalid CPU socket-id: %u must be in range 0:%u",
+                       cpu->socket_id, max_socket);
+            return;
+        }
+        if (cpu->core_id < 0) {
+            error_setg(errp, "CPU core-id is not set");
+            return;
+        } else if (cpu->core_id > (smp_cores - 1)) {
+            error_setg(errp, "Invalid CPU core-id: %u must be in range 0:%u",
+                       cpu->core_id, smp_cores - 1);
+            return;
+        }
+        if (cpu->thread_id < 0) {
+            error_setg(errp, "CPU thread-id is not set");
+            return;
+        } else if (cpu->thread_id > (smp_threads - 1)) {
+            error_setg(errp, "Invalid CPU thread-id: %u must be in range 0:%u",
+                       cpu->thread_id, smp_threads - 1);
+            return;
+        }
+
+        topo.pkg_id = cpu->socket_id;
+        topo.core_id = cpu->core_id;
+        topo.smt_id = cpu->thread_id;
+        cpu->apic_id = apicid_from_topo_ids(smp_cores, smp_threads, &topo);
+    }
+
+    cpu_slot = pc_find_cpu_slot(MACHINE(pcms), cpu->apic_id, &idx);
+    if (!cpu_slot) {
+        MachineState *ms = MACHINE(pcms);
+
+        x86_topo_ids_from_apicid(cpu->apic_id, smp_cores, smp_threads, &topo);
+        error_setg(errp, "Invalid CPU [socket: %u, core: %u, thread: %u] with"
+                  " APIC ID %" PRIu32 ", valid index range 0:%d",
+                   topo.pkg_id, topo.core_id, topo.smt_id, cpu->apic_id,
+                   ms->possible_cpus->len - 1);
+        return;
+    }
+
+    if (cpu_slot->cpu) {
+        error_setg(errp, "CPU[%d] with APIC ID %" PRIu32 " exists",
+                   idx, cpu->apic_id);
+        return;
+    }
+
+    /* if 'address' properties socket-id/core-id/thread-id are not set, set them
+     * so that machine_query_hotpluggable_cpus would show correct values
+     */
+    /* TODO: move socket_id/core_id/thread_id checks into x86_cpu_realizefn()
+     * once -smp refactoring is complete and there will be CPU private
+     * CPUState::nr_cores and CPUState::nr_threads fields instead of globals */
+    x86_topo_ids_from_apicid(cpu->apic_id, smp_cores, smp_threads, &topo);
+    if (cpu->socket_id != -1 && cpu->socket_id != topo.pkg_id) {
+        error_setg(errp, "property socket-id: %u doesn't match set apic-id:"
+            " 0x%x (socket-id: %u)", cpu->socket_id, cpu->apic_id, topo.pkg_id);
+        return;
+    }
+    cpu->socket_id = topo.pkg_id;
+
+    if (cpu->core_id != -1 && cpu->core_id != topo.core_id) {
+        error_setg(errp, "property core-id: %u doesn't match set apic-id:"
+            " 0x%x (core-id: %u)", cpu->core_id, cpu->apic_id, topo.core_id);
+        return;
+    }
+    cpu->core_id = topo.core_id;
+
+    if (cpu->thread_id != -1 && cpu->thread_id != topo.smt_id) {
+        error_setg(errp, "property thread-id: %u doesn't match set apic-id:"
+            " 0x%x (thread-id: %u)", cpu->thread_id, cpu->apic_id, topo.smt_id);
+        return;
+    }
+    cpu->thread_id = topo.smt_id;
+
+    cs = CPU(cpu);
+    cs->cpu_index = idx;
+}
+
+static void pc_machine_device_pre_plug_cb(HotplugHandler *hotplug_dev,
+                                          DeviceState *dev, Error **errp)
+{
+    if (object_dynamic_cast(OBJECT(dev), TYPE_CPU)) {
+        pc_cpu_pre_plug(hotplug_dev, dev, errp);
+    }
 }
 
 static void pc_machine_device_plug_cb(HotplugHandler *hotplug_dev,
@@ -1729,6 +2009,8 @@ static void pc_machine_device_unplug_request_cb(HotplugHandler *hotplug_dev,
 {
     if (object_dynamic_cast(OBJECT(dev), TYPE_PC_DIMM)) {
         pc_dimm_unplug_request(hotplug_dev, dev, errp);
+    } else if (object_dynamic_cast(OBJECT(dev), TYPE_CPU)) {
+        pc_cpu_unplug_request_cb(hotplug_dev, dev, errp);
     } else {
         error_setg(errp, "acpi: device unplug request for not supported device"
                    " type: %s", object_get_typename(OBJECT(dev)));
@@ -1740,6 +2022,8 @@ static void pc_machine_device_unplug_cb(HotplugHandler *hotplug_dev,
 {
     if (object_dynamic_cast(OBJECT(dev), TYPE_PC_DIMM)) {
         pc_dimm_unplug(hotplug_dev, dev, errp);
+    } else if (object_dynamic_cast(OBJECT(dev), TYPE_CPU)) {
+        pc_cpu_unplug_cb(hotplug_dev, dev, errp);
     } else {
         error_setg(errp, "acpi: device unplug for not supported device"
                    " type: %s", object_get_typename(OBJECT(dev)));
@@ -1884,45 +2168,62 @@ static void pc_machine_set_nvdimm(Object *obj, bool value, Error **errp)
     pcms->acpi_nvdimm_state.is_enabled = value;
 }
 
+static bool pc_machine_get_smbus(Object *obj, Error **errp)
+{
+    PCMachineState *pcms = PC_MACHINE(obj);
+
+    return pcms->smbus;
+}
+
+static void pc_machine_set_smbus(Object *obj, bool value, Error **errp)
+{
+    PCMachineState *pcms = PC_MACHINE(obj);
+
+    pcms->smbus = value;
+}
+
+static bool pc_machine_get_sata(Object *obj, Error **errp)
+{
+    PCMachineState *pcms = PC_MACHINE(obj);
+
+    return pcms->sata;
+}
+
+static void pc_machine_set_sata(Object *obj, bool value, Error **errp)
+{
+    PCMachineState *pcms = PC_MACHINE(obj);
+
+    pcms->sata = value;
+}
+
+static bool pc_machine_get_pit(Object *obj, Error **errp)
+{
+    PCMachineState *pcms = PC_MACHINE(obj);
+
+    return pcms->pit;
+}
+
+static void pc_machine_set_pit(Object *obj, bool value, Error **errp)
+{
+    PCMachineState *pcms = PC_MACHINE(obj);
+
+    pcms->pit = value;
+}
+
 static void pc_machine_initfn(Object *obj)
 {
     PCMachineState *pcms = PC_MACHINE(obj);
 
-    object_property_add(obj, PC_MACHINE_MEMHP_REGION_SIZE, "int",
-                        pc_machine_get_hotplug_memory_region_size,
-                        NULL, NULL, NULL, &error_abort);
-
-    pcms->max_ram_below_4g = 1ULL << 32; /* 4G */
-    object_property_add(obj, PC_MACHINE_MAX_RAM_BELOW_4G, "size",
-                        pc_machine_get_max_ram_below_4g,
-                        pc_machine_set_max_ram_below_4g,
-                        NULL, NULL, &error_abort);
-    object_property_set_description(obj, PC_MACHINE_MAX_RAM_BELOW_4G,
-                                    "Maximum ram below the 4G boundary (32bit boundary)",
-                                    &error_abort);
-
+    pcms->max_ram_below_4g = 0; /* use default */
     pcms->smm = ON_OFF_AUTO_AUTO;
-    object_property_add(obj, PC_MACHINE_SMM, "OnOffAuto",
-                        pc_machine_get_smm,
-                        pc_machine_set_smm,
-                        NULL, NULL, &error_abort);
-    object_property_set_description(obj, PC_MACHINE_SMM,
-                                    "Enable SMM (pc & q35)",
-                                    &error_abort);
-
     pcms->vmport = ON_OFF_AUTO_AUTO;
-    object_property_add(obj, PC_MACHINE_VMPORT, "OnOffAuto",
-                        pc_machine_get_vmport,
-                        pc_machine_set_vmport,
-                        NULL, NULL, &error_abort);
-    object_property_set_description(obj, PC_MACHINE_VMPORT,
-                                    "Enable vmport (pc & q35)",
-                                    &error_abort);
-
     /* nvdimm is disabled on default. */
     pcms->acpi_nvdimm_state.is_enabled = false;
-    object_property_add_bool(obj, PC_MACHINE_NVDIMM, pc_machine_get_nvdimm,
-                             pc_machine_set_nvdimm, &error_abort);
+    /* acpi build is enabled by default if machine supports it */
+    pcms->acpi_build_enabled = PC_MACHINE_GET_CLASS(pcms)->has_acpi_build;
+    pcms->smbus = true;
+    pcms->sata = true;
+    pcms->pit = true;
 }
 
 static void pc_machine_reset(void)
@@ -1952,15 +2253,53 @@ static unsigned pc_cpu_index_to_socket_id(unsigned cpu_index)
     return topo.pkg_id;
 }
 
-static CPUArchIdList *pc_possible_cpu_arch_ids(MachineState *machine)
+static const CPUArchIdList *pc_possible_cpu_arch_ids(MachineState *ms)
 {
-    PCMachineState *pcms = PC_MACHINE(machine);
-    int len = sizeof(CPUArchIdList) +
-              sizeof(CPUArchId) * (pcms->possible_cpus->len);
-    CPUArchIdList *list = g_malloc(len);
+    int i;
 
-    memcpy(list, pcms->possible_cpus, len);
-    return list;
+    if (ms->possible_cpus) {
+        /*
+         * make sure that max_cpus hasn't changed since the first use, i.e.
+         * -smp hasn't been parsed after it
+        */
+        assert(ms->possible_cpus->len == max_cpus);
+        return ms->possible_cpus;
+    }
+
+    ms->possible_cpus = g_malloc0(sizeof(CPUArchIdList) +
+                                  sizeof(CPUArchId) * max_cpus);
+    ms->possible_cpus->len = max_cpus;
+    for (i = 0; i < ms->possible_cpus->len; i++) {
+        X86CPUTopoInfo topo;
+
+        ms->possible_cpus->cpus[i].vcpus_count = 1;
+        ms->possible_cpus->cpus[i].arch_id = x86_cpu_apic_id_from_index(i);
+        x86_topo_ids_from_apicid(ms->possible_cpus->cpus[i].arch_id,
+                                 smp_cores, smp_threads, &topo);
+        ms->possible_cpus->cpus[i].props.has_socket_id = true;
+        ms->possible_cpus->cpus[i].props.socket_id = topo.pkg_id;
+        ms->possible_cpus->cpus[i].props.has_core_id = true;
+        ms->possible_cpus->cpus[i].props.core_id = topo.core_id;
+        ms->possible_cpus->cpus[i].props.has_thread_id = true;
+        ms->possible_cpus->cpus[i].props.thread_id = topo.smt_id;
+    }
+    return ms->possible_cpus;
+}
+
+static void x86_nmi(NMIState *n, int cpu_index, Error **errp)
+{
+    /* cpu index isn't used */
+    CPUState *cs;
+
+    CPU_FOREACH(cs) {
+        X86CPU *cpu = X86_CPU(cs);
+
+        if (!cpu->apic_state) {
+            cpu_interrupt(cs, CPU_INTERRUPT_NMI);
+        } else {
+            apic_deliver_nmi(cpu->apic_state);
+        }
+    }
 }
 
 static void pc_machine_class_init(ObjectClass *oc, void *data)
@@ -1968,6 +2307,7 @@ static void pc_machine_class_init(ObjectClass *oc, void *data)
     MachineClass *mc = MACHINE_CLASS(oc);
     PCMachineClass *pcmc = PC_MACHINE_CLASS(oc);
     HotplugHandlerClass *hc = HOTPLUG_HANDLER_CLASS(oc);
+    NMIClass *nc = NMI_CLASS(oc);
 
     pcmc->get_hotplug_handler = mc->get_hotplug_handler;
     pcmc->pci_enabled = true;
@@ -1986,13 +2326,52 @@ static void pc_machine_class_init(ObjectClass *oc, void *data)
     mc->get_hotplug_handler = pc_get_hotpug_handler;
     mc->cpu_index_to_socket_id = pc_cpu_index_to_socket_id;
     mc->possible_cpu_arch_ids = pc_possible_cpu_arch_ids;
+    mc->has_hotpluggable_cpus = true;
     mc->default_boot_order = "cad";
     mc->hot_add_cpu = pc_hot_add_cpu;
+    mc->block_default_type = IF_IDE;
     mc->max_cpus = 255;
     mc->reset = pc_machine_reset;
+    hc->pre_plug = pc_machine_device_pre_plug_cb;
     hc->plug = pc_machine_device_plug_cb;
     hc->unplug_request = pc_machine_device_unplug_request_cb;
     hc->unplug = pc_machine_device_unplug_cb;
+    nc->nmi_monitor_handler = x86_nmi;
+
+    object_class_property_add(oc, PC_MACHINE_MEMHP_REGION_SIZE, "int",
+        pc_machine_get_hotplug_memory_region_size, NULL,
+        NULL, NULL, &error_abort);
+
+    object_class_property_add(oc, PC_MACHINE_MAX_RAM_BELOW_4G, "size",
+        pc_machine_get_max_ram_below_4g, pc_machine_set_max_ram_below_4g,
+        NULL, NULL, &error_abort);
+
+    object_class_property_set_description(oc, PC_MACHINE_MAX_RAM_BELOW_4G,
+        "Maximum ram below the 4G boundary (32bit boundary)", &error_abort);
+
+    object_class_property_add(oc, PC_MACHINE_SMM, "OnOffAuto",
+        pc_machine_get_smm, pc_machine_set_smm,
+        NULL, NULL, &error_abort);
+    object_class_property_set_description(oc, PC_MACHINE_SMM,
+        "Enable SMM (pc & q35)", &error_abort);
+
+    object_class_property_add(oc, PC_MACHINE_VMPORT, "OnOffAuto",
+        pc_machine_get_vmport, pc_machine_set_vmport,
+        NULL, NULL, &error_abort);
+    object_class_property_set_description(oc, PC_MACHINE_VMPORT,
+        "Enable vmport (pc & q35)", &error_abort);
+
+    object_class_property_add_bool(oc, PC_MACHINE_NVDIMM,
+        pc_machine_get_nvdimm, pc_machine_set_nvdimm, &error_abort);
+
+    object_class_property_add_bool(oc, PC_MACHINE_SMBUS,
+        pc_machine_get_smbus, pc_machine_set_smbus, &error_abort);
+
+    object_class_property_add_bool(oc, PC_MACHINE_SATA,
+        pc_machine_get_sata, pc_machine_set_sata, &error_abort);
+
+    object_class_property_add_bool(oc, PC_MACHINE_PIT,
+        pc_machine_get_pit, pc_machine_set_pit, &error_abort);
 }
 
 static const TypeInfo pc_machine_info = {
@@ -2005,6 +2384,7 @@ static const TypeInfo pc_machine_info = {
     .class_init = pc_machine_class_init,
     .interfaces = (InterfaceInfo[]) {
          { TYPE_HOTPLUG_HANDLER },
+         { TYPE_NMI },
          { }
     },
 };

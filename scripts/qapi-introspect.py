@@ -64,7 +64,7 @@ class QAPISchemaGenIntrospectVisitor(QAPISchemaVisitor):
         # generate C
         # TODO can generate awfully long lines
         jsons.extend(self._jsons)
-        name = prefix + 'qmp_schema_json'
+        name = c_name(prefix, protect=False) + 'qmp_schema_json'
         self.decl = mcgen('''
 extern const char %(c_name)s[];
 ''',
@@ -154,14 +154,14 @@ const char %(c_name)s[] = %(c_string)s;
                                     for m in variants.variants]})
 
     def visit_command(self, name, info, arg_type, ret_type,
-                      gen, success_response):
+                      gen, success_response, boxed):
         arg_type = arg_type or self._schema.the_empty_object_type
         ret_type = ret_type or self._schema.the_empty_object_type
         self._gen_json(name, 'command',
                        {'arg-type': self._use_type(arg_type),
                         'ret-type': self._use_type(ret_type)})
 
-    def visit_event(self, name, info, arg_type):
+    def visit_event(self, name, info, arg_type, boxed):
         arg_type = arg_type or self._schema.the_empty_object_type
         self._gen_json(name, 'event', {'arg-type': self._use_type(arg_type)})
 
@@ -170,10 +170,10 @@ const char %(c_name)s[] = %(c_string)s;
 opt_unmask = False
 
 (input_file, output_dir, do_c, do_h, prefix, opts) = \
-    parse_command_line("u", ["unmask-non-abi-names"])
+    parse_command_line('u', ['unmask-non-abi-names'])
 
 for o, a in opts:
-    if o in ("-u", "--unmask-non-abi-names"):
+    if o in ('-u', '--unmask-non-abi-names'):
         opt_unmask = True
 
 c_comment = '''

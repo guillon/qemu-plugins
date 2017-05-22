@@ -161,249 +161,6 @@ int qemu_fdatasync(int fd)
 #endif
 }
 
-/* vector definitions */
-#ifdef __ALTIVEC__
-#include <altivec.h>
-/* The altivec.h header says we're allowed to undef these for
- * C++ compatibility.  Here we don't care about C++, but we
- * undef them anyway to avoid namespace pollution.
- */
-#undef vector
-#undef pixel
-#undef bool
-#define VECTYPE        __vector unsigned char
-#define SPLAT(p)       vec_splat(vec_ld(0, p), 0)
-#define ALL_EQ(v1, v2) vec_all_eq(v1, v2)
-#define VEC_OR(v1, v2) ((v1) | (v2))
-/* altivec.h may redefine the bool macro as vector type.
- * Reset it to POSIX semantics. */
-#define bool _Bool
-#elif defined __SSE2__
-#include <emmintrin.h>
-#define VECTYPE        __m128i
-#define SPLAT(p)       _mm_set1_epi8(*(p))
-#define ALL_EQ(v1, v2) (_mm_movemask_epi8(_mm_cmpeq_epi8(v1, v2)) == 0xFFFF)
-#define VEC_OR(v1, v2) (_mm_or_si128(v1, v2))
-#else
-#define VECTYPE        unsigned long
-#define SPLAT(p)       (*(p) * (~0UL / 255))
-#define ALL_EQ(v1, v2) ((v1) == (v2))
-#define VEC_OR(v1, v2) ((v1) | (v2))
-#endif
-
-#define BUFFER_FIND_NONZERO_OFFSET_UNROLL_FACTOR 8
-
-static bool
-can_use_buffer_find_nonzero_offset_inner(const void *buf, size_t len)
-{
-    return (len % (BUFFER_FIND_NONZERO_OFFSET_UNROLL_FACTOR
-                   * sizeof(VECTYPE)) == 0
-            && ((uintptr_t) buf) % sizeof(VECTYPE) == 0);
-}
-
-/*
- * Searches for an area with non-zero content in a buffer
- *
- * Attention! The len must be a multiple of
- * BUFFER_FIND_NONZERO_OFFSET_UNROLL_FACTOR * sizeof(VECTYPE)
- * and addr must be a multiple of sizeof(VECTYPE) due to
- * restriction of optimizations in this function.
- *
- * can_use_buffer_find_nonzero_offset_inner() can be used to
- * check these requirements.
- *
- * The return value is the offset of the non-zero area rounded
- * down to a multiple of sizeof(VECTYPE) for the first
- * BUFFER_FIND_NONZERO_OFFSET_UNROLL_FACTOR chunks and down to
- * BUFFER_FIND_NONZERO_OFFSET_UNROLL_FACTOR * sizeof(VECTYPE)
- * afterwards.
- *
- * If the buffer is all zero the return value is equal to len.
- */
-
-static size_t buffer_find_nonzero_offset_inner(const void *buf, size_t len)
-{
-    const VECTYPE *p = buf;
-    const VECTYPE zero = (VECTYPE){0};
-    size_t i;
-
-    assert(can_use_buffer_find_nonzero_offset_inner(buf, len));
-
-    if (!len) {
-        return 0;
-    }
-
-    for (i = 0; i < BUFFER_FIND_NONZERO_OFFSET_UNROLL_FACTOR; i++) {
-        if (!ALL_EQ(p[i], zero)) {
-            return i * sizeof(VECTYPE);
-        }
-    }
-
-    for (i = BUFFER_FIND_NONZERO_OFFSET_UNROLL_FACTOR;
-         i < len / sizeof(VECTYPE);
-         i += BUFFER_FIND_NONZERO_OFFSET_UNROLL_FACTOR) {
-        VECTYPE tmp0 = VEC_OR(p[i + 0], p[i + 1]);
-        VECTYPE tmp1 = VEC_OR(p[i + 2], p[i + 3]);
-        VECTYPE tmp2 = VEC_OR(p[i + 4], p[i + 5]);
-        VECTYPE tmp3 = VEC_OR(p[i + 6], p[i + 7]);
-        VECTYPE tmp01 = VEC_OR(tmp0, tmp1);
-        VECTYPE tmp23 = VEC_OR(tmp2, tmp3);
-        if (!ALL_EQ(VEC_OR(tmp01, tmp23), zero)) {
-            break;
-        }
-    }
-
-    return i * sizeof(VECTYPE);
-}
-
-/*
- * GCC before version 4.9 has a bug which will cause the target
- * attribute work incorrectly and failed to compile in some case,
- * restrict the gcc version to 4.9+ to prevent the failure.
- */
-
-#if defined CONFIG_AVX2_OPT && QEMU_GNUC_PREREQ(4, 9)
-#pragma GCC push_options
-#pragma GCC target("avx2")
-#include <cpuid.h>
-#include <immintrin.h>
-
-#define AVX2_VECTYPE        __m256i
-#define AVX2_SPLAT(p)       _mm256_set1_epi8(*(p))
-#define AVX2_ALL_EQ(v1, v2) \
-    (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v1, v2)) == 0xFFFFFFFF)
-#define AVX2_VEC_OR(v1, v2) (_mm256_or_si256(v1, v2))
-
-static bool
-can_use_buffer_find_nonzero_offset_avx2(const void *buf, size_t len)
-{
-    return (len % (BUFFER_FIND_NONZERO_OFFSET_UNROLL_FACTOR
-                   * sizeof(AVX2_VECTYPE)) == 0
-            && ((uintptr_t) buf) % sizeof(AVX2_VECTYPE) == 0);
-}
-
-static size_t buffer_find_nonzero_offset_avx2(const void *buf, size_t len)
-{
-    const AVX2_VECTYPE *p = buf;
-    const AVX2_VECTYPE zero = (AVX2_VECTYPE){0};
-    size_t i;
-
-    assert(can_use_buffer_find_nonzero_offset_avx2(buf, len));
-
-    if (!len) {
-        return 0;
-    }
-
-    for (i = 0; i < BUFFER_FIND_NONZERO_OFFSET_UNROLL_FACTOR; i++) {
-        if (!AVX2_ALL_EQ(p[i], zero)) {
-            return i * sizeof(AVX2_VECTYPE);
-        }
-    }
-
-    for (i = BUFFER_FIND_NONZERO_OFFSET_UNROLL_FACTOR;
-         i < len / sizeof(AVX2_VECTYPE);
-         i += BUFFER_FIND_NONZERO_OFFSET_UNROLL_FACTOR) {
-        AVX2_VECTYPE tmp0 = AVX2_VEC_OR(p[i + 0], p[i + 1]);
-        AVX2_VECTYPE tmp1 = AVX2_VEC_OR(p[i + 2], p[i + 3]);
-        AVX2_VECTYPE tmp2 = AVX2_VEC_OR(p[i + 4], p[i + 5]);
-        AVX2_VECTYPE tmp3 = AVX2_VEC_OR(p[i + 6], p[i + 7]);
-        AVX2_VECTYPE tmp01 = AVX2_VEC_OR(tmp0, tmp1);
-        AVX2_VECTYPE tmp23 = AVX2_VEC_OR(tmp2, tmp3);
-        if (!AVX2_ALL_EQ(AVX2_VEC_OR(tmp01, tmp23), zero)) {
-            break;
-        }
-    }
-
-    return i * sizeof(AVX2_VECTYPE);
-}
-
-static bool avx2_support(void)
-{
-    int a, b, c, d;
-
-    if (__get_cpuid_max(0, NULL) < 7) {
-        return false;
-    }
-
-    __cpuid_count(7, 0, a, b, c, d);
-
-    return b & bit_AVX2;
-}
-
-bool can_use_buffer_find_nonzero_offset(const void *buf, size_t len) \
-         __attribute__ ((ifunc("can_use_buffer_find_nonzero_offset_ifunc")));
-size_t buffer_find_nonzero_offset(const void *buf, size_t len) \
-         __attribute__ ((ifunc("buffer_find_nonzero_offset_ifunc")));
-
-static void *buffer_find_nonzero_offset_ifunc(void)
-{
-    typeof(buffer_find_nonzero_offset) *func = (avx2_support()) ?
-        buffer_find_nonzero_offset_avx2 : buffer_find_nonzero_offset_inner;
-
-    return func;
-}
-
-static void *can_use_buffer_find_nonzero_offset_ifunc(void)
-{
-    typeof(can_use_buffer_find_nonzero_offset) *func = (avx2_support()) ?
-        can_use_buffer_find_nonzero_offset_avx2 :
-        can_use_buffer_find_nonzero_offset_inner;
-
-    return func;
-}
-#pragma GCC pop_options
-#else
-bool can_use_buffer_find_nonzero_offset(const void *buf, size_t len)
-{
-    return can_use_buffer_find_nonzero_offset_inner(buf, len);
-}
-
-size_t buffer_find_nonzero_offset(const void *buf, size_t len)
-{
-    return buffer_find_nonzero_offset_inner(buf, len);
-}
-#endif
-
-/*
- * Checks if a buffer is all zeroes
- *
- * Attention! The len must be a multiple of 4 * sizeof(long) due to
- * restriction of optimizations in this function.
- */
-bool buffer_is_zero(const void *buf, size_t len)
-{
-    /*
-     * Use long as the biggest available internal data type that fits into the
-     * CPU register and unroll the loop to smooth out the effect of memory
-     * latency.
-     */
-
-    size_t i;
-    long d0, d1, d2, d3;
-    const long * const data = buf;
-
-    /* use vector optimized zero check if possible */
-    if (can_use_buffer_find_nonzero_offset(buf, len)) {
-        return buffer_find_nonzero_offset(buf, len) == len;
-    }
-
-    assert(len % (4 * sizeof(long)) == 0);
-    len /= sizeof(long);
-
-    for (i = 0; i < len; i += 4) {
-        d0 = data[i + 0];
-        d1 = data[i + 1];
-        d2 = data[i + 2];
-        d3 = data[i + 3];
-
-        if (d0 || d1 || d2 || d3) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
 #ifndef _WIN32
 /* Sets a specific flag */
 int fcntl_setfl(int fd, int flag)
@@ -424,19 +181,19 @@ int fcntl_setfl(int fd, int flag)
 static int64_t suffix_mul(char suffix, int64_t unit)
 {
     switch (qemu_toupper(suffix)) {
-    case QEMU_STRTOSZ_DEFSUFFIX_B:
+    case 'B':
         return 1;
-    case QEMU_STRTOSZ_DEFSUFFIX_KB:
+    case 'K':
         return unit;
-    case QEMU_STRTOSZ_DEFSUFFIX_MB:
+    case 'M':
         return unit * unit;
-    case QEMU_STRTOSZ_DEFSUFFIX_GB:
+    case 'G':
         return unit * unit * unit;
-    case QEMU_STRTOSZ_DEFSUFFIX_TB:
+    case 'T':
         return unit * unit * unit * unit;
-    case QEMU_STRTOSZ_DEFSUFFIX_PB:
+    case 'P':
         return unit * unit * unit * unit * unit;
-    case QEMU_STRTOSZ_DEFSUFFIX_EB:
+    case 'E':
         return unit * unit * unit * unit * unit * unit;
     }
     return -1;
@@ -448,10 +205,11 @@ static int64_t suffix_mul(char suffix, int64_t unit)
  * in *end, if not NULL. Return -ERANGE on overflow, Return -EINVAL on
  * other error.
  */
-int64_t qemu_strtosz_suffix_unit(const char *nptr, char **end,
-                            const char default_suffix, int64_t unit)
+static int do_strtosz(const char *nptr, char **end,
+                      const char default_suffix, int64_t unit,
+                      uint64_t *result)
 {
-    int64_t retval = -EINVAL;
+    int retval;
     char *endptr;
     unsigned char c;
     int mul_required = 0;
@@ -460,7 +218,8 @@ int64_t qemu_strtosz_suffix_unit(const char *nptr, char **end,
     errno = 0;
     val = strtod(nptr, &endptr);
     if (isnan(val) || endptr == nptr || errno != 0) {
-        goto fail;
+        retval = -EINVAL;
+        goto out;
     }
     fraction = modf(val, &integral);
     if (fraction != 0) {
@@ -475,181 +234,204 @@ int64_t qemu_strtosz_suffix_unit(const char *nptr, char **end,
         assert(mul >= 0);
     }
     if (mul == 1 && mul_required) {
-        goto fail;
+        retval = -EINVAL;
+        goto out;
     }
-    if ((val * mul >= INT64_MAX) || val < 0) {
+    /*
+     * Values >= 0xfffffffffffffc00 overflow uint64_t after their trip
+     * through double (53 bits of precision).
+     */
+    if ((val * mul >= 0xfffffffffffffc00) || val < 0) {
         retval = -ERANGE;
-        goto fail;
+        goto out;
     }
-    retval = val * mul;
+    *result = val * mul;
+    retval = 0;
 
-fail:
+out:
     if (end) {
         *end = endptr;
+    } else if (*endptr) {
+        retval = -EINVAL;
     }
 
     return retval;
 }
 
-int64_t qemu_strtosz_suffix(const char *nptr, char **end,
-                            const char default_suffix)
+int qemu_strtosz(const char *nptr, char **end, uint64_t *result)
 {
-    return qemu_strtosz_suffix_unit(nptr, end, default_suffix, 1024);
+    return do_strtosz(nptr, end, 'B', 1024, result);
 }
 
-int64_t qemu_strtosz(const char *nptr, char **end)
+int qemu_strtosz_MiB(const char *nptr, char **end, uint64_t *result)
 {
-    return qemu_strtosz_suffix(nptr, end, QEMU_STRTOSZ_DEFSUFFIX_MB);
+    return do_strtosz(nptr, end, 'M', 1024, result);
+}
+
+int qemu_strtosz_metric(const char *nptr, char **end, uint64_t *result)
+{
+    return do_strtosz(nptr, end, 'B', 1000, result);
 }
 
 /**
- * Helper function for qemu_strto*l() functions.
+ * Helper function for error checking after strtol() and the like
  */
-static int check_strtox_error(const char *p, char *endptr, const char **next,
-                              int err)
+static int check_strtox_error(const char *nptr, char *ep,
+                              const char **endptr, int libc_errno)
 {
-    /* If no conversion was performed, prefer BSD behavior over glibc
-     * behavior.
-     */
-    if (err == 0 && endptr == p) {
-        err = EINVAL;
+    if (endptr) {
+        *endptr = ep;
     }
-    if (!next && *endptr) {
+
+    /* Turn "no conversion" into an error */
+    if (libc_errno == 0 && ep == nptr) {
         return -EINVAL;
     }
-    if (next) {
-        *next = endptr;
+
+    /* Fail when we're expected to consume the string, but didn't */
+    if (!endptr && *ep) {
+        return -EINVAL;
     }
-    return -err;
+
+    return -libc_errno;
 }
 
 /**
- * QEMU wrappers for strtol(), strtoll(), strtoul(), strotull() C functions.
+ * Convert string @nptr to a long integer, and store it in @result.
  *
- * Convert ASCII string @nptr to a long integer value
- * from the given @base. Parameters @nptr, @endptr, @base
- * follows same semantics as strtol() C function.
+ * This is a wrapper around strtol() that is harder to misuse.
+ * Semantics of @nptr, @endptr, @base match strtol() with differences
+ * noted below.
  *
- * Unlike from strtol() function, if @endptr is not NULL, this
- * function will return -EINVAL whenever it cannot fully convert
- * the string in @nptr with given @base to a long. This function returns
- * the result of the conversion only through the @result parameter.
+ * @nptr may be null, and no conversion is performed then.
  *
- * If NULL is passed in @endptr, then the whole string in @ntpr
- * is a number otherwise it returns -EINVAL.
+ * If no conversion is performed, store @nptr in *@endptr and return
+ * -EINVAL.
  *
- * RETURN VALUE
- * Unlike from strtol() function, this wrapper returns either
- * -EINVAL or the errno set by strtol() function (e.g -ERANGE).
- * If the conversion overflows, -ERANGE is returned, and @result
- * is set to the max value of the desired type
- * (e.g. LONG_MAX, LLONG_MAX, ULONG_MAX, ULLONG_MAX). If the case
- * of underflow, -ERANGE is returned, and @result is set to the min
- * value of the desired type. For strtol(), strtoll(), @result is set to
- * LONG_MIN, LLONG_MIN, respectively, and for strtoul(), strtoull() it
- * is set to 0.
+ * If @endptr is null, and the string isn't fully converted, return
+ * -EINVAL.  This is the case when the pointer that would be stored in
+ * a non-null @endptr points to a character other than '\0'.
+ *
+ * If the conversion overflows @result, store LONG_MAX in @result,
+ * and return -ERANGE.
+ *
+ * If the conversion underflows @result, store LONG_MIN in @result,
+ * and return -ERANGE.
+ *
+ * Else store the converted value in @result, and return zero.
  */
 int qemu_strtol(const char *nptr, const char **endptr, int base,
                 long *result)
 {
-    char *p;
-    int err = 0;
+    char *ep;
+
     if (!nptr) {
         if (endptr) {
             *endptr = nptr;
         }
-        err = -EINVAL;
-    } else {
-        errno = 0;
-        *result = strtol(nptr, &p, base);
-        err = check_strtox_error(nptr, p, endptr, errno);
+        return -EINVAL;
     }
-    return err;
+
+    errno = 0;
+    *result = strtol(nptr, &ep, base);
+    return check_strtox_error(nptr, ep, endptr, errno);
 }
 
 /**
- * Converts ASCII string to an unsigned long integer.
+ * Convert string @nptr to an unsigned long, and store it in @result.
  *
- * If string contains a negative number, value will be converted to
- * the unsigned representation of the signed value, unless the original
- * (nonnegated) value would overflow, in this case, it will set @result
- * to ULONG_MAX, and return ERANGE.
+ * This is a wrapper around strtoul() that is harder to misuse.
+ * Semantics of @nptr, @endptr, @base match strtoul() with differences
+ * noted below.
  *
- * The same behavior holds, for qemu_strtoull() but sets @result to
- * ULLONG_MAX instead of ULONG_MAX.
+ * @nptr may be null, and no conversion is performed then.
  *
- * See qemu_strtol() documentation for more info.
+ * If no conversion is performed, store @nptr in *@endptr and return
+ * -EINVAL.
+ *
+ * If @endptr is null, and the string isn't fully converted, return
+ * -EINVAL.  This is the case when the pointer that would be stored in
+ * a non-null @endptr points to a character other than '\0'.
+ *
+ * If the conversion overflows @result, store ULONG_MAX in @result,
+ * and return -ERANGE.
+ *
+ * Else store the converted value in @result, and return zero.
+ *
+ * Note that a number with a leading minus sign gets converted without
+ * the minus sign, checked for overflow (see above), then negated (in
+ * @result's type).  This is exactly how strtoul() works.
  */
 int qemu_strtoul(const char *nptr, const char **endptr, int base,
                  unsigned long *result)
 {
-    char *p;
-    int err = 0;
+    char *ep;
+
     if (!nptr) {
         if (endptr) {
             *endptr = nptr;
         }
-        err = -EINVAL;
-    } else {
-        errno = 0;
-        *result = strtoul(nptr, &p, base);
-        /* Windows returns 1 for negative out-of-range values.  */
-        if (errno == ERANGE) {
-            *result = -1;
-        }
-        err = check_strtox_error(nptr, p, endptr, errno);
+        return -EINVAL;
     }
-    return err;
+
+    errno = 0;
+    *result = strtoul(nptr, &ep, base);
+    /* Windows returns 1 for negative out-of-range values.  */
+    if (errno == ERANGE) {
+        *result = -1;
+    }
+    return check_strtox_error(nptr, ep, endptr, errno);
 }
 
 /**
- * Converts ASCII string to a long long integer.
+ * Convert string @nptr to an int64_t.
  *
- * See qemu_strtol() documentation for more info.
+ * Works like qemu_strtol(), except it stores INT64_MAX on overflow,
+ * and INT_MIN on underflow.
  */
-int qemu_strtoll(const char *nptr, const char **endptr, int base,
+int qemu_strtoi64(const char *nptr, const char **endptr, int base,
                  int64_t *result)
 {
-    char *p;
-    int err = 0;
+    char *ep;
+
     if (!nptr) {
         if (endptr) {
             *endptr = nptr;
         }
-        err = -EINVAL;
-    } else {
-        errno = 0;
-        *result = strtoll(nptr, &p, base);
-        err = check_strtox_error(nptr, p, endptr, errno);
+        return -EINVAL;
     }
-    return err;
+
+    errno = 0;
+    /* FIXME This assumes int64_t is long long */
+    *result = strtoll(nptr, &ep, base);
+    return check_strtox_error(nptr, ep, endptr, errno);
 }
 
 /**
- * Converts ASCII string to an unsigned long long integer.
+ * Convert string @nptr to an uint64_t.
  *
- * See qemu_strtol() documentation for more info.
+ * Works like qemu_strtoul(), except it stores UINT64_MAX on overflow.
  */
-int qemu_strtoull(const char *nptr, const char **endptr, int base,
+int qemu_strtou64(const char *nptr, const char **endptr, int base,
                   uint64_t *result)
 {
-    char *p;
-    int err = 0;
+    char *ep;
+
     if (!nptr) {
         if (endptr) {
             *endptr = nptr;
         }
-        err = -EINVAL;
-    } else {
-        errno = 0;
-        *result = strtoull(nptr, &p, base);
-        /* Windows returns 1 for negative out-of-range values.  */
-        if (errno == ERANGE) {
-            *result = -1;
-        }
-        err = check_strtox_error(nptr, p, endptr, errno);
+        return -EINVAL;
     }
-    return err;
+
+    errno = 0;
+    /* FIXME This assumes uint64_t is unsigned long long */
+    *result = strtoull(nptr, &ep, base);
+    /* Windows returns 1 for negative out-of-range values.  */
+    if (errno == ERANGE) {
+        *result = -1;
+    }
+    return check_strtox_error(nptr, ep, endptr, errno);
 }
 
 /**

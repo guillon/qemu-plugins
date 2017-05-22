@@ -49,7 +49,8 @@ typedef struct {
 
 static void pre_tb_helper_code(const TCGPluginInterface *tpi,
                                TPIHelperInfo info, uint64_t address,
-                               uint64_t data1, uint64_t data2)
+                               uint64_t data1, uint64_t data2,
+                               const TranslationBlock* tb)
 {
     HashValue *hash_value = (HashValue *)(uintptr_t)data1;
     hash_value->size   += info.size;
@@ -58,7 +59,8 @@ static void pre_tb_helper_code(const TCGPluginInterface *tpi,
 
 static void pre_tb_helper_data(const TCGPluginInterface *tpi,
                                TPIHelperInfo info, uint64_t address,
-                               uint64_t *data1, uint64_t *data2)
+                               uint64_t *data1, uint64_t *data2,
+                               const TranslationBlock* tb)
 {
     HashKey hash_key;
     HashValue *hash_value;

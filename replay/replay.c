@@ -16,16 +16,18 @@
 #include "replay-internal.h"
 #include "qemu/timer.h"
 #include "qemu/main-loop.h"
+#include "sysemu/cpus.h"
 #include "sysemu/sysemu.h"
 #include "qemu/error-report.h"
 
 /* Current version of the replay mechanism.
    Increase it when file format changes. */
-#define REPLAY_VERSION              0xe02004
+#define REPLAY_VERSION              0xe02006
 /* Size of replay log header */
 #define HEADER_SIZE                 (sizeof(uint32_t) + sizeof(uint64_t))
 
 ReplayMode replay_mode = REPLAY_MODE_NONE;
+char *replay_snapshot;
 
 /* Name of replay file  */
 static char *replay_filename;
@@ -38,15 +40,15 @@ bool replay_next_event_is(int event)
 
     /* nothing to skip - not all instructions used */
     if (replay_state.instructions_count != 0) {
-        assert(replay_data_kind == EVENT_INSTRUCTION);
+        assert(replay_state.data_kind == EVENT_INSTRUCTION);
         return event == EVENT_INSTRUCTION;
     }
 
     while (true) {
-        if (event == replay_data_kind) {
+        if (event == replay_state.data_kind) {
             res = true;
         }
-        switch (replay_data_kind) {
+        switch (replay_state.data_kind) {
         case EVENT_SHUTDOWN:
             replay_finish_event();
             qemu_system_shutdown_request();
@@ -82,10 +84,14 @@ void replay_account_executed_instructions(void)
         if (replay_state.instructions_count > 0) {
             int count = (int)(replay_get_current_step()
                               - replay_state.current_step);
+
+            /* Time can only go forward */
+            assert(count >= 0);
+
             replay_state.instructions_count -= count;
             replay_state.current_step += count;
             if (replay_state.instructions_count == 0) {
-                assert(replay_data_kind == EVENT_INSTRUCTION);
+                assert(replay_state.data_kind == EVENT_INSTRUCTION);
                 replay_finish_event();
                 /* Wake up iothread. This is required because
                    timers will not expire until clock counters
@@ -188,7 +194,7 @@ bool replay_checkpoint(ReplayCheckpoint checkpoint)
     if (replay_mode == REPLAY_MODE_PLAY) {
         if (replay_next_event_is(EVENT_CHECKPOINT + checkpoint)) {
             replay_finish_event();
-        } else if (replay_data_kind != EVENT_ASYNC) {
+        } else if (replay_state.data_kind != EVENT_ASYNC) {
             res = false;
             goto out;
         }
@@ -196,7 +202,7 @@ bool replay_checkpoint(ReplayCheckpoint checkpoint)
         /* replay_read_events may leave some unread events.
            Return false if not all of the events associated with
            checkpoint were processed */
-        res = replay_data_kind != EVENT_ASYNC;
+        res = replay_state.data_kind != EVENT_ASYNC;
     } else if (replay_mode == REPLAY_MODE_RECORD) {
         replay_put_event(EVENT_CHECKPOINT + checkpoint);
         replay_save_events(checkpoint);
@@ -237,9 +243,10 @@ static void replay_enable(const char *fname, int mode)
     replay_filename = g_strdup(fname);
 
     replay_mode = mode;
-    replay_data_kind = -1;
+    replay_state.data_kind = -1;
     replay_state.instructions_count = 0;
     replay_state.current_step = 0;
+    replay_state.has_unread_data = 0;
 
     /* skip file header for RECORD and check it for PLAY */
     if (replay_mode == REPLAY_MODE_RECORD) {
@@ -291,6 +298,8 @@ void replay_configure(QemuOpts *opts)
         exit(1);
     }
 
+    replay_snapshot = g_strdup(qemu_opt_get(opts, "rrsnapshot"));
+    replay_vmstate_register();
     replay_enable(fname, mode);
 
 out:
@@ -343,6 +352,9 @@ void replay_finish(void)
         g_free(replay_filename);
         replay_filename = NULL;
     }
+
+    g_free(replay_snapshot);
+    replay_snapshot = NULL;
 
     replay_finish_events();
     replay_mutex_destroy();

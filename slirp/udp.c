@@ -39,7 +39,7 @@
  */
 
 #include "qemu/osdep.h"
-#include <slirp.h>
+#include "slirp.h"
 #include "ip_icmp.h"
 
 static uint8_t udp_tos(struct socket *so);
@@ -335,6 +335,10 @@ udp_listen(Slirp *slirp, uint32_t haddr, u_int hport, uint32_t laddr,
 	    return NULL;
 	}
 	so->s = qemu_socket(AF_INET,SOCK_DGRAM,0);
+        if (so->s < 0) {
+            sofree(so);
+            return NULL;
+        }
 	so->so_expire = curtime + SO_EXPIRE;
 	insque(so, &slirp->udb);
 

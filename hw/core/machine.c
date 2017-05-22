@@ -65,6 +65,9 @@ static void machine_set_kernel_irqchip(Object *obj, Visitor *v,
             ms->kernel_irqchip_split = true;
             break;
         default:
+            /* The value was checked in visit_type_OnOffSplit() above. If
+             * we get here, then something is wrong in QEMU.
+             */
             abort();
         }
     }
@@ -257,6 +260,20 @@ static void machine_set_usb(Object *obj, bool value, Error **errp)
     ms->usb_disabled = !value;
 }
 
+static bool machine_get_graphics(Object *obj, Error **errp)
+{
+    MachineState *ms = MACHINE(obj);
+
+    return ms->enable_graphics;
+}
+
+static void machine_set_graphics(Object *obj, bool value, Error **errp)
+{
+    MachineState *ms = MACHINE(obj);
+
+    ms->enable_graphics = value;
+}
+
 static bool machine_get_igd_gfx_passthru(Object *obj, Error **errp)
 {
     MachineState *ms = MACHINE(obj);
@@ -284,20 +301,6 @@ static void machine_set_firmware(Object *obj, const char *value, Error **errp)
 
     g_free(ms->firmware);
     ms->firmware = g_strdup(value);
-}
-
-static bool machine_get_iommu(Object *obj, Error **errp)
-{
-    MachineState *ms = MACHINE(obj);
-
-    return ms->iommu;
-}
-
-static void machine_set_iommu(Object *obj, bool value, Error **errp)
-{
-    MachineState *ms = MACHINE(obj);
-
-    ms->iommu = value;
 }
 
 static void machine_set_suppress_vmdesc(Object *obj, bool value, Error **errp)
@@ -329,7 +332,7 @@ static bool machine_get_enforce_config_section(Object *obj, Error **errp)
     return ms->enforce_config_section;
 }
 
-static int error_on_sysbus_device(SysBusDevice *sbdev, void *opaque)
+static void error_on_sysbus_device(SysBusDevice *sbdev, void *opaque)
 {
     error_report("Option '-device %s' cannot be handled by this machine",
                  object_class_get_name(object_get_class(OBJECT(sbdev))));
@@ -354,6 +357,37 @@ static void machine_init_notify(Notifier *notifier, void *data)
     foreach_dynamic_sysbus_device(error_on_sysbus_device, NULL);
 }
 
+HotpluggableCPUList *machine_query_hotpluggable_cpus(MachineState *machine)
+{
+    int i;
+    Object *cpu;
+    HotpluggableCPUList *head = NULL;
+    const char *cpu_type;
+
+    cpu = machine->possible_cpus->cpus[0].cpu;
+    assert(cpu); /* Boot cpu is always present */
+    cpu_type = object_get_typename(cpu);
+    for (i = 0; i < machine->possible_cpus->len; i++) {
+        HotpluggableCPUList *list_item = g_new0(typeof(*list_item), 1);
+        HotpluggableCPU *cpu_item = g_new0(typeof(*cpu_item), 1);
+
+        cpu_item->type = g_strdup(cpu_type);
+        cpu_item->vcpus_count = machine->possible_cpus->cpus[i].vcpus_count;
+        cpu_item->props = g_memdup(&machine->possible_cpus->cpus[i].props,
+                                   sizeof(*cpu_item->props));
+
+        cpu = machine->possible_cpus->cpus[i].cpu;
+        if (cpu) {
+            cpu_item->has_qom_path = true;
+            cpu_item->qom_path = object_get_canonical_path(cpu);
+        }
+        list_item->value = cpu_item;
+        list_item->next = head;
+        head = list_item;
+    }
+    return head;
+}
+
 static void machine_class_init(ObjectClass *oc, void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
@@ -361,6 +395,109 @@ static void machine_class_init(ObjectClass *oc, void *data)
     /* Default 128 MB as guest ram size */
     mc->default_ram_size = 128 * M_BYTE;
     mc->rom_file_has_mr = true;
+
+    /* numa node memory size aligned on 8MB by default.
+     * On Linux, each node's border has to be 8MB aligned
+     */
+    mc->numa_mem_align_shift = 23;
+
+    object_class_property_add_str(oc, "accel",
+        machine_get_accel, machine_set_accel, &error_abort);
+    object_class_property_set_description(oc, "accel",
+        "Accelerator list", &error_abort);
+
+    object_class_property_add(oc, "kernel-irqchip", "OnOffSplit",
+        NULL, machine_set_kernel_irqchip,
+        NULL, NULL, &error_abort);
+    object_class_property_set_description(oc, "kernel-irqchip",
+        "Configure KVM in-kernel irqchip", &error_abort);
+
+    object_class_property_add(oc, "kvm-shadow-mem", "int",
+        machine_get_kvm_shadow_mem, machine_set_kvm_shadow_mem,
+        NULL, NULL, &error_abort);
+    object_class_property_set_description(oc, "kvm-shadow-mem",
+        "KVM shadow MMU size", &error_abort);
+
+    object_class_property_add_str(oc, "kernel",
+        machine_get_kernel, machine_set_kernel, &error_abort);
+    object_class_property_set_description(oc, "kernel",
+        "Linux kernel image file", &error_abort);
+
+    object_class_property_add_str(oc, "initrd",
+        machine_get_initrd, machine_set_initrd, &error_abort);
+    object_class_property_set_description(oc, "initrd",
+        "Linux initial ramdisk file", &error_abort);
+
+    object_class_property_add_str(oc, "append",
+        machine_get_append, machine_set_append, &error_abort);
+    object_class_property_set_description(oc, "append",
+        "Linux kernel command line", &error_abort);
+
+    object_class_property_add_str(oc, "dtb",
+        machine_get_dtb, machine_set_dtb, &error_abort);
+    object_class_property_set_description(oc, "dtb",
+        "Linux kernel device tree file", &error_abort);
+
+    object_class_property_add_str(oc, "dumpdtb",
+        machine_get_dumpdtb, machine_set_dumpdtb, &error_abort);
+    object_class_property_set_description(oc, "dumpdtb",
+        "Dump current dtb to a file and quit", &error_abort);
+
+    object_class_property_add(oc, "phandle-start", "int",
+        machine_get_phandle_start, machine_set_phandle_start,
+        NULL, NULL, &error_abort);
+    object_class_property_set_description(oc, "phandle-start",
+            "The first phandle ID we may generate dynamically", &error_abort);
+
+    object_class_property_add_str(oc, "dt-compatible",
+        machine_get_dt_compatible, machine_set_dt_compatible, &error_abort);
+    object_class_property_set_description(oc, "dt-compatible",
+        "Overrides the \"compatible\" property of the dt root node",
+        &error_abort);
+
+    object_class_property_add_bool(oc, "dump-guest-core",
+        machine_get_dump_guest_core, machine_set_dump_guest_core, &error_abort);
+    object_class_property_set_description(oc, "dump-guest-core",
+        "Include guest memory in  a core dump", &error_abort);
+
+    object_class_property_add_bool(oc, "mem-merge",
+        machine_get_mem_merge, machine_set_mem_merge, &error_abort);
+    object_class_property_set_description(oc, "mem-merge",
+        "Enable/disable memory merge support", &error_abort);
+
+    object_class_property_add_bool(oc, "usb",
+        machine_get_usb, machine_set_usb, &error_abort);
+    object_class_property_set_description(oc, "usb",
+        "Set on/off to enable/disable usb", &error_abort);
+
+    object_class_property_add_bool(oc, "graphics",
+        machine_get_graphics, machine_set_graphics, &error_abort);
+    object_class_property_set_description(oc, "graphics",
+        "Set on/off to enable/disable graphics emulation", &error_abort);
+
+    object_class_property_add_bool(oc, "igd-passthru",
+        machine_get_igd_gfx_passthru, machine_set_igd_gfx_passthru,
+        &error_abort);
+    object_class_property_set_description(oc, "igd-passthru",
+        "Set on/off to enable/disable igd passthrou", &error_abort);
+
+    object_class_property_add_str(oc, "firmware",
+        machine_get_firmware, machine_set_firmware,
+        &error_abort);
+    object_class_property_set_description(oc, "firmware",
+        "Firmware image", &error_abort);
+
+    object_class_property_add_bool(oc, "suppress-vmdesc",
+        machine_get_suppress_vmdesc, machine_set_suppress_vmdesc,
+        &error_abort);
+    object_class_property_set_description(oc, "suppress-vmdesc",
+        "Set on to disable self-describing migration", &error_abort);
+
+    object_class_property_add_bool(oc, "enforce-config-section",
+        machine_get_enforce_config_section, machine_set_enforce_config_section,
+        &error_abort);
+    object_class_property_set_description(oc, "enforce-config-section",
+        "Set on to enforce configuration section migration", &error_abort);
 }
 
 static void machine_class_base_init(ObjectClass *oc, void *data)
@@ -382,114 +519,7 @@ static void machine_initfn(Object *obj)
     ms->kvm_shadow_mem = -1;
     ms->dump_guest_core = true;
     ms->mem_merge = true;
-
-    object_property_add_str(obj, "accel",
-                            machine_get_accel, machine_set_accel, NULL);
-    object_property_set_description(obj, "accel",
-                                    "Accelerator list",
-                                    NULL);
-    object_property_add(obj, "kernel-irqchip", "OnOffSplit",
-                        NULL,
-                        machine_set_kernel_irqchip,
-                        NULL, NULL, NULL);
-    object_property_set_description(obj, "kernel-irqchip",
-                                    "Configure KVM in-kernel irqchip",
-                                    NULL);
-    object_property_add(obj, "kvm-shadow-mem", "int",
-                        machine_get_kvm_shadow_mem,
-                        machine_set_kvm_shadow_mem,
-                        NULL, NULL, NULL);
-    object_property_set_description(obj, "kvm-shadow-mem",
-                                    "KVM shadow MMU size",
-                                    NULL);
-    object_property_add_str(obj, "kernel",
-                            machine_get_kernel, machine_set_kernel, NULL);
-    object_property_set_description(obj, "kernel",
-                                    "Linux kernel image file",
-                                    NULL);
-    object_property_add_str(obj, "initrd",
-                            machine_get_initrd, machine_set_initrd, NULL);
-    object_property_set_description(obj, "initrd",
-                                    "Linux initial ramdisk file",
-                                    NULL);
-    object_property_add_str(obj, "append",
-                            machine_get_append, machine_set_append, NULL);
-    object_property_set_description(obj, "append",
-                                    "Linux kernel command line",
-                                    NULL);
-    object_property_add_str(obj, "dtb",
-                            machine_get_dtb, machine_set_dtb, NULL);
-    object_property_set_description(obj, "dtb",
-                                    "Linux kernel device tree file",
-                                    NULL);
-    object_property_add_str(obj, "dumpdtb",
-                            machine_get_dumpdtb, machine_set_dumpdtb, NULL);
-    object_property_set_description(obj, "dumpdtb",
-                                    "Dump current dtb to a file and quit",
-                                    NULL);
-    object_property_add(obj, "phandle-start", "int",
-                        machine_get_phandle_start,
-                        machine_set_phandle_start,
-                        NULL, NULL, NULL);
-    object_property_set_description(obj, "phandle-start",
-                                    "The first phandle ID we may generate dynamically",
-                                    NULL);
-    object_property_add_str(obj, "dt-compatible",
-                            machine_get_dt_compatible,
-                            machine_set_dt_compatible,
-                            NULL);
-    object_property_set_description(obj, "dt-compatible",
-                                    "Overrides the \"compatible\" property of the dt root node",
-                                    NULL);
-    object_property_add_bool(obj, "dump-guest-core",
-                             machine_get_dump_guest_core,
-                             machine_set_dump_guest_core,
-                             NULL);
-    object_property_set_description(obj, "dump-guest-core",
-                                    "Include guest memory in  a core dump",
-                                    NULL);
-    object_property_add_bool(obj, "mem-merge",
-                             machine_get_mem_merge,
-                             machine_set_mem_merge, NULL);
-    object_property_set_description(obj, "mem-merge",
-                                    "Enable/disable memory merge support",
-                                    NULL);
-    object_property_add_bool(obj, "usb",
-                             machine_get_usb,
-                             machine_set_usb, NULL);
-    object_property_set_description(obj, "usb",
-                                    "Set on/off to enable/disable usb",
-                                    NULL);
-    object_property_add_bool(obj, "igd-passthru",
-                             machine_get_igd_gfx_passthru,
-                             machine_set_igd_gfx_passthru, NULL);
-    object_property_set_description(obj, "igd-passthru",
-                                    "Set on/off to enable/disable igd passthrou",
-                                    NULL);
-    object_property_add_str(obj, "firmware",
-                            machine_get_firmware,
-                            machine_set_firmware, NULL);
-    object_property_set_description(obj, "firmware",
-                                    "Firmware image",
-                                    NULL);
-    object_property_add_bool(obj, "iommu",
-                             machine_get_iommu,
-                             machine_set_iommu, NULL);
-    object_property_set_description(obj, "iommu",
-                                    "Set on/off to enable/disable Intel IOMMU (VT-d)",
-                                    NULL);
-    object_property_add_bool(obj, "suppress-vmdesc",
-                             machine_get_suppress_vmdesc,
-                             machine_set_suppress_vmdesc, NULL);
-    object_property_set_description(obj, "suppress-vmdesc",
-                                    "Set on to disable self-describing migration",
-                                    NULL);
-    object_property_add_bool(obj, "enforce-config-section",
-                             machine_get_enforce_config_section,
-                             machine_set_enforce_config_section, NULL);
-    object_property_set_description(obj, "enforce-config-section",
-                                    "Set on to enforce configuration section migration",
-                                    NULL);
+    ms->enable_graphics = true;
 
     /* Register notifier when init is done for sysbus sanity checks */
     ms->sysbus_notifier.notify = machine_init_notify;
@@ -550,6 +580,67 @@ bool machine_mem_merge(MachineState *machine)
     return machine->mem_merge;
 }
 
+static void machine_class_finalize(ObjectClass *klass, void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(klass);
+
+    if (mc->compat_props) {
+        g_array_free(mc->compat_props, true);
+    }
+    g_free(mc->name);
+}
+
+static void register_compat_prop(const char *driver,
+                                 const char *property,
+                                 const char *value)
+{
+    GlobalProperty *p = g_new0(GlobalProperty, 1);
+    /* Machine compat_props must never cause errors: */
+    p->errp = &error_abort;
+    p->driver = driver;
+    p->property = property;
+    p->value = value;
+    qdev_prop_register_global(p);
+}
+
+static void machine_register_compat_for_subclass(ObjectClass *oc, void *opaque)
+{
+    GlobalProperty *p = opaque;
+    register_compat_prop(object_class_get_name(oc), p->property, p->value);
+}
+
+void machine_register_compat_props(MachineState *machine)
+{
+    MachineClass *mc = MACHINE_GET_CLASS(machine);
+    int i;
+    GlobalProperty *p;
+    ObjectClass *oc;
+
+    if (!mc->compat_props) {
+        return;
+    }
+
+    for (i = 0; i < mc->compat_props->len; i++) {
+        p = g_array_index(mc->compat_props, GlobalProperty *, i);
+        oc = object_class_by_name(p->driver);
+        if (oc && object_class_is_abstract(oc)) {
+            /* temporary hack to make sure we do not override
+             * globals set explicitly on -global: if an abstract class
+             * is on compat_props, register globals for all its
+             * non-abstract subtypes instead.
+             *
+             * This doesn't solve the problem for cases where
+             * a non-abstract typename mentioned on compat_props
+             * has subclasses, like spapr-pci-host-bridge.
+             */
+            object_class_foreach(machine_register_compat_for_subclass,
+                                 p->driver, false, p);
+        } else {
+            register_compat_prop(p->driver, p->property, p->value);
+        }
+    }
+}
+
 static const TypeInfo machine_info = {
     .name = TYPE_MACHINE,
     .parent = TYPE_OBJECT,
@@ -557,6 +648,7 @@ static const TypeInfo machine_info = {
     .class_size = sizeof(MachineClass),
     .class_init    = machine_class_init,
     .class_base_init = machine_class_base_init,
+    .class_finalize = machine_class_finalize,
     .instance_size = sizeof(MachineState),
     .instance_init = machine_initfn,
     .instance_finalize = machine_finalize,

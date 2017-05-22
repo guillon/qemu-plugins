@@ -1,5 +1,6 @@
 #ifndef QEMU_HW_XEN_H
-#define QEMU_HW_XEN_H 1
+#define QEMU_HW_XEN_H
+
 /*
  * public xen header
  *   stuff needed outside xen-*.c, i.e. interfaces to qemu.
@@ -7,8 +8,9 @@
  *   /usr/include/xen, so it can be included unconditionally.
  */
 
-#include "hw/irq.h"
 #include "qemu-common.h"
+#include "exec/cpu-common.h"
+#include "hw/irq.h"
 
 /* xen-machine.c */
 enum xen_mode {
@@ -35,14 +37,13 @@ int xen_is_pirq_msi(uint32_t msi_data);
 
 qemu_irq *xen_interrupt_controller_init(void);
 
-void xenstore_store_pv_console_info(int i, struct CharDriverState *chr);
+void xenstore_store_pv_console_info(int i, struct Chardev *chr);
 
-#if defined(NEED_CPU_H) && !defined(CONFIG_USER_ONLY)
 void xen_hvm_init(PCMachineState *pcms, MemoryRegion **ram_memory);
+
 void xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size,
                    struct MemoryRegion *mr, Error **errp);
 void xen_modified_memory(ram_addr_t start, ram_addr_t length);
-#endif
 
 void xen_register_framebuffer(struct MemoryRegion *mr);
 

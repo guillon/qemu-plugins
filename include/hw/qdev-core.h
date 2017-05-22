@@ -26,6 +26,7 @@ typedef enum DeviceCategory {
     DEVICE_CATEGORY_DISPLAY,
     DEVICE_CATEGORY_SOUND,
     DEVICE_CATEGORY_MISC,
+    DEVICE_CATEGORY_CPU,
     DEVICE_CATEGORY_MAX
 } DeviceCategory;
 
@@ -224,7 +225,7 @@ typedef struct BusChild {
 struct BusState {
     Object obj;
     DeviceState *parent;
-    const char *name;
+    char *name;
     HotplugHandler *hotplug_handler;
     int max_index;
     bool realized;
@@ -259,6 +260,11 @@ struct PropertyInfo {
  * @user_provided: Set to true if property comes from user-provided config
  * (command-line or config file).
  * @used: Set to true if property was used when initializing a device.
+ * @errp: Error destination, used like first argument of error_setg()
+ *        in case property setting fails later. If @errp is NULL, we
+ *        print warnings instead of ignoring errors silently. For
+ *        hotplugged devices, errp is always ignored and warnings are
+ *        printed instead.
  */
 typedef struct GlobalProperty {
     const char *driver;
@@ -266,7 +272,7 @@ typedef struct GlobalProperty {
     const char *value;
     bool user_provided;
     bool used;
-    QTAILQ_ENTRY(GlobalProperty) next;
+    Error **errp;
 } GlobalProperty;
 
 /*** Board API.  This should go away once we have a machine config file.  ***/

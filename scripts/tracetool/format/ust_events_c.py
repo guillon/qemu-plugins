@@ -16,7 +16,7 @@ __email__      = "stefanha@redhat.com"
 from tracetool import out
 
 
-def generate(events, backend):
+def generate(events, backend, group):
     events = [e for e in events
               if "disabled" not in e.properties]
 
@@ -32,4 +32,4 @@ def generate(events, backend):
         ' */',
         '#pragma GCC diagnostic ignored "-Wredundant-decls"',
         '',
-        '#include "generated-ust-provider.h"')
+        '#include "trace-ust-all.h"')

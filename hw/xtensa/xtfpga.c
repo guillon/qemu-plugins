@@ -165,7 +165,7 @@ static pflash_t *xtfpga_flash_init(MemoryRegion *address_space,
     qdev_prop_set_uint32(dev, "num-blocks",
                          board->flash_size / board->flash_sector_size);
     qdev_prop_set_uint64(dev, "sector-length", board->flash_sector_size);
-    qdev_prop_set_uint8(dev, "width", 4);
+    qdev_prop_set_uint8(dev, "width", 2);
     qdev_prop_set_bit(dev, "big-endian", be);
     qdev_prop_set_string(dev, "name", "lx60.io.flash");
     qdev_init_nofail(dev);
@@ -265,7 +265,7 @@ static void lx_init(const LxBoardDesc *board, MachineState *machine)
     }
 
     if (!serial_hds[0]) {
-        serial_hds[0] = qemu_chr_new("serial0", "null", NULL);
+        serial_hds[0] = qemu_chr_new("serial0", "null");
     }
 
     serial_mm_init(system_io, 0x0d050020, 2, xtensa_get_extint(env, 0),
@@ -317,6 +317,7 @@ static void lx_init(const LxBoardDesc *board, MachineState *machine)
             cur_tagptr = put_tag(cur_tagptr, BP_TAG_COMMAND_LINE,
                                  strlen(kernel_cmdline) + 1, kernel_cmdline);
         }
+#ifdef CONFIG_FDT
         if (dtb_filename) {
             int fdt_size;
             void *fdt = load_device_tree(dtb_filename, &fdt_size);
@@ -332,6 +333,14 @@ static void lx_init(const LxBoardDesc *board, MachineState *machine)
                                  sizeof(dtb_addr), &dtb_addr);
             cur_lowmem = QEMU_ALIGN_UP(cur_lowmem + fdt_size, 4096);
         }
+#else
+        if (dtb_filename) {
+            error_report("could not load DTB '%s': "
+                         "FDT support is not configured in QEMU",
+                         dtb_filename);
+            exit(EXIT_FAILURE);
+        }
+#endif
         if (initrd_filename) {
             BpMemInfo initrd_location = { 0 };
             int initrd_size = load_ramdisk(initrd_filename, cur_lowmem,

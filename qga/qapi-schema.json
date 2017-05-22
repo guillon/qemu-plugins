@@ -11,6 +11,23 @@
 #
 ##
 
+{ 'pragma': { 'doc-required': true } }
+
+# Whitelists to permit QAPI rule violations; think twice before you
+# add to them!
+{ 'pragma': {
+    # Commands allowed to return a non-dictionary:
+    'returns-whitelist': [
+        'guest-file-open',
+        'guest-fsfreeze-freeze',
+        'guest-fsfreeze-freeze-list',
+        'guest-fsfreeze-status',
+        'guest-fsfreeze-thaw',
+        'guest-get-time',
+        'guest-set-vcpus',
+        'guest-sync',
+        'guest-sync-delimited' ] } }
+
 ##
 # @guest-sync-delimited:
 #
@@ -102,7 +119,7 @@
 #
 # Returns: Time in nanoseconds.
 #
-# Since 1.5
+# Since: 1.5
 ##
 { 'command': 'guest-get-time',
   'returns': 'int' }
@@ -127,7 +144,7 @@
 # If that's the case users are advised to always pass a
 # value.
 #
-# @time: #optional time of nanoseconds, relative to the Epoch
+# @time: time of nanoseconds, relative to the Epoch
 #        of 1970-01-01 in UTC.
 #
 # Returns: Nothing on success.
@@ -149,13 +166,13 @@
 # @success-response: whether command returns a response on success
 #                    (since 1.7)
 #
-# Since 1.1.0
+# Since: 1.1.0
 ##
 { 'struct': 'GuestAgentCommandInfo',
   'data': { 'name': 'str', 'enabled': 'bool', 'success-response': 'bool' } }
 
 ##
-# @GuestAgentInfo
+# @GuestAgentInfo:
 #
 # Information about guest agent.
 #
@@ -163,7 +180,7 @@
 #
 # @supported_commands: Information about guest agent commands
 #
-# Since 0.15.0
+# Since: 0.15.0
 ##
 { 'struct': 'GuestAgentInfo',
   'data': { 'version': 'str',
@@ -186,7 +203,7 @@
 # Initiate guest-activated shutdown. Note: this is an asynchronous
 # shutdown request, with no guarantee of successful shutdown.
 #
-# @mode: #optional "halt", "powerdown" (default), or "reboot"
+# @mode: "halt", "powerdown" (default), or "reboot"
 #
 # This command does NOT return a response on success. Success condition
 # is indicated by the VM exiting with a zero exit status or, when
@@ -203,9 +220,9 @@
 #
 # Open a file in the guest and retrieve a file handle for it
 #
-# @filepath: Full path to the file in the guest to open.
+# @path: Full path to the file in the guest to open.
 #
-# @mode: #optional open mode, as per fopen(), "r" is the default.
+# @mode: open mode, as per fopen(), "r" is the default.
 #
 # Returns: Guest file handle on success.
 #
@@ -230,7 +247,7 @@
   'data': { 'handle': 'int' } }
 
 ##
-# @GuestFileRead
+# @GuestFileRead:
 #
 # Result of guest agent file-read operation
 #
@@ -253,7 +270,7 @@
 #
 # @handle: filehandle returned by guest-file-open
 #
-# @count: #optional maximum number of bytes to read (default is 4KB)
+# @count: maximum number of bytes to read (default is 4KB)
 #
 # Returns: @GuestFileRead on success.
 #
@@ -264,7 +281,7 @@
   'returns': 'GuestFileRead' }
 
 ##
-# @GuestFileWrite
+# @GuestFileWrite:
 #
 # Result of guest agent file-write operation
 #
@@ -287,7 +304,7 @@
 #
 # @buf-b64: base64-encoded string representing data to be written
 #
-# @count: #optional bytes to write (actual bytes, after base64-decode),
+# @count: bytes to write (actual bytes, after base64-decode),
 #         default is all content in buf-b64 buffer after base64 decoding
 #
 # Returns: @GuestFileWrite on success.
@@ -300,7 +317,7 @@
 
 
 ##
-# @GuestFileSeek
+# @GuestFileSeek:
 #
 # Result of guest agent file-seek operation
 #
@@ -378,7 +395,7 @@
   'data': { 'handle': 'int' } }
 
 ##
-# @GuestFsFreezeStatus
+# @GuestFsfreezeStatus:
 #
 # An enumeration of filesystem freeze states
 #
@@ -424,7 +441,7 @@
 #
 # Sync and freeze specified guest filesystems
 #
-# @mountpoints: #optional an array of mountpoints of filesystems to be frozen.
+# @mountpoints: an array of mountpoints of filesystems to be frozen.
 #               If omitted, every mounted filesystem is frozen.
 #
 # Returns: Number of file systems currently frozen. On error, all filesystems
@@ -455,7 +472,7 @@
   'returns': 'int' }
 
 ##
-# @GuestFilesystemTrimResult
+# @GuestFilesystemTrimResult:
 #
 # @path: path that was trimmed
 # @error: an error message when trim failed
@@ -469,7 +486,7 @@
            '*trimmed': 'int', '*minimum': 'int', '*error': 'str'} }
 
 ##
-# @GuestFilesystemTrimResponse
+# @GuestFilesystemTrimResponse:
 #
 # @paths: list of @GuestFilesystemTrimResult per path that was trimmed
 #
@@ -501,7 +518,7 @@
   'returns': 'GuestFilesystemTrimResponse' }
 
 ##
-# @guest-suspend-disk
+# @guest-suspend-disk:
 #
 # Suspend guest to disk.
 #
@@ -529,7 +546,7 @@
 { 'command': 'guest-suspend-disk', 'success-response': false }
 
 ##
-# @guest-suspend-ram
+# @guest-suspend-ram:
 #
 # Suspend guest to ram.
 #
@@ -561,7 +578,7 @@
 { 'command': 'guest-suspend-ram', 'success-response': false }
 
 ##
-# @guest-suspend-hybrid
+# @guest-suspend-hybrid:
 #
 # Save guest state to disk and suspend to ram.
 #
@@ -653,7 +670,7 @@
 #
 # @online: Whether the VCPU is enabled.
 #
-# @can-offline: #optional Whether offlining the VCPU is possible. This member
+# @can-offline: Whether offlining the VCPU is possible. This member
 #               is always filled in by the guest agent when the structure is
 #               returned, and always ignored on input (hence it can be omitted
 #               then).
@@ -697,21 +714,18 @@
 # Returns: The length of the initial sublist that has been successfully
 #          processed. The guest agent maximizes this value. Possible cases:
 #
-#          0:                if the @vcpus list was empty on input. Guest state
+#          - 0:              if the @vcpus list was empty on input. Guest state
 #                            has not been changed. Otherwise,
-#
-#          Error:            processing the first node of @vcpus failed for the
+#          - Error:          processing the first node of @vcpus failed for the
 #                            reason returned. Guest state has not been changed.
 #                            Otherwise,
-#
-#          < length(@vcpus): more than zero initial nodes have been processed,
+#          - < length(@vcpus): more than zero initial nodes have been processed,
 #                            but not the entire @vcpus list. Guest state has
 #                            changed accordingly. To retrieve the error
 #                            (assuming it persists), repeat the call with the
 #                            successfully processed initial sublist removed.
 #                            Otherwise,
-#
-#          length(@vcpus):   call successful.
+#          - length(@vcpus): call successful.
 #
 # Since: 1.5
 ##
@@ -720,7 +734,7 @@
   'returns': 'int' }
 
 ##
-# @GuestDiskBusType
+# @GuestDiskBusType:
 #
 # An enumeration of bus type of disks
 #
@@ -770,7 +784,7 @@
 # @GuestDiskAddress:
 #
 # @pci-controller: controller's PCI address
-# @type: bus type
+# @bus-type: bus type
 # @bus: bus id
 # @target: target id
 # @unit: unit id
@@ -783,7 +797,7 @@
            'bus': 'int', 'target': 'int', 'unit': 'int'} }
 
 ##
-# @GuestFilesystemInfo
+# @GuestFilesystemInfo:
 #
 # @name: disk name
 # @mountpoint: mount point path
@@ -811,7 +825,7 @@
   'returns': ['GuestFilesystemInfo'] }
 
 ##
-# @guest-set-user-password
+# @guest-set-user-password:
 #
 # @username: the user account whose password to change
 # @password: the new password entry string, base64 encoded
@@ -832,18 +846,19 @@
 #
 # Returns: Nothing on success.
 #
-# Since 2.3
+# Since: 2.3
 ##
 { 'command': 'guest-set-user-password',
   'data': { 'username': 'str', 'password': 'str', 'crypted': 'bool' } }
 
+##
 # @GuestMemoryBlock:
 #
 # @phys-index: Arbitrary guest-specific unique identifier of the MEMORY BLOCK.
 #
 # @online: Whether the MEMORY BLOCK is enabled in guest.
 #
-# @can-offline: #optional Whether offlining the MEMORY BLOCK is possible.
+# @can-offline: Whether offlining the MEMORY BLOCK is possible.
 #               This member is always filled in by the guest agent when the
 #               structure is returned, and always ignored on input (hence it
 #               can be omitted then).
@@ -872,7 +887,7 @@
   'returns': ['GuestMemoryBlock'] }
 
 ##
-# @GuestMemoryBlockResponseType
+# @GuestMemoryBlockResponseType:
 #
 # An enumeration of memory block operation result.
 #
@@ -896,7 +911,7 @@
 #
 # @response: the result of memory block operation.
 #
-# @error-code: #optional the error number.
+# @error-code: the error number.
 #               When memory block operation fails, we assign the value of
 #               'errno' to this member, it indicates what goes wrong.
 #               When the operation succeeds, it will be omitted.
@@ -936,6 +951,7 @@
   'data':    {'mem-blks': ['GuestMemoryBlock'] },
   'returns': ['GuestMemoryBlockResponse'] }
 
+##
 # @GuestMemoryBlockInfo:
 #
 # @size: the size (in bytes) of the guest memory blocks,
@@ -952,27 +968,27 @@
 #
 # Get information relating to guest memory blocks.
 #
-# Returns: memory block size in bytes.
 # Returns: @GuestMemoryBlockInfo
 #
-# Since 2.3
+# Since: 2.3
 ##
 { 'command': 'guest-get-memory-block-info',
   'returns': 'GuestMemoryBlockInfo' }
 
+##
 # @GuestExecStatus:
 #
 # @exited: true if process has already terminated.
-# @exitcode: #optional process exit code if it was normally terminated.
-# @signal: #optional signal number (linux) or unhandled exception code
+# @exitcode: process exit code if it was normally terminated.
+# @signal: signal number (linux) or unhandled exception code
 #       (windows) if the process was abnormally terminated.
-# @out-data: #optional base64-encoded stdout of the process
-# @err-data: #optional base64-encoded stderr of the process
+# @out-data: base64-encoded stdout of the process
+# @err-data: base64-encoded stderr of the process
 #       Note: @out-data and @err-data are present only
 #       if 'capture-output' was specified for 'guest-exec'
-# @out-truncated: #optional true if stdout was not fully captured
+# @out-truncated: true if stdout was not fully captured
 #       due to size limitation.
-# @err-truncated: #optional true if stderr was not fully captured
+# @err-truncated: true if stderr was not fully captured
 #       due to size limitation.
 #
 # Since: 2.5
@@ -982,7 +998,7 @@
             '*out-data': 'str', '*err-data': 'str',
             '*out-truncated': 'bool', '*err-truncated': 'bool' }}
 ##
-# @guest-exec-status
+# @guest-exec-status:
 #
 # Check status of process associated with PID retrieved via guest-exec.
 # Reap the process and associated metadata if it has exited.
@@ -991,7 +1007,7 @@
 #
 # Returns: GuestExecStatus on success.
 #
-# Since 2.5
+# Since: 2.5
 ##
 { 'command': 'guest-exec-status',
   'data':    { 'pid': 'int' },
@@ -1001,7 +1017,7 @@
 # @GuestExec:
 # @pid: pid of child process in guest OS
 #
-#Since: 2.5
+# Since: 2.5
 ##
 { 'struct': 'GuestExec',
   'data': { 'pid': 'int'} }
@@ -1012,10 +1028,10 @@
 # Execute a command in the guest
 #
 # @path: path or executable name to execute
-# @arg: #optional argument list to pass to executable
-# @env: #optional environment variables to pass to executable
-# @input-data: #optional data to be passed to process stdin (base64 encoded)
-# @capture-output: #optional bool flag to enable capture of
+# @arg: argument list to pass to executable
+# @env: environment variables to pass to executable
+# @input-data: data to be passed to process stdin (base64 encoded)
+# @capture-output: bool flag to enable capture of
 #                  stdout/stderr of running process. defaults to false.
 #
 # Returns: PID on success.

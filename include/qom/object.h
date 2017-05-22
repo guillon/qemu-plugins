@@ -14,7 +14,6 @@
 #ifndef QEMU_OBJECT_H
 #define QEMU_OBJECT_H
 
-#include <glib.h>
 #include "qapi-types.h"
 #include "qemu/queue.h"
 
@@ -433,7 +432,7 @@ struct Object
  * @class_base_init: This function is called for all base classes after all
  *   parent class initialization has occurred, but before the class itself
  *   is initialized.  This is the function to use to undo the effects of
- *   memcpy from the parent class to the descendents.
+ *   memcpy from the parent class to the descendants.
  * @class_finalize: This function is called during class destruction and is
  *   meant to release and dynamic parameters allocated by @class_init.
  * @class_data: Data to pass to the @class_init, @class_base_init and
@@ -588,18 +587,6 @@ struct InterfaceClass
 Object *object_new(const char *typename);
 
 /**
- * object_new_with_type:
- * @type: The type of the object to instantiate.
- *
- * This function will initialize a new object using heap allocated memory.
- * The returned object has a reference count of 1, and will be freed when
- * the last reference is dropped.
- *
- * Returns: The newly allocated and instantiated object.
- */
-Object *object_new_with_type(Type type);
-
-/**
  * object_new_with_props:
  * @typename:  The name of the type of the object to instantiate.
  * @parent: the parent object
@@ -726,18 +713,6 @@ int object_set_props(Object *obj,
 int object_set_propv(Object *obj,
                      Error **errp,
                      va_list vargs);
-
-/**
- * object_initialize_with_type:
- * @data: A pointer to the memory to be used for the object.
- * @size: The maximum size available at @data for the object.
- * @type: The type of the object to instantiate.
- *
- * This function will initialize an object.  The memory for the object should
- * have already been allocated.  The returned object has a reference count of 1,
- * and will be finalized when the last reference is dropped.
- */
-void object_initialize_with_type(void *data, size_t size, Type type);
 
 /**
  * object_initialize:
@@ -902,7 +877,7 @@ GSList *object_class_get_list(const char *implements_type,
 void object_ref(Object *obj);
 
 /**
- * qdef_unref:
+ * object_unref:
  * @obj: the object
  *
  * Decrease the reference count of a object.  A object cannot be freed as long
@@ -1608,5 +1583,11 @@ int object_child_foreach_recursive(Object *obj,
  */
 Object *container_get(Object *root, const char *path);
 
-
+/**
+ * object_type_get_instance_size:
+ * @typename: Name of the Type whose instance_size is required
+ *
+ * Returns the instance_size of the given @typename.
+ */
+size_t object_type_get_instance_size(const char *typename);
 #endif

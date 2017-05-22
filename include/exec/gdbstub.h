@@ -11,6 +11,8 @@
 #define GDB_WATCHPOINT_ACCESS    4
 
 #ifdef NEED_CPU_H
+#include "cpu.h"
+
 typedef void (*gdb_syscall_complete_cb)(CPUState *cpu,
                                         target_ulong ret, target_ulong err);
 
@@ -46,7 +48,6 @@ int use_gdb_syscalls(void);
 void gdb_set_stop_cpu(CPUState *cpu);
 void gdb_exit(CPUArchState *, int);
 #ifdef CONFIG_USER_ONLY
-int gdb_queuesig (void);
 int gdb_handlesig(CPUState *, int);
 void gdb_signalled(CPUArchState *, int);
 void gdbserver_fork(CPUState *);
@@ -106,7 +107,7 @@ static inline int gdb_get_reg64(uint8_t *mem_buf, uint64_t val)
 #endif
 
 #ifdef CONFIG_USER_ONLY
-int gdbserver_start(int);
+int gdbserver_start(int, const char* bin_name);
 #else
 int gdbserver_start(const char *port);
 #endif

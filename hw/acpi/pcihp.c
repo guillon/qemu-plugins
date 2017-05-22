@@ -49,7 +49,6 @@
 
 #define ACPI_PCIHP_ADDR 0xae00
 #define ACPI_PCIHP_SIZE 0x0014
-#define ACPI_PCIHP_LEGACY_SIZE 0x000f
 #define PCI_UP_BASE 0x0000
 #define PCI_DOWN_BASE 0x0004
 #define PCI_EJ_BASE 0x0008
@@ -182,7 +181,7 @@ void acpi_pcihp_reset(AcpiPciHpState *s)
     acpi_pcihp_update(s);
 }
 
-void acpi_pcihp_device_plug_cb(ACPIREGS *ar, qemu_irq irq, AcpiPciHpState *s,
+void acpi_pcihp_device_plug_cb(HotplugHandler *hotplug_dev, AcpiPciHpState *s,
                                DeviceState *dev, Error **errp)
 {
     PCIDevice *pdev = PCI_DEVICE(dev);
@@ -202,11 +201,10 @@ void acpi_pcihp_device_plug_cb(ACPIREGS *ar, qemu_irq irq, AcpiPciHpState *s,
     }
 
     s->acpi_pcihp_pci_status[bsel].up |= (1U << slot);
-
-    acpi_send_gpe_event(ar, irq, ACPI_PCI_HOTPLUG_STATUS);
+    acpi_send_event(DEVICE(hotplug_dev), ACPI_PCI_HOTPLUG_STATUS);
 }
 
-void acpi_pcihp_device_unplug_cb(ACPIREGS *ar, qemu_irq irq, AcpiPciHpState *s,
+void acpi_pcihp_device_unplug_cb(HotplugHandler *hotplug_dev, AcpiPciHpState *s,
                                  DeviceState *dev, Error **errp)
 {
     PCIDevice *pdev = PCI_DEVICE(dev);
@@ -219,8 +217,7 @@ void acpi_pcihp_device_unplug_cb(ACPIREGS *ar, qemu_irq irq, AcpiPciHpState *s,
     }
 
     s->acpi_pcihp_pci_status[bsel].down |= (1U << slot);
-
-    acpi_send_gpe_event(ar, irq, ACPI_PCI_HOTPLUG_STATUS);
+    acpi_send_event(DEVICE(hotplug_dev), ACPI_PCI_HOTPLUG_STATUS);
 }
 
 static uint64_t pci_read(void *opaque, hwaddr addr, unsigned int size)
@@ -303,16 +300,6 @@ void acpi_pcihp_init(Object *owner, AcpiPciHpState *s, PCIBus *root_bus,
 
     s->root= root_bus;
     s->legacy_piix = !bridges_enabled;
-
-    if (s->legacy_piix) {
-        unsigned *bus_bsel = g_malloc(sizeof *bus_bsel);
-
-        s->io_len = ACPI_PCIHP_LEGACY_SIZE;
-
-        *bus_bsel = ACPI_PCIHP_BSEL_DEFAULT;
-        object_property_add_uint32_ptr(OBJECT(root_bus), ACPI_PCIHP_PROP_BSEL,
-                                       bus_bsel, NULL);
-    }
 
     memory_region_init_io(&s->io, owner, &acpi_pcihp_io_ops, s,
                           "acpi-pci-hotplug", s->io_len);

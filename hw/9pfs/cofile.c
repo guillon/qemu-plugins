@@ -1,6 +1,5 @@
-
 /*
- * Virtio 9p backend
+ * 9p backend
  *
  * Copyright IBM, Corp. 2011
  *
@@ -18,8 +17,8 @@
 #include "qemu/coroutine.h"
 #include "coth.h"
 
-int v9fs_co_st_gen(V9fsPDU *pdu, V9fsPath *path, mode_t st_mode,
-                   V9fsStatDotl *v9stat)
+int coroutine_fn v9fs_co_st_gen(V9fsPDU *pdu, V9fsPath *path, mode_t st_mode,
+                                V9fsStatDotl *v9stat)
 {
     int err = 0;
     V9fsState *s = pdu->s;
@@ -42,7 +41,7 @@ int v9fs_co_st_gen(V9fsPDU *pdu, V9fsPath *path, mode_t st_mode,
     return err;
 }
 
-int v9fs_co_lstat(V9fsPDU *pdu, V9fsPath *path, struct stat *stbuf)
+int coroutine_fn v9fs_co_lstat(V9fsPDU *pdu, V9fsPath *path, struct stat *stbuf)
 {
     int err;
     V9fsState *s = pdu->s;
@@ -62,7 +61,8 @@ int v9fs_co_lstat(V9fsPDU *pdu, V9fsPath *path, struct stat *stbuf)
     return err;
 }
 
-int v9fs_co_fstat(V9fsPDU *pdu, V9fsFidState *fidp, struct stat *stbuf)
+int coroutine_fn v9fs_co_fstat(V9fsPDU *pdu, V9fsFidState *fidp,
+                               struct stat *stbuf)
 {
     int err;
     V9fsState *s = pdu->s;
@@ -94,7 +94,7 @@ int v9fs_co_fstat(V9fsPDU *pdu, V9fsFidState *fidp, struct stat *stbuf)
     return err;
 }
 
-int v9fs_co_open(V9fsPDU *pdu, V9fsFidState *fidp, int flags)
+int coroutine_fn v9fs_co_open(V9fsPDU *pdu, V9fsFidState *fidp, int flags)
 {
     int err;
     V9fsState *s = pdu->s;
@@ -122,8 +122,9 @@ int v9fs_co_open(V9fsPDU *pdu, V9fsFidState *fidp, int flags)
     return err;
 }
 
-int v9fs_co_open2(V9fsPDU *pdu, V9fsFidState *fidp, V9fsString *name, gid_t gid,
-                  int flags, int mode, struct stat *stbuf)
+int coroutine_fn v9fs_co_open2(V9fsPDU *pdu, V9fsFidState *fidp,
+                               V9fsString *name, gid_t gid, int flags, int mode,
+                               struct stat *stbuf)
 {
     int err;
     FsCred cred;
@@ -176,7 +177,7 @@ int v9fs_co_open2(V9fsPDU *pdu, V9fsFidState *fidp, V9fsString *name, gid_t gid,
     return err;
 }
 
-int v9fs_co_close(V9fsPDU *pdu, V9fsFidOpenState *fs)
+int coroutine_fn v9fs_co_close(V9fsPDU *pdu, V9fsFidOpenState *fs)
 {
     int err;
     V9fsState *s = pdu->s;
@@ -197,7 +198,7 @@ int v9fs_co_close(V9fsPDU *pdu, V9fsFidOpenState *fs)
     return err;
 }
 
-int v9fs_co_fsync(V9fsPDU *pdu, V9fsFidState *fidp, int datasync)
+int coroutine_fn v9fs_co_fsync(V9fsPDU *pdu, V9fsFidState *fidp, int datasync)
 {
     int err;
     V9fsState *s = pdu->s;
@@ -215,8 +216,8 @@ int v9fs_co_fsync(V9fsPDU *pdu, V9fsFidState *fidp, int datasync)
     return err;
 }
 
-int v9fs_co_link(V9fsPDU *pdu, V9fsFidState *oldfid,
-                 V9fsFidState *newdirfid, V9fsString *name)
+int coroutine_fn v9fs_co_link(V9fsPDU *pdu, V9fsFidState *oldfid,
+                              V9fsFidState *newdirfid, V9fsString *name)
 {
     int err;
     V9fsState *s = pdu->s;
@@ -237,8 +238,8 @@ int v9fs_co_link(V9fsPDU *pdu, V9fsFidState *oldfid,
     return err;
 }
 
-int v9fs_co_pwritev(V9fsPDU *pdu, V9fsFidState *fidp,
-                    struct iovec *iov, int iovcnt, int64_t offset)
+int coroutine_fn v9fs_co_pwritev(V9fsPDU *pdu, V9fsFidState *fidp,
+                                 struct iovec *iov, int iovcnt, int64_t offset)
 {
     int err;
     V9fsState *s = pdu->s;
@@ -246,6 +247,7 @@ int v9fs_co_pwritev(V9fsPDU *pdu, V9fsFidState *fidp,
     if (v9fs_request_cancelled(pdu)) {
         return -EINTR;
     }
+    fsdev_co_throttle_request(s->ctx.fst, true, iov, iovcnt);
     v9fs_co_run_in_worker(
         {
             err = s->ops->pwritev(&s->ctx, &fidp->fs, iov, iovcnt, offset);
@@ -256,8 +258,8 @@ int v9fs_co_pwritev(V9fsPDU *pdu, V9fsFidState *fidp,
     return err;
 }
 
-int v9fs_co_preadv(V9fsPDU *pdu, V9fsFidState *fidp,
-                   struct iovec *iov, int iovcnt, int64_t offset)
+int coroutine_fn v9fs_co_preadv(V9fsPDU *pdu, V9fsFidState *fidp,
+                                struct iovec *iov, int iovcnt, int64_t offset)
 {
     int err;
     V9fsState *s = pdu->s;
@@ -265,6 +267,7 @@ int v9fs_co_preadv(V9fsPDU *pdu, V9fsFidState *fidp,
     if (v9fs_request_cancelled(pdu)) {
         return -EINTR;
     }
+    fsdev_co_throttle_request(s->ctx.fst, false, iov, iovcnt);
     v9fs_co_run_in_worker(
         {
             err = s->ops->preadv(&s->ctx, &fidp->fs, iov, iovcnt, offset);

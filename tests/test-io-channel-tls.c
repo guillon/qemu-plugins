@@ -27,6 +27,7 @@
 #include "io/channel-tls.h"
 #include "io/channel-socket.h"
 #include "io-channel-helpers.h"
+#include "crypto/init.h"
 #include "crypto/tlscredsx509.h"
 #include "qemu/acl.h"
 #include "qom/object_interfaces.h"
@@ -52,14 +53,13 @@ struct QIOChannelTLSHandshakeData {
     bool failed;
 };
 
-static void test_tls_handshake_done(Object *source,
-                                    Error *err,
+static void test_tls_handshake_done(QIOTask *task,
                                     gpointer opaque)
 {
     struct QIOChannelTLSHandshakeData *data = opaque;
 
     data->finished = true;
-    data->failed = err != NULL;
+    data->failed = qio_task_propagate_error(task, NULL);
 }
 
 
@@ -264,6 +264,8 @@ static void test_io_channel_tls(const void *opaque)
 int main(int argc, char **argv)
 {
     int ret;
+
+    g_assert(qcrypto_init(NULL) == 0);
 
     module_call_init(MODULE_INIT_QOM);
     g_test_init(&argc, &argv, NULL);

@@ -22,15 +22,17 @@
  * THE SOFTWARE.
  */
 #include "qemu/osdep.h"
+#include "qemu-version.h"
 #include "qapi/error.h"
 #include "qapi-visit.h"
-#include "qapi/qmp-output-visitor.h"
+#include "qapi/qobject-output-visitor.h"
 #include "qapi/qmp/qerror.h"
 #include "qapi/qmp/qjson.h"
 #include "qemu/cutils.h"
 #include "qemu/config-file.h"
 #include "qemu/option.h"
 #include "qemu/error-report.h"
+#include "qemu/log.h"
 #include "qom/object_interfaces.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/block-backend.h"
@@ -38,10 +40,11 @@
 #include "block/blockjob.h"
 #include "block/qapi.h"
 #include "crypto/init.h"
+#include "trace/control.h"
 #include <getopt.h>
 
 #define QEMU_IMG_VERSION "qemu-img version " QEMU_VERSION QEMU_PKGVERSION \
-                          ", Copyright (c) 2004-2008 Fabrice Bellard\n"
+                          "\n" QEMU_COPYRIGHT "\n"
 
 typedef struct img_cmd_t {
     const char *name;
@@ -53,6 +56,9 @@ enum {
     OPTION_BACKING_CHAIN = 257,
     OPTION_OBJECT = 258,
     OPTION_IMAGE_OPTS = 259,
+    OPTION_PATTERN = 260,
+    OPTION_FLUSH_INTERVAL = 261,
+    OPTION_NO_DRAIN = 262,
 };
 
 typedef enum OutputFormat {
@@ -82,13 +88,28 @@ static void QEMU_NORETURN GCC_FMT_ATTR(1, 2) error_exit(const char *fmt, ...)
     exit(EXIT_FAILURE);
 }
 
+static void QEMU_NORETURN missing_argument(const char *option)
+{
+    error_exit("missing argument for option '%s'", option);
+}
+
+static void QEMU_NORETURN unrecognized_option(const char *option)
+{
+    error_exit("unrecognized option '%s'", option);
+}
+
 /* Please keep in synch with qemu-img.texi */
 static void QEMU_NORETURN help(void)
 {
     const char *help_msg =
            QEMU_IMG_VERSION
-           "usage: qemu-img command [command options]\n"
+           "usage: qemu-img [standard options] command [command options]\n"
            "QEMU disk image utility\n"
+           "\n"
+           "    '-h', '--help'       display this help and exit\n"
+           "    '-V', '--version'    output version information and exit\n"
+           "    '-T', '--trace'      [[enable=]<pattern>][,events=<file>][,file=<file>]\n"
+           "                         specify tracing options\n"
            "\n"
            "Command syntax:\n"
 #define DEF(option, callback, arg_string)        \
@@ -145,6 +166,11 @@ static void QEMU_NORETURN help(void)
            "       kinds of errors, with a higher risk of choosing the wrong fix or\n"
            "       hiding corruption that has already occurred.\n"
            "\n"
+           "Parameters to convert subcommand:\n"
+           "  '-m' specifies how many coroutines work in parallel during the convert\n"
+           "       process (defaults to 8)\n"
+           "  '-W' allow to write to the target out of order rather than sequential\n"
+           "\n"
            "Parameters to snapshot subcommand:\n"
            "  'snapshot' is the name of the snapshot to create, apply or delete\n"
            "  '-a' applies a snapshot (revert disk to saved state)\n"
@@ -155,7 +181,15 @@ static void QEMU_NORETURN help(void)
            "Parameters to compare subcommand:\n"
            "  '-f' first image format\n"
            "  '-F' second image format\n"
-           "  '-s' run in Strict mode - fail on different image size or sector allocation\n";
+           "  '-s' run in Strict mode - fail on different image size or sector allocation\n"
+           "\n"
+           "Parameters to dd subcommand:\n"
+           "  'bs=BYTES' read and write up to BYTES bytes at a time "
+           "(default: 512)\n"
+           "  'count=N' copy only N input blocks\n"
+           "  'if=FILE' read from FILE\n"
+           "  'of=FILE' write to FILE\n"
+           "  'skip=N' skip N bs-sized blocks at the start of input\n";
 
     printf("%s\nSupported formats:", help_msg);
     bdrv_iterate_format(format_print, NULL);
@@ -349,6 +383,21 @@ static int add_old_style_options(const char *fmt, QemuOpts *opts,
     return 0;
 }
 
+static int64_t cvtnum(const char *s)
+{
+    int err;
+    uint64_t value;
+
+    err = qemu_strtosz(s, NULL, &value);
+    if (err < 0) {
+        return err;
+    }
+    if (value > INT64_MAX) {
+        return -ERANGE;
+    }
+    return value;
+}
+
 static int img_create(int argc, char **argv)
 {
     int c;
@@ -367,13 +416,18 @@ static int img_create(int argc, char **argv)
             {"object", required_argument, 0, OPTION_OBJECT},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, "F:b:f:he6o:q",
+        c = getopt_long(argc, argv, ":F:b:f:he6o:q",
                         long_options, NULL);
         if (c == -1) {
             break;
         }
         switch(c) {
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
         case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
         case 'h':
             help();
             break;
@@ -442,10 +496,9 @@ static int img_create(int argc, char **argv)
     /* Get image size, if specified */
     if (optind < argc) {
         int64_t sval;
-        char *end;
-        sval = qemu_strtosz_suffix(argv[optind++], &end,
-                                   QEMU_STRTOSZ_DEFSUFFIX_B);
-        if (sval < 0 || *end) {
+
+        sval = cvtnum(argv[optind++]);
+        if (sval < 0) {
             if (sval == -ERANGE) {
                 error_report("Image size must be less than 8 EiB!");
             } else {
@@ -479,18 +532,17 @@ fail:
 
 static void dump_json_image_check(ImageCheck *check, bool quiet)
 {
-    Error *local_err = NULL;
     QString *str;
-    QmpOutputVisitor *ov = qmp_output_visitor_new();
     QObject *obj;
-    visit_type_ImageCheck(qmp_output_get_visitor(ov), NULL, &check,
-                          &local_err);
-    obj = qmp_output_get_qobject(ov);
+    Visitor *v = qobject_output_visitor_new(&obj);
+
+    visit_type_ImageCheck(v, NULL, &check, &error_abort);
+    visit_complete(v, &obj);
     str = qobject_to_json_pretty(obj);
     assert(str != NULL);
     qprintf(quiet, "%s\n", qstring_get_str(str));
     qobject_decref(obj);
-    qmp_output_visitor_cleanup(ov);
+    visit_free(v);
     QDECREF(str);
 }
 
@@ -614,13 +666,18 @@ static int img_check(int argc, char **argv)
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, "hf:r:T:q",
+        c = getopt_long(argc, argv, ":hf:r:T:q",
                         long_options, &option_index);
         if (c == -1) {
             break;
         }
         switch(c) {
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
         case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
         case 'h':
             help();
             break;
@@ -775,8 +832,11 @@ static void common_block_job_cb(void *opaque, int ret)
 
 static void run_block_job(BlockJob *job, Error **errp)
 {
-    AioContext *aio_context = bdrv_get_aio_context(job->bs);
+    AioContext *aio_context = blk_get_aio_context(job->blk);
 
+    /* FIXME In error cases, the job simply goes away and we access a dangling
+     * pointer below. */
+    aio_context_acquire(aio_context);
     do {
         aio_poll(aio_context, true);
         qemu_progress_print(job->len ?
@@ -784,6 +844,7 @@ static void run_block_job(BlockJob *job, Error **errp)
     } while (!job->ready);
 
     block_job_complete_sync(job, errp);
+    aio_context_release(aio_context);
 
     /* A block job may finish instantaneously without publishing any progress,
      * so just signal completion here */
@@ -796,11 +857,13 @@ static int img_commit(int argc, char **argv)
     const char *filename, *fmt, *cache, *base;
     BlockBackend *blk;
     BlockDriverState *bs, *base_bs;
+    BlockJob *job;
     bool progress = false, quiet = false, drop = false;
     bool writethrough;
     Error *local_err = NULL;
     CommonBlockJobCBInfo cbi;
     bool image_opts = false;
+    AioContext *aio_context;
 
     fmt = NULL;
     cache = BDRV_DEFAULT_CACHE;
@@ -812,13 +875,18 @@ static int img_commit(int argc, char **argv)
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, "f:ht:b:dpq",
+        c = getopt_long(argc, argv, ":f:ht:b:dpq",
                         long_options, NULL);
         if (c == -1) {
             break;
         }
         switch(c) {
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
         case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
         case 'h':
             help();
             break;
@@ -891,7 +959,9 @@ static int img_commit(int argc, char **argv)
     if (base) {
         base_bs = bdrv_find_backing_image(bs, base);
         if (!base_bs) {
-            error_setg(&local_err, QERR_BASE_NOT_FOUND, base);
+            error_setg(&local_err,
+                       "Did not find '%s' in the backing chain of '%s'",
+                       base, filename);
             goto done;
         }
     } else {
@@ -910,8 +980,12 @@ static int img_commit(int argc, char **argv)
         .bs   = bs,
     };
 
-    commit_active_start(bs, base_bs, 0, BLOCKDEV_ON_ERROR_REPORT,
-                        common_block_job_cb, &cbi, &local_err);
+    aio_context = bdrv_get_aio_context(bs);
+    aio_context_acquire(aio_context);
+    commit_active_start("commit", bs, base_bs, BLOCK_JOB_DEFAULT, 0,
+                        BLOCKDEV_ON_ERROR_REPORT, NULL, common_block_job_cb,
+                        &cbi, &local_err, false);
+    aio_context_release(aio_context);
     if (local_err) {
         goto done;
     }
@@ -924,7 +998,8 @@ static int img_commit(int argc, char **argv)
         bdrv_ref(bs);
     }
 
-    run_block_job(bs->job, &local_err);
+    job = block_job_get("commit");
+    run_block_job(job, &local_err);
     if (local_err) {
         goto unref_backing;
     }
@@ -1088,7 +1163,8 @@ static int check_empty_sectors(BlockBackend *blk, int64_t sect_num,
                                uint8_t *buffer, bool quiet)
 {
     int pnum, ret = 0;
-    ret = blk_read(blk, sect_num, buffer, sect_count);
+    ret = blk_pread(blk, sect_num << BDRV_SECTOR_BITS, buffer,
+                    sect_count << BDRV_SECTOR_BITS);
     if (ret < 0) {
         error_report("Error while reading offset %" PRId64 " of %s: %s",
                      sectors_to_bytes(sect_num), filename, strerror(-ret));
@@ -1139,13 +1215,18 @@ static int img_compare(int argc, char **argv)
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, "hf:F:T:pqs",
+        c = getopt_long(argc, argv, ":hf:F:T:pqs",
                         long_options, NULL);
         if (c == -1) {
             break;
         }
         switch (c) {
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
         case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
         case 'h':
             help();
             break;
@@ -1301,7 +1382,8 @@ static int img_compare(int argc, char **argv)
             nb_sectors = MIN(pnum1, pnum2);
         } else if (allocated1 == allocated2) {
             if (allocated1) {
-                ret = blk_read(blk1, sector_num, buf1, nb_sectors);
+                ret = blk_pread(blk1, sector_num << BDRV_SECTOR_BITS, buf1,
+                                nb_sectors << BDRV_SECTOR_BITS);
                 if (ret < 0) {
                     error_report("Error while reading offset %" PRId64 " of %s:"
                                  " %s", sectors_to_bytes(sector_num), filename1,
@@ -1309,7 +1391,8 @@ static int img_compare(int argc, char **argv)
                     ret = 4;
                     goto out;
                 }
-                ret = blk_read(blk2, sector_num, buf2, nb_sectors);
+                ret = blk_pread(blk2, sector_num << BDRV_SECTOR_BITS, buf2,
+                                nb_sectors << BDRV_SECTOR_BITS);
                 if (ret < 0) {
                     error_report("Error while reading offset %" PRId64
                                  " of %s: %s", sectors_to_bytes(sector_num),
@@ -1418,48 +1501,61 @@ enum ImgConvertBlockStatus {
     BLK_BACKING_FILE,
 };
 
+#define MAX_COROUTINES 16
+
 typedef struct ImgConvertState {
     BlockBackend **src;
     int64_t *src_sectors;
-    int src_cur, src_num;
-    int64_t src_cur_offset;
+    int src_num;
     int64_t total_sectors;
     int64_t allocated_sectors;
+    int64_t allocated_done;
+    int64_t sector_num;
+    int64_t wr_offs;
     enum ImgConvertBlockStatus status;
     int64_t sector_next_status;
     BlockBackend *target;
     bool has_zero_init;
     bool compressed;
     bool target_has_backing;
+    bool wr_in_order;
     int min_sparse;
     size_t cluster_sectors;
     size_t buf_sectors;
+    int num_coroutines;
+    int running_coroutines;
+    Coroutine *co[MAX_COROUTINES];
+    int64_t wait_sector_num[MAX_COROUTINES];
+    CoMutex lock;
+    int ret;
 } ImgConvertState;
 
-static void convert_select_part(ImgConvertState *s, int64_t sector_num)
+static void convert_select_part(ImgConvertState *s, int64_t sector_num,
+                                int *src_cur, int64_t *src_cur_offset)
 {
-    assert(sector_num >= s->src_cur_offset);
-    while (sector_num - s->src_cur_offset >= s->src_sectors[s->src_cur]) {
-        s->src_cur_offset += s->src_sectors[s->src_cur];
-        s->src_cur++;
-        assert(s->src_cur < s->src_num);
+    *src_cur = 0;
+    *src_cur_offset = 0;
+    while (sector_num - *src_cur_offset >= s->src_sectors[*src_cur]) {
+        *src_cur_offset += s->src_sectors[*src_cur];
+        (*src_cur)++;
+        assert(*src_cur < s->src_num);
     }
 }
 
 static int convert_iteration_sectors(ImgConvertState *s, int64_t sector_num)
 {
-    int64_t ret;
-    int n;
+    int64_t ret, src_cur_offset;
+    int n, src_cur;
 
-    convert_select_part(s, sector_num);
+    convert_select_part(s, sector_num, &src_cur, &src_cur_offset);
 
     assert(s->total_sectors > sector_num);
     n = MIN(s->total_sectors - sector_num, BDRV_REQUEST_MAX_SECTORS);
 
     if (s->sector_next_status <= sector_num) {
         BlockDriverState *file;
-        ret = bdrv_get_block_status(blk_bs(s->src[s->src_cur]),
-                                    sector_num - s->src_cur_offset,
+        ret = bdrv_get_block_status(blk_bs(s->src[src_cur]),
+                                    sector_num - src_cur_offset,
                                     n, &n, &file);
         if (ret < 0) {
             return ret;
@@ -1472,10 +1568,21 @@ static int convert_iteration_sectors(ImgConvertState *s, int64_t sector_num)
         } else if (!s->target_has_backing) {
             /* Without a target backing file we must copy over the contents of
              * the backing file as well. */
-            /* TODO Check block status of the backing file chain to avoid
+            /* Check block status of the backing file chain to avoid
              * needlessly reading zeroes and limiting the iteration to the
              * buffer size */
-            s->status = BLK_DATA;
+            ret = bdrv_get_block_status_above(blk_bs(s->src[src_cur]), NULL,
+                                              sector_num - src_cur_offset,
+                                              n, &n, &file);
+            if (ret < 0) {
+                return ret;
+            }
+
+            if (ret & BDRV_BLOCK_ZERO) {
+                s->status = BLK_ZERO;
+            } else {
+                s->status = BLK_DATA;
+            }
         } else {
             s->status = BLK_BACKING_FILE;
         }
@@ -1503,26 +1610,34 @@ static int convert_iteration_sectors(ImgConvertState *s, int64_t sector_num)
     return n;
 }
 
-static int convert_read(ImgConvertState *s, int64_t sector_num, int nb_sectors,
-                        uint8_t *buf)
+static int coroutine_fn convert_co_read(ImgConvertState *s, int64_t sector_num,
+                                        int nb_sectors, uint8_t *buf)
 {
-    int n;
-    int ret;
+    int n, ret;
+    QEMUIOVector qiov;
+    struct iovec iov;
 
     assert(nb_sectors <= s->buf_sectors);
     while (nb_sectors > 0) {
         BlockBackend *blk;
-        int64_t bs_sectors;
+        int src_cur;
+        int64_t bs_sectors, src_cur_offset;
 
         /* In the case of compression with multiple source files, we can get a
          * nb_sectors that spreads into the next part. So we must be able to
          * read across multiple BDSes for one convert_read() call. */
-        convert_select_part(s, sector_num);
-        blk = s->src[s->src_cur];
-        bs_sectors = s->src_sectors[s->src_cur];
+        convert_select_part(s, sector_num, &src_cur, &src_cur_offset);
+        blk = s->src[src_cur];
+        bs_sectors = s->src_sectors[src_cur];
 
-        n = MIN(nb_sectors, bs_sectors - (sector_num - s->src_cur_offset));
-        ret = blk_read(blk, sector_num - s->src_cur_offset, buf, n);
+        n = MIN(nb_sectors, bs_sectors - (sector_num - src_cur_offset));
+        iov.iov_base = buf;
+        iov.iov_len = n << BDRV_SECTOR_BITS;
+        qemu_iovec_init_external(&qiov, &iov, 1);
+
+        ret = blk_co_preadv(
+                blk, (sector_num - src_cur_offset) << BDRV_SECTOR_BITS,
+                n << BDRV_SECTOR_BITS, &qiov, 0);
         if (ret < 0) {
             return ret;
         }
@@ -1535,15 +1650,18 @@ static int convert_read(ImgConvertState *s, int64_t sector_num, int nb_sectors,
     return 0;
 }
 
-static int convert_write(ImgConvertState *s, int64_t sector_num, int nb_sectors,
-                         const uint8_t *buf)
+
+static int coroutine_fn convert_co_write(ImgConvertState *s, int64_t sector_num,
+                                         int nb_sectors, uint8_t *buf,
+                                         enum ImgConvertBlockStatus status)
 {
     int ret;
+    QEMUIOVector qiov;
+    struct iovec iov;
 
     while (nb_sectors > 0) {
         int n = nb_sectors;
-
-        switch (s->status) {
+        switch (status) {
         case BLK_BACKING_FILE:
             /* If we have a backing file, leave clusters unallocated that are
              * unallocated in the source image, so that the backing file is
@@ -1564,7 +1682,13 @@ static int convert_write(ImgConvertState *s, int64_t sector_num, int nb_sectors,
                     break;
                 }
 
-                ret = blk_write_compressed(s->target, sector_num, buf, n);
+                iov.iov_base = buf;
+                iov.iov_len = n << BDRV_SECTOR_BITS;
+                qemu_iovec_init_external(&qiov, &iov, 1);
+
+                ret = blk_co_pwritev(s->target, sector_num << BDRV_SECTOR_BITS,
+                                     n << BDRV_SECTOR_BITS, &qiov,
+                                     BDRV_REQ_WRITE_COMPRESSED);
                 if (ret < 0) {
                     return ret;
                 }
@@ -1577,7 +1701,12 @@ static int convert_write(ImgConvertState *s, int64_t sector_num, int nb_sectors,
             if (!s->min_sparse ||
                 is_allocated_sectors_min(buf, n, &n, s->min_sparse))
             {
-                ret = blk_write(s->target, sector_num, buf, n);
+                iov.iov_base = buf;
+                iov.iov_len = n << BDRV_SECTOR_BITS;
+                qemu_iovec_init_external(&qiov, &iov, 1);
+
+                ret = blk_co_pwritev(s->target, sector_num << BDRV_SECTOR_BITS,
+                                     n << BDRV_SECTOR_BITS, &qiov, 0);
                 if (ret < 0) {
                     return ret;
                 }
@@ -1589,7 +1718,9 @@ static int convert_write(ImgConvertState *s, int64_t sector_num, int nb_sectors,
             if (s->has_zero_init) {
                 break;
             }
-            ret = blk_write_zeroes(s->target, sector_num, n, 0);
+            ret = blk_co_pwrite_zeroes(s->target,
+                                       sector_num << BDRV_SECTOR_BITS,
+                                       n << BDRV_SECTOR_BITS, 0);
             if (ret < 0) {
                 return ret;
             }
@@ -1604,12 +1735,122 @@ static int convert_write(ImgConvertState *s, int64_t sector_num, int nb_sectors,
     return 0;
 }
 
+static void coroutine_fn convert_co_do_copy(void *opaque)
+{
+    ImgConvertState *s = opaque;
+    uint8_t *buf = NULL;
+    int ret, i;
+    int index = -1;
+
+    for (i = 0; i < s->num_coroutines; i++) {
+        if (s->co[i] == qemu_coroutine_self()) {
+            index = i;
+            break;
+        }
+    }
+    assert(index >= 0);
+
+    s->running_coroutines++;
+    buf = blk_blockalign(s->target, s->buf_sectors * BDRV_SECTOR_SIZE);
+
+    while (1) {
+        int n;
+        int64_t sector_num;
+        enum ImgConvertBlockStatus status;
+
+        qemu_co_mutex_lock(&s->lock);
+        if (s->ret != -EINPROGRESS || s->sector_num >= s->total_sectors) {
+            qemu_co_mutex_unlock(&s->lock);
+            goto out;
+        }
+        n = convert_iteration_sectors(s, s->sector_num);
+        if (n < 0) {
+            qemu_co_mutex_unlock(&s->lock);
+            s->ret = n;
+            goto out;
+        }
+        /* save current sector and allocation status to local variables */
+        sector_num = s->sector_num;
+        status = s->status;
+        if (!s->min_sparse && s->status == BLK_ZERO) {
+            n = MIN(n, s->buf_sectors);
+        }
+        /* increment global sector counter so that other coroutines can
+         * already continue reading beyond this request */
+        s->sector_num += n;
+        qemu_co_mutex_unlock(&s->lock);
+
+        if (status == BLK_DATA || (!s->min_sparse && status == BLK_ZERO)) {
+            s->allocated_done += n;
+            qemu_progress_print(100.0 * s->allocated_done /
+                                        s->allocated_sectors, 0);
+        }
+
+        if (status == BLK_DATA) {
+            ret = convert_co_read(s, sector_num, n, buf);
+            if (ret < 0) {
+                error_report("error while reading sector %" PRId64
+                             ": %s", sector_num, strerror(-ret));
+                s->ret = ret;
+                goto out;
+            }
+        } else if (!s->min_sparse && status == BLK_ZERO) {
+            status = BLK_DATA;
+            memset(buf, 0x00, n * BDRV_SECTOR_SIZE);
+        }
+
+        if (s->wr_in_order) {
+            /* keep writes in order */
+            while (s->wr_offs != sector_num) {
+                if (s->ret != -EINPROGRESS) {
+                    goto out;
+                }
+                s->wait_sector_num[index] = sector_num;
+                qemu_coroutine_yield();
+            }
+            s->wait_sector_num[index] = -1;
+        }
+
+        ret = convert_co_write(s, sector_num, n, buf, status);
+        if (ret < 0) {
+            error_report("error while writing sector %" PRId64
+                         ": %s", sector_num, strerror(-ret));
+            s->ret = ret;
+            goto out;
+        }
+
+        if (s->wr_in_order) {
+            /* reenter the coroutine that might have waited
+             * for this write to complete */
+            s->wr_offs = sector_num + n;
+            for (i = 0; i < s->num_coroutines; i++) {
+                if (s->co[i] && s->wait_sector_num[i] == s->wr_offs) {
+                    /*
+                     * A -> B -> A cannot occur because A has
+                     * s->wait_sector_num[i] == -1 during A -> B.  Therefore
+                     * B will never enter A during this time window.
+                     */
+                    qemu_coroutine_enter(s->co[i]);
+                    break;
+                }
+            }
+        }
+    }
+
+out:
+    qemu_vfree(buf);
+    s->co[index] = NULL;
+    s->running_coroutines--;
+    if (!s->running_coroutines && s->ret == -EINPROGRESS) {
+        /* the convert job finished successfully */
+        s->ret = 0;
+    }
+}
+
 static int convert_do_copy(ImgConvertState *s)
 {
-    uint8_t *buf = NULL;
-    int64_t sector_num, allocated_done;
-    int ret;
-    int n;
+    int ret, i, n;
+    int64_t sector_num = 0;
 
     /* Check whether we have zero initialisation or can get it efficiently */
     s->has_zero_init = s->min_sparse && !s->target_has_backing
@@ -1619,7 +1860,7 @@ static int convert_do_copy(ImgConvertState *s)
     if (!s->has_zero_init && !s->target_has_backing &&
         bdrv_can_write_zeroes_with_unmap(blk_bs(s->target)))
     {
-        ret = bdrv_make_zero(blk_bs(s->target), BDRV_REQ_MAY_UNMAP);
+        ret = blk_make_zero(s->target, BDRV_REQ_MAY_UNMAP);
         if (ret == 0) {
             s->has_zero_init = true;
         }
@@ -1630,21 +1871,15 @@ static int convert_do_copy(ImgConvertState *s)
     if (s->compressed) {
         if (s->cluster_sectors <= 0 || s->cluster_sectors > s->buf_sectors) {
             error_report("invalid cluster size");
-            ret = -EINVAL;
-            goto fail;
+            return -EINVAL;
         }
         s->buf_sectors = s->cluster_sectors;
     }
-    buf = blk_blockalign(s->target, s->buf_sectors * BDRV_SECTOR_SIZE);
 
-    /* Calculate allocated sectors for progress */
-    s->allocated_sectors = 0;
-    sector_num = 0;
     while (sector_num < s->total_sectors) {
         n = convert_iteration_sectors(s, sector_num);
         if (n < 0) {
-            ret = n;
-            goto fail;
+            return n;
         }
         if (s->status == BLK_DATA || (!s->min_sparse && s->status == BLK_ZERO))
         {
@@ -1654,61 +1889,29 @@ static int convert_do_copy(ImgConvertState *s)
     }
 
     /* Do the copy */
-    s->src_cur = 0;
-    s->src_cur_offset = 0;
     s->sector_next_status = 0;
+    s->ret = -EINPROGRESS;
 
-    sector_num = 0;
-    allocated_done = 0;
-
-    while (sector_num < s->total_sectors) {
-        n = convert_iteration_sectors(s, sector_num);
-        if (n < 0) {
-            ret = n;
-            goto fail;
-        }
-        if (s->status == BLK_DATA || (!s->min_sparse && s->status == BLK_ZERO))
-        {
-            allocated_done += n;
-            qemu_progress_print(100.0 * allocated_done / s->allocated_sectors,
-                                0);
-        }
-
-        if (s->status == BLK_DATA) {
-            ret = convert_read(s, sector_num, n, buf);
-            if (ret < 0) {
-                error_report("error while reading sector %" PRId64
-                             ": %s", sector_num, strerror(-ret));
-                goto fail;
-            }
-        } else if (!s->min_sparse && s->status == BLK_ZERO) {
-            n = MIN(n, s->buf_sectors);
-            memset(buf, 0, n * BDRV_SECTOR_SIZE);
-            s->status = BLK_DATA;
-        }
-
-        ret = convert_write(s, sector_num, n, buf);
-        if (ret < 0) {
-            error_report("error while writing sector %" PRId64
-                         ": %s", sector_num, strerror(-ret));
-            goto fail;
-        }
-
-        sector_num += n;
+    qemu_co_mutex_init(&s->lock);
+    for (i = 0; i < s->num_coroutines; i++) {
+        s->co[i] = qemu_coroutine_create(convert_co_do_copy, s);
+        s->wait_sector_num[i] = -1;
+        qemu_coroutine_enter(s->co[i]);
     }
 
-    if (s->compressed) {
+    while (s->ret == -EINPROGRESS) {
+        main_loop_wait(false);
+    }
+
+    if (s->compressed && !s->ret) {
         /* signal EOF to align */
-        ret = blk_write_compressed(s->target, 0, NULL, 0);
+        ret = blk_pwrite_compressed(s->target, 0, NULL, 0);
         if (ret < 0) {
-            goto fail;
+            return ret;
         }
     }
 
-    ret = 0;
-fail:
-    qemu_vfree(buf);
-    return ret;
+    return s->ret;
 }
 
 static int img_convert(int argc, char **argv)
@@ -1736,6 +1939,8 @@ static int img_convert(int argc, char **argv)
     QemuOpts *sn_opts = NULL;
     ImgConvertState state;
     bool image_opts = false;
+    bool wr_in_order = true;
+    long num_coroutines = 8;
 
     fmt = NULL;
     out_fmt = "raw";
@@ -1751,13 +1956,18 @@ static int img_convert(int argc, char **argv)
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, "hf:O:B:ce6o:s:l:S:pt:T:qn",
+        c = getopt_long(argc, argv, ":hf:O:B:ce6o:s:l:S:pt:T:qnm:W",
                         long_options, NULL);
         if (c == -1) {
             break;
         }
         switch(c) {
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
         case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
         case 'h':
             help();
             break;
@@ -1817,9 +2027,9 @@ static int img_convert(int argc, char **argv)
         case 'S':
         {
             int64_t sval;
-            char *end;
-            sval = qemu_strtosz_suffix(optarg, &end, QEMU_STRTOSZ_DEFSUFFIX_B);
-            if (sval < 0 || *end) {
+
+            sval = cvtnum(optarg);
+            if (sval < 0) {
                 error_report("Invalid minimum zero buffer size for sparse output specified");
                 ret = -1;
                 goto fail_getopt;
@@ -1843,6 +2053,18 @@ static int img_convert(int argc, char **argv)
         case 'n':
             skip_create = 1;
             break;
+        case 'm':
+            if (qemu_strtol(optarg, NULL, 0, &num_coroutines) ||
+                num_coroutines < 1 || num_coroutines > MAX_COROUTINES) {
+                error_report("Invalid number of coroutines. Allowed number of"
+                             " coroutines is between 1 and %d", MAX_COROUTINES);
+                ret = -1;
+                goto fail_getopt;
+            }
+            break;
+        case 'W':
+            wr_in_order = false;
+            break;
         case OPTION_OBJECT:
             opts = qemu_opts_parse_noisily(&qemu_object_opts,
                                            optarg, true);
@@ -1859,6 +2081,12 @@ static int img_convert(int argc, char **argv)
     if (qemu_opts_foreach(&qemu_object_opts,
                           user_creatable_add_opts_foreach,
                           NULL, NULL)) {
+        goto fail_getopt;
+    }
+
+    if (!wr_in_order && compress) {
+        error_report("Out of order write and compress are mutually exclusive");
+        ret = -1;
         goto fail_getopt;
     }
 
@@ -1921,10 +2149,10 @@ static int img_convert(int argc, char **argv)
     }
 
     if (sn_opts) {
-        ret = bdrv_snapshot_load_tmp(bs[0],
-                                     qemu_opt_get(sn_opts, SNAPSHOT_OPT_ID),
-                                     qemu_opt_get(sn_opts, SNAPSHOT_OPT_NAME),
-                                     &local_err);
+        bdrv_snapshot_load_tmp(bs[0],
+                               qemu_opt_get(sn_opts, SNAPSHOT_OPT_ID),
+                               qemu_opt_get(sn_opts, SNAPSHOT_OPT_NAME),
+                               &local_err);
     } else if (snapshot_name != NULL) {
         if (bs_n > 1) {
             error_report("No support for concatenating multiple snapshot");
@@ -2004,7 +2232,7 @@ static int img_convert(int argc, char **argv)
         const char *preallocation =
             qemu_opt_get(opts, BLOCK_OPT_PREALLOC);
 
-        if (!drv->bdrv_write_compressed) {
+        if (!drv->bdrv_co_pwritev_compressed) {
             error_report("Compression not supported for this file format");
             ret = -1;
             goto out;
@@ -2056,13 +2284,14 @@ static int img_convert(int argc, char **argv)
     }
     out_bs = blk_bs(out_blk);
 
-    /* increase bufsectors from the default 4096 (2M) if opt_transfer_length
+    /* increase bufsectors from the default 4096 (2M) if opt_transfer
      * or discard_alignment of the out_bs is greater. Limit to 32768 (16MB)
      * as maximum. */
     bufsectors = MIN(32768,
-                     MAX(bufsectors, MAX(out_bs->bl.opt_transfer_length,
-                                         out_bs->bl.discard_alignment))
-                    );
+                     MAX(bufsectors,
+                         MAX(out_bs->bl.opt_transfer >> BDRV_SECTOR_BITS,
+                             out_bs->bl.pdiscard_alignment >>
+                             BDRV_SECTOR_BITS)));
 
     if (skip_create) {
         int64_t output_sectors = blk_nb_sectors(out_blk);
@@ -2101,6 +2330,8 @@ static int img_convert(int argc, char **argv)
         .min_sparse         = min_sparse,
         .cluster_sectors    = cluster_sectors,
         .buf_sectors        = bufsectors,
+        .wr_in_order        = wr_in_order,
+        .num_coroutines     = num_coroutines,
     };
     ret = convert_do_copy(&state);
 
@@ -2152,34 +2383,33 @@ static void dump_snapshots(BlockDriverState *bs)
 
 static void dump_json_image_info_list(ImageInfoList *list)
 {
-    Error *local_err = NULL;
     QString *str;
-    QmpOutputVisitor *ov = qmp_output_visitor_new();
     QObject *obj;
-    visit_type_ImageInfoList(qmp_output_get_visitor(ov), NULL, &list,
-                             &local_err);
-    obj = qmp_output_get_qobject(ov);
+    Visitor *v = qobject_output_visitor_new(&obj);
+
+    visit_type_ImageInfoList(v, NULL, &list, &error_abort);
+    visit_complete(v, &obj);
     str = qobject_to_json_pretty(obj);
     assert(str != NULL);
     printf("%s\n", qstring_get_str(str));
     qobject_decref(obj);
-    qmp_output_visitor_cleanup(ov);
+    visit_free(v);
     QDECREF(str);
 }
 
 static void dump_json_image_info(ImageInfo *info)
 {
-    Error *local_err = NULL;
     QString *str;
-    QmpOutputVisitor *ov = qmp_output_visitor_new();
     QObject *obj;
-    visit_type_ImageInfo(qmp_output_get_visitor(ov), NULL, &info, &local_err);
-    obj = qmp_output_get_qobject(ov);
+    Visitor *v = qobject_output_visitor_new(&obj);
+
+    visit_type_ImageInfo(v, NULL, &info, &error_abort);
+    visit_complete(v, &obj);
     str = qobject_to_json_pretty(obj);
     assert(str != NULL);
     printf("%s\n", qstring_get_str(str));
     qobject_decref(obj);
-    qmp_output_visitor_cleanup(ov);
+    visit_free(v);
     QDECREF(str);
 }
 
@@ -2307,13 +2537,18 @@ static int img_info(int argc, char **argv)
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, "f:h",
+        c = getopt_long(argc, argv, ":f:h",
                         long_options, &option_index);
         if (c == -1) {
             break;
         }
         switch(c) {
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
         case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
         case 'h':
             help();
             break;
@@ -2518,13 +2753,18 @@ static int img_map(int argc, char **argv)
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, "f:h",
+        c = getopt_long(argc, argv, ":f:h",
                         long_options, &option_index);
         if (c == -1) {
             break;
         }
         switch (c) {
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
         case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
         case 'h':
             help();
             break;
@@ -2640,13 +2880,18 @@ static int img_snapshot(int argc, char **argv)
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, "la:c:d:hq",
+        c = getopt_long(argc, argv, ":la:c:d:hq",
                         long_options, NULL);
         if (c == -1) {
             break;
         }
         switch(c) {
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
         case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
         case 'h':
             help();
             return 0;
@@ -2793,13 +3038,18 @@ static int img_rebase(int argc, char **argv)
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, "hf:F:b:upt:T:q",
+        c = getopt_long(argc, argv, ":hf:F:b:upt:T:q",
                         long_options, NULL);
         if (c == -1) {
             break;
         }
         switch(c) {
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
         case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
         case 'h':
             help();
             return 0;
@@ -2918,6 +3168,7 @@ static int img_rebase(int argc, char **argv)
             error_reportf_err(local_err,
                               "Could not open old backing file '%s': ",
                               backing_name);
+            ret = -1;
             goto out;
         }
 
@@ -2935,6 +3186,7 @@ static int img_rebase(int argc, char **argv)
                 error_reportf_err(local_err,
                                   "Could not open new backing file '%s': ",
                                   out_baseimg);
+                ret = -1;
                 goto out;
             }
         }
@@ -3023,7 +3275,8 @@ static int img_rebase(int argc, char **argv)
                     n = old_backing_num_sectors - sector;
                 }
 
-                ret = blk_read(blk_old_backing, sector, buf_old, n);
+                ret = blk_pread(blk_old_backing, sector << BDRV_SECTOR_BITS,
+                                buf_old, n << BDRV_SECTOR_BITS);
                 if (ret < 0) {
                     error_report("error while reading from old backing file");
                     goto out;
@@ -3037,7 +3290,8 @@ static int img_rebase(int argc, char **argv)
                     n = new_backing_num_sectors - sector;
                 }
 
-                ret = blk_read(blk_new_backing, sector, buf_new, n);
+                ret = blk_pread(blk_new_backing, sector << BDRV_SECTOR_BITS,
+                                buf_new, n << BDRV_SECTOR_BITS);
                 if (ret < 0) {
                     error_report("error while reading from new backing file");
                     goto out;
@@ -3053,8 +3307,10 @@ static int img_rebase(int argc, char **argv)
                 if (compare_sectors(buf_old + written * 512,
                     buf_new + written * 512, n - written, &pnum))
                 {
-                    ret = blk_write(blk, sector + written,
-                                    buf_old + written * 512, pnum);
+                    ret = blk_pwrite(blk,
+                                     (sector + written) << BDRV_SECTOR_BITS,
+                                     buf_old + written * 512,
+                                     pnum << BDRV_SECTOR_BITS, 0);
                     if (ret < 0) {
                         error_report("Error while writing to COW image: %s",
                             strerror(-ret));
@@ -3154,13 +3410,18 @@ static int img_resize(int argc, char **argv)
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, "f:hq",
+        c = getopt_long(argc, argv, ":f:hq",
                         long_options, NULL);
         if (c == -1) {
             break;
         }
         switch(c) {
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
         case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
         case 'h':
             help();
             break;
@@ -3222,7 +3483,7 @@ static int img_resize(int argc, char **argv)
     qemu_opts_del(param);
 
     blk = img_open(image_opts, filename, fmt,
-                   BDRV_O_RDWR, false, quiet);
+                   BDRV_O_RDWR | BDRV_O_RESIZE, false, quiet);
     if (!blk) {
         ret = -1;
         goto out;
@@ -3251,7 +3512,7 @@ static int img_resize(int argc, char **argv)
         error_report("Image is read-only");
         break;
     default:
-        error_report("Error resizing image (%d)", -ret);
+        error_report("Error resizing image: %s", strerror(-ret));
         break;
     }
 out:
@@ -3292,54 +3553,59 @@ static int img_amend(int argc, char **argv)
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, "ho:f:t:pq",
+        c = getopt_long(argc, argv, ":ho:f:t:pq",
                         long_options, NULL);
         if (c == -1) {
             break;
         }
 
         switch (c) {
-            case 'h':
-            case '?':
-                help();
-                break;
-            case 'o':
-                if (!is_valid_option_list(optarg)) {
-                    error_report("Invalid option list: %s", optarg);
-                    ret = -1;
-                    goto out_no_progress;
-                }
-                if (!options) {
-                    options = g_strdup(optarg);
-                } else {
-                    char *old_options = options;
-                    options = g_strdup_printf("%s,%s", options, optarg);
-                    g_free(old_options);
-                }
-                break;
-            case 'f':
-                fmt = optarg;
-                break;
-            case 't':
-                cache = optarg;
-                break;
-            case 'p':
-                progress = true;
-                break;
-            case 'q':
-                quiet = true;
-                break;
-            case OPTION_OBJECT:
-                opts = qemu_opts_parse_noisily(&qemu_object_opts,
-                                               optarg, true);
-                if (!opts) {
-                    ret = -1;
-                    goto out_no_progress;
-                }
-                break;
-            case OPTION_IMAGE_OPTS:
-                image_opts = true;
-                break;
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
+        case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
+        case 'h':
+            help();
+            break;
+        case 'o':
+            if (!is_valid_option_list(optarg)) {
+                error_report("Invalid option list: %s", optarg);
+                ret = -1;
+                goto out_no_progress;
+            }
+            if (!options) {
+                options = g_strdup(optarg);
+            } else {
+                char *old_options = options;
+                options = g_strdup_printf("%s,%s", options, optarg);
+                g_free(old_options);
+            }
+            break;
+        case 'f':
+            fmt = optarg;
+            break;
+        case 't':
+            cache = optarg;
+            break;
+        case 'p':
+            progress = true;
+            break;
+        case 'q':
+            quiet = true;
+            break;
+        case OPTION_OBJECT:
+            opts = qemu_opts_parse_noisily(&qemu_object_opts,
+                                           optarg, true);
+            if (!opts) {
+                ret = -1;
+                goto out_no_progress;
+            }
+            break;
+        case OPTION_IMAGE_OPTS:
+            image_opts = true;
+            break;
         }
     }
 
@@ -3404,13 +3670,11 @@ static int img_amend(int argc, char **argv)
 
     create_opts = qemu_opts_append(create_opts, bs->drv->create_opts);
     opts = qemu_opts_create(create_opts, NULL, 0, &error_abort);
-    if (options) {
-        qemu_opts_do_parse(opts, options, NULL, &err);
-        if (err) {
-            error_report_err(err);
-            ret = -1;
-            goto out;
-        }
+    qemu_opts_do_parse(opts, options, NULL, &err);
+    if (err) {
+        error_report_err(err);
+        ret = -1;
+        goto out;
     }
 
     /* In case the driver does not call amend_status_cb() */
@@ -3437,6 +3701,665 @@ out_no_progress:
     return 0;
 }
 
+typedef struct BenchData {
+    BlockBackend *blk;
+    uint64_t image_size;
+    bool write;
+    int bufsize;
+    int step;
+    int nrreq;
+    int n;
+    int flush_interval;
+    bool drain_on_flush;
+    uint8_t *buf;
+    QEMUIOVector *qiov;
+
+    int in_flight;
+    bool in_flush;
+    uint64_t offset;
+} BenchData;
+
+static void bench_undrained_flush_cb(void *opaque, int ret)
+{
+    if (ret < 0) {
+        error_report("Failed flush request: %s", strerror(-ret));
+        exit(EXIT_FAILURE);
+    }
+}
+
+static void bench_cb(void *opaque, int ret)
+{
+    BenchData *b = opaque;
+    BlockAIOCB *acb;
+
+    if (ret < 0) {
+        error_report("Failed request: %s", strerror(-ret));
+        exit(EXIT_FAILURE);
+    }
+
+    if (b->in_flush) {
+        /* Just finished a flush with drained queue: Start next requests */
+        assert(b->in_flight == 0);
+        b->in_flush = false;
+    } else if (b->in_flight > 0) {
+        int remaining = b->n - b->in_flight;
+
+        b->n--;
+        b->in_flight--;
+
+        /* Time for flush? Drain queue if requested, then flush */
+        if (b->flush_interval && remaining % b->flush_interval == 0) {
+            if (!b->in_flight || !b->drain_on_flush) {
+                BlockCompletionFunc *cb;
+
+                if (b->drain_on_flush) {
+                    b->in_flush = true;
+                    cb = bench_cb;
+                } else {
+                    cb = bench_undrained_flush_cb;
+                }
+
+                acb = blk_aio_flush(b->blk, cb, b);
+                if (!acb) {
+                    error_report("Failed to issue flush request");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            if (b->drain_on_flush) {
+                return;
+            }
+        }
+    }
+
+    while (b->n > b->in_flight && b->in_flight < b->nrreq) {
+        int64_t offset = b->offset;
+        /* blk_aio_* might look for completed I/Os and kick bench_cb
+         * again, so make sure this operation is counted by in_flight
+         * and b->offset is ready for the next submission.
+         */
+        b->in_flight++;
+        b->offset += b->step;
+        b->offset %= b->image_size;
+        if (b->write) {
+            acb = blk_aio_pwritev(b->blk, offset, b->qiov, 0, bench_cb, b);
+        } else {
+            acb = blk_aio_preadv(b->blk, offset, b->qiov, 0, bench_cb, b);
+        }
+        if (!acb) {
+            error_report("Failed to issue request");
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
+static int img_bench(int argc, char **argv)
+{
+    int c, ret = 0;
+    const char *fmt = NULL, *filename;
+    bool quiet = false;
+    bool image_opts = false;
+    bool is_write = false;
+    int count = 75000;
+    int depth = 64;
+    int64_t offset = 0;
+    size_t bufsize = 4096;
+    int pattern = 0;
+    size_t step = 0;
+    int flush_interval = 0;
+    bool drain_on_flush = true;
+    int64_t image_size;
+    BlockBackend *blk = NULL;
+    BenchData data = {};
+    int flags = 0;
+    bool writethrough = false;
+    struct timeval t1, t2;
+    int i;
+
+    for (;;) {
+        static const struct option long_options[] = {
+            {"help", no_argument, 0, 'h'},
+            {"flush-interval", required_argument, 0, OPTION_FLUSH_INTERVAL},
+            {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
+            {"pattern", required_argument, 0, OPTION_PATTERN},
+            {"no-drain", no_argument, 0, OPTION_NO_DRAIN},
+            {0, 0, 0, 0}
+        };
+        c = getopt_long(argc, argv, ":hc:d:f:no:qs:S:t:w", long_options, NULL);
+        if (c == -1) {
+            break;
+        }
+
+        switch (c) {
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
+        case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
+        case 'h':
+            help();
+            break;
+        case 'c':
+        {
+            unsigned long res;
+
+            if (qemu_strtoul(optarg, NULL, 0, &res) < 0 || res > INT_MAX) {
+                error_report("Invalid request count specified");
+                return 1;
+            }
+            count = res;
+            break;
+        }
+        case 'd':
+        {
+            unsigned long res;
+
+            if (qemu_strtoul(optarg, NULL, 0, &res) < 0 || res > INT_MAX) {
+                error_report("Invalid queue depth specified");
+                return 1;
+            }
+            depth = res;
+            break;
+        }
+        case 'f':
+            fmt = optarg;
+            break;
+        case 'n':
+            flags |= BDRV_O_NATIVE_AIO;
+            break;
+        case 'o':
+        {
+            offset = cvtnum(optarg);
+            if (offset < 0) {
+                error_report("Invalid offset specified");
+                return 1;
+            }
+            break;
+        }
+            break;
+        case 'q':
+            quiet = true;
+            break;
+        case 's':
+        {
+            int64_t sval;
+
+            sval = cvtnum(optarg);
+            if (sval < 0 || sval > INT_MAX) {
+                error_report("Invalid buffer size specified");
+                return 1;
+            }
+
+            bufsize = sval;
+            break;
+        }
+        case 'S':
+        {
+            int64_t sval;
+
+            sval = cvtnum(optarg);
+            if (sval < 0 || sval > INT_MAX) {
+                error_report("Invalid step size specified");
+                return 1;
+            }
+
+            step = sval;
+            break;
+        }
+        case 't':
+            ret = bdrv_parse_cache_mode(optarg, &flags, &writethrough);
+            if (ret < 0) {
+                error_report("Invalid cache mode");
+                ret = -1;
+                goto out;
+            }
+            break;
+        case 'w':
+            flags |= BDRV_O_RDWR;
+            is_write = true;
+            break;
+        case OPTION_PATTERN:
+        {
+            unsigned long res;
+
+            if (qemu_strtoul(optarg, NULL, 0, &res) < 0 || res > 0xff) {
+                error_report("Invalid pattern byte specified");
+                return 1;
+            }
+            pattern = res;
+            break;
+        }
+        case OPTION_FLUSH_INTERVAL:
+        {
+            unsigned long res;
+
+            if (qemu_strtoul(optarg, NULL, 0, &res) < 0 || res > INT_MAX) {
+                error_report("Invalid flush interval specified");
+                return 1;
+            }
+            flush_interval = res;
+            break;
+        }
+        case OPTION_NO_DRAIN:
+            drain_on_flush = false;
+            break;
+        case OPTION_IMAGE_OPTS:
+            image_opts = true;
+            break;
+        }
+    }
+
+    if (optind != argc - 1) {
+        error_exit("Expecting one image file name");
+    }
+    filename = argv[argc - 1];
+
+    if (!is_write && flush_interval) {
+        error_report("--flush-interval is only available in write tests");
+        ret = -1;
+        goto out;
+    }
+    if (flush_interval && flush_interval < depth) {
+        error_report("Flush interval can't be smaller than depth");
+        ret = -1;
+        goto out;
+    }
+
+    blk = img_open(image_opts, filename, fmt, flags, writethrough, quiet);
+    if (!blk) {
+        ret = -1;
+        goto out;
+    }
+
+    image_size = blk_getlength(blk);
+    if (image_size < 0) {
+        ret = image_size;
+        goto out;
+    }
+
+    data = (BenchData) {
+        .blk            = blk,
+        .image_size     = image_size,
+        .bufsize        = bufsize,
+        .step           = step ?: bufsize,
+        .nrreq          = depth,
+        .n              = count,
+        .offset         = offset,
+        .write          = is_write,
+        .flush_interval = flush_interval,
+        .drain_on_flush = drain_on_flush,
+    };
+    printf("Sending %d %s requests, %d bytes each, %d in parallel "
+           "(starting at offset %" PRId64 ", step size %d)\n",
+           data.n, data.write ? "write" : "read", data.bufsize, data.nrreq,
+           data.offset, data.step);
+    if (flush_interval) {
+        printf("Sending flush every %d requests\n", flush_interval);
+    }
+
+    data.buf = blk_blockalign(blk, data.nrreq * data.bufsize);
+    memset(data.buf, pattern, data.nrreq * data.bufsize);
+
+    data.qiov = g_new(QEMUIOVector, data.nrreq);
+    for (i = 0; i < data.nrreq; i++) {
+        qemu_iovec_init(&data.qiov[i], 1);
+        qemu_iovec_add(&data.qiov[i],
+                       data.buf + i * data.bufsize, data.bufsize);
+    }
+
+    gettimeofday(&t1, NULL);
+    bench_cb(&data, 0);
+
+    while (data.n > 0) {
+        main_loop_wait(false);
+    }
+    gettimeofday(&t2, NULL);
+
+    printf("Run completed in %3.3f seconds.\n",
+           (t2.tv_sec - t1.tv_sec)
+           + ((double)(t2.tv_usec - t1.tv_usec) / 1000000));
+
+out:
+    qemu_vfree(data.buf);
+    blk_unref(blk);
+
+    if (ret) {
+        return 1;
+    }
+    return 0;
+}
+
+#define C_BS      01
+#define C_COUNT   02
+#define C_IF      04
+#define C_OF      010
+#define C_SKIP    020
+
+struct DdInfo {
+    unsigned int flags;
+    int64_t count;
+};
+
+struct DdIo {
+    int bsz;    /* Block size */
+    char *filename;
+    uint8_t *buf;
+    int64_t offset;
+};
+
+struct DdOpts {
+    const char *name;
+    int (*f)(const char *, struct DdIo *, struct DdIo *, struct DdInfo *);
+    unsigned int flag;
+};
+
+static int img_dd_bs(const char *arg,
+                     struct DdIo *in, struct DdIo *out,
+                     struct DdInfo *dd)
+{
+    int64_t res;
+
+    res = cvtnum(arg);
+
+    if (res <= 0 || res > INT_MAX) {
+        error_report("invalid number: '%s'", arg);
+        return 1;
+    }
+    in->bsz = out->bsz = res;
+
+    return 0;
+}
+
+static int img_dd_count(const char *arg,
+                        struct DdIo *in, struct DdIo *out,
+                        struct DdInfo *dd)
+{
+    dd->count = cvtnum(arg);
+
+    if (dd->count < 0) {
+        error_report("invalid number: '%s'", arg);
+        return 1;
+    }
+
+    return 0;
+}
+
+static int img_dd_if(const char *arg,
+                     struct DdIo *in, struct DdIo *out,
+                     struct DdInfo *dd)
+{
+    in->filename = g_strdup(arg);
+
+    return 0;
+}
+
+static int img_dd_of(const char *arg,
+                     struct DdIo *in, struct DdIo *out,
+                     struct DdInfo *dd)
+{
+    out->filename = g_strdup(arg);
+
+    return 0;
+}
+
+static int img_dd_skip(const char *arg,
+                       struct DdIo *in, struct DdIo *out,
+                       struct DdInfo *dd)
+{
+    in->offset = cvtnum(arg);
+
+    if (in->offset < 0) {
+        error_report("invalid number: '%s'", arg);
+        return 1;
+    }
+
+    return 0;
+}
+
+static int img_dd(int argc, char **argv)
+{
+    int ret = 0;
+    char *arg = NULL;
+    char *tmp;
+    BlockDriver *drv = NULL, *proto_drv = NULL;
+    BlockBackend *blk1 = NULL, *blk2 = NULL;
+    QemuOpts *opts = NULL;
+    QemuOptsList *create_opts = NULL;
+    Error *local_err = NULL;
+    bool image_opts = false;
+    int c, i;
+    const char *out_fmt = "raw";
+    const char *fmt = NULL;
+    int64_t size = 0;
+    int64_t block_count = 0, out_pos, in_pos;
+    struct DdInfo dd = {
+        .flags = 0,
+        .count = 0,
+    };
+    struct DdIo in = {
+        .bsz = 512, /* Block size is by default 512 bytes */
+        .filename = NULL,
+        .buf = NULL,
+        .offset = 0
+    };
+    struct DdIo out = {
+        .bsz = 512,
+        .filename = NULL,
+        .buf = NULL,
+        .offset = 0
+    };
+
+    const struct DdOpts options[] = {
+        { "bs", img_dd_bs, C_BS },
+        { "count", img_dd_count, C_COUNT },
+        { "if", img_dd_if, C_IF },
+        { "of", img_dd_of, C_OF },
+        { "skip", img_dd_skip, C_SKIP },
+        { NULL, NULL, 0 }
+    };
+    const struct option long_options[] = {
+        { "help", no_argument, 0, 'h'},
+        { "image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
+        { 0, 0, 0, 0 }
+    };
+
+    while ((c = getopt_long(argc, argv, ":hf:O:", long_options, NULL))) {
+        if (c == EOF) {
+            break;
+        }
+        switch (c) {
+        case 'O':
+            out_fmt = optarg;
+            break;
+        case 'f':
+            fmt = optarg;
+            break;
+        case ':':
+            missing_argument(argv[optind - 1]);
+            break;
+        case '?':
+            unrecognized_option(argv[optind - 1]);
+            break;
+        case 'h':
+            help();
+            break;
+        case OPTION_IMAGE_OPTS:
+            image_opts = true;
+            break;
+        }
+    }
+
+    for (i = optind; i < argc; i++) {
+        int j;
+        arg = g_strdup(argv[i]);
+
+        tmp = strchr(arg, '=');
+        if (tmp == NULL) {
+            error_report("unrecognized operand %s", arg);
+            ret = -1;
+            goto out;
+        }
+
+        *tmp++ = '\0';
+
+        for (j = 0; options[j].name != NULL; j++) {
+            if (!strcmp(arg, options[j].name)) {
+                break;
+            }
+        }
+        if (options[j].name == NULL) {
+            error_report("unrecognized operand %s", arg);
+            ret = -1;
+            goto out;
+        }
+
+        if (options[j].f(tmp, &in, &out, &dd) != 0) {
+            ret = -1;
+            goto out;
+        }
+        dd.flags |= options[j].flag;
+        g_free(arg);
+        arg = NULL;
+    }
+
+    if (!(dd.flags & C_IF && dd.flags & C_OF)) {
+        error_report("Must specify both input and output files");
+        ret = -1;
+        goto out;
+    }
+    blk1 = img_open(image_opts, in.filename, fmt, 0, false, false);
+
+    if (!blk1) {
+        ret = -1;
+        goto out;
+    }
+
+    drv = bdrv_find_format(out_fmt);
+    if (!drv) {
+        error_report("Unknown file format");
+        ret = -1;
+        goto out;
+    }
+    proto_drv = bdrv_find_protocol(out.filename, true, &local_err);
+
+    if (!proto_drv) {
+        error_report_err(local_err);
+        ret = -1;
+        goto out;
+    }
+    if (!drv->create_opts) {
+        error_report("Format driver '%s' does not support image creation",
+                     drv->format_name);
+        ret = -1;
+        goto out;
+    }
+    if (!proto_drv->create_opts) {
+        error_report("Protocol driver '%s' does not support image creation",
+                     proto_drv->format_name);
+        ret = -1;
+        goto out;
+    }
+    create_opts = qemu_opts_append(create_opts, drv->create_opts);
+    create_opts = qemu_opts_append(create_opts, proto_drv->create_opts);
+
+    opts = qemu_opts_create(create_opts, NULL, 0, &error_abort);
+
+    size = blk_getlength(blk1);
+    if (size < 0) {
+        error_report("Failed to get size for '%s'", in.filename);
+        ret = -1;
+        goto out;
+    }
+
+    if (dd.flags & C_COUNT && dd.count <= INT64_MAX / in.bsz &&
+        dd.count * in.bsz < size) {
+        size = dd.count * in.bsz;
+    }
+
+    /* Overflow means the specified offset is beyond input image's size */
+    if (dd.flags & C_SKIP && (in.offset > INT64_MAX / in.bsz ||
+                              size < in.bsz * in.offset)) {
+        qemu_opt_set_number(opts, BLOCK_OPT_SIZE, 0, &error_abort);
+    } else {
+        qemu_opt_set_number(opts, BLOCK_OPT_SIZE,
+                            size - in.bsz * in.offset, &error_abort);
+    }
+
+    ret = bdrv_create(drv, out.filename, opts, &local_err);
+    if (ret < 0) {
+        error_reportf_err(local_err,
+                          "%s: error while creating output image: ",
+                          out.filename);
+        ret = -1;
+        goto out;
+    }
+
+    blk2 = img_open(image_opts, out.filename, out_fmt, BDRV_O_RDWR,
+                    false, false);
+
+    if (!blk2) {
+        ret = -1;
+        goto out;
+    }
+
+    if (dd.flags & C_SKIP && (in.offset > INT64_MAX / in.bsz ||
+                              size < in.offset * in.bsz)) {
+        /* We give a warning if the skip option is bigger than the input
+         * size and create an empty output disk image (i.e. like dd(1)).
+         */
+        error_report("%s: cannot skip to specified offset", in.filename);
+        in_pos = size;
+    } else {
+        in_pos = in.offset * in.bsz;
+    }
+
+    in.buf = g_new(uint8_t, in.bsz);
+
+    for (out_pos = 0; in_pos < size; block_count++) {
+        int in_ret, out_ret;
+
+        if (in_pos + in.bsz > size) {
+            in_ret = blk_pread(blk1, in_pos, in.buf, size - in_pos);
+        } else {
+            in_ret = blk_pread(blk1, in_pos, in.buf, in.bsz);
+        }
+        if (in_ret < 0) {
+            error_report("error while reading from input image file: %s",
+                         strerror(-in_ret));
+            ret = -1;
+            goto out;
+        }
+        in_pos += in_ret;
+
+        out_ret = blk_pwrite(blk2, out_pos, in.buf, in_ret, 0);
+
+        if (out_ret < 0) {
+            error_report("error while writing to output image file: %s",
+                         strerror(-out_ret));
+            ret = -1;
+            goto out;
+        }
+        out_pos += out_ret;
+    }
+
+out:
+    g_free(arg);
+    qemu_opts_del(opts);
+    qemu_opts_free(create_opts);
+    blk_unref(blk1);
+    blk_unref(blk2);
+    g_free(in.filename);
+    g_free(out.filename);
+    g_free(in.buf);
+    g_free(out.buf);
+
+    if (ret) {
+        return 1;
+    }
+    return 0;
+}
+
+
 static const img_cmd_t img_cmds[] = {
 #define DEF(option, callback, arg_string)        \
     { option, callback },
@@ -3451,10 +4374,12 @@ int main(int argc, char **argv)
     const img_cmd_t *cmd;
     const char *cmdname;
     Error *local_error = NULL;
+    char *trace_file = NULL;
     int c;
     static const struct option long_options[] = {
         {"help", no_argument, 0, 'h'},
-        {"version", no_argument, 0, 'v'},
+        {"version", no_argument, 0, 'V'},
+        {"trace", required_argument, NULL, 'T'},
         {0, 0, 0, 0}
     };
 
@@ -3462,6 +4387,7 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 #endif
 
+    module_call_init(MODULE_INIT_TRACE);
     error_set_progname(argv[0]);
     qemu_init_exec_dir(argv[0]);
 
@@ -3470,36 +4396,60 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    if (qcrypto_init(&local_error) < 0) {
-        error_reportf_err(local_error, "cannot initialize crypto: ");
-        exit(1);
-    }
+    qcrypto_init(&error_fatal);
 
     module_call_init(MODULE_INIT_QOM);
     bdrv_init();
     if (argc < 2) {
         error_exit("Not enough arguments");
     }
-    cmdname = argv[1];
 
     qemu_add_opts(&qemu_object_opts);
     qemu_add_opts(&qemu_source_opts);
+    qemu_add_opts(&qemu_trace_opts);
+
+    while ((c = getopt_long(argc, argv, "+:hVT:", long_options, NULL)) != -1) {
+        switch (c) {
+        case ':':
+            missing_argument(argv[optind - 1]);
+            return 0;
+        case '?':
+            unrecognized_option(argv[optind - 1]);
+            return 0;
+        case 'h':
+            help();
+            return 0;
+        case 'V':
+            printf(QEMU_IMG_VERSION);
+            return 0;
+        case 'T':
+            g_free(trace_file);
+            trace_file = trace_opt_parse(optarg);
+            break;
+        }
+    }
+
+    cmdname = argv[optind];
+
+    /* reset getopt_long scanning */
+    argc -= optind;
+    if (argc < 1) {
+        return 0;
+    }
+    argv += optind;
+    optind = 0;
+
+    if (!trace_init_backends()) {
+        exit(1);
+    }
+    trace_init_file(trace_file);
+    qemu_set_log(LOG_TRACE);
 
     /* find the command */
     for (cmd = img_cmds; cmd->name != NULL; cmd++) {
         if (!strcmp(cmdname, cmd->name)) {
-            return cmd->handler(argc - 1, argv + 1);
+            return cmd->handler(argc, argv);
         }
-    }
-
-    c = getopt_long(argc, argv, "h", long_options, NULL);
-
-    if (c == 'h') {
-        help();
-    }
-    if (c == 'v') {
-        printf(QEMU_IMG_VERSION);
-        return 0;
     }
 
     /* not found */

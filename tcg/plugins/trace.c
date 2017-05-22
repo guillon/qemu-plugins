@@ -55,7 +55,8 @@
 
 static void pre_tb_helper_code(const TCGPluginInterface *tpi,
                                TPIHelperInfo info, uint64_t address,
-                               uint64_t data1, uint64_t data2)
+                               uint64_t data1, uint64_t data2,
+                               const TranslationBlock* tb)
 {
     const char *symbol = (const char *)(uintptr_t)data1;
     const char *filename = (const char *)(uintptr_t)data2;
@@ -65,8 +66,8 @@ static void pre_tb_helper_code(const TCGPluginInterface *tpi,
             tcg_plugin_get_filename(),
             tpi_thread_pid(tpi), tpi_thread_tid(tpi),
             tpi_current_cpu_index(tpi), address,
-            tpi_current_tb_size(tpi),
-            tpi_current_tb_icount(tpi),
+            tpi_tb_size(tb),
+            tpi_tb_icount(tb),
             filename != NULL && filename[0] != '\0' ? filename : "<unknown>",
             symbol != NULL && symbol[0] != '\0' ? symbol : "<unknown>");
     tpi_exec_unlock(tpi);
@@ -74,7 +75,8 @@ static void pre_tb_helper_code(const TCGPluginInterface *tpi,
 
 static void pre_tb_helper_data(const TCGPluginInterface *tpi,
                                TPIHelperInfo info, uint64_t address,
-                               uint64_t *data1, uint64_t *data2)
+                               uint64_t *data1, uint64_t *data2,
+                               const TranslationBlock* tb)
 {
     const char *symbol = NULL;
     const char *filename = NULL;

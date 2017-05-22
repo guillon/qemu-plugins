@@ -81,7 +81,7 @@ static int glue(symfind, SZ)(const void *s0, const void *s1)
 }
 
 static const char *glue(lookup_symbol, SZ)(struct syminfo *s,
-                                           hwaddr orig_addr, hwaddr *symbol_addr)
+                                           hwaddr orig_addr, hwaddr *symbol_addr, hwaddr *symbol_size)
 {
     struct elf_sym *syms = glue(s->disas_symtab.elf, SZ);
     struct elf_sym *sym;
@@ -90,10 +90,12 @@ static const char *glue(lookup_symbol, SZ)(struct syminfo *s,
                   glue(symfind, SZ));
     if (sym != NULL) {
         if (symbol_addr != NULL) *symbol_addr = sym->st_value;
+        if (symbol_size != NULL) *symbol_size = sym->st_size;
         return s->disas_strtab + sym->st_name;
     }
 
     if (symbol_addr != NULL) *symbol_addr = orig_addr;
+    if (symbol_size != NULL) *symbol_size = 0;
     return "";
 }
 
@@ -265,7 +267,8 @@ static int glue(load_elf, SZ)(const char *name, int fd,
                               void *translate_opaque,
                               int must_swab, uint64_t *pentry,
                               uint64_t *lowaddr, uint64_t *highaddr,
-                              int elf_machine, int clear_lsb, int data_swab)
+                              int elf_machine, int clear_lsb, int data_swab,
+                              AddressSpace *as, bool load_rom)
 {
     struct elfhdr ehdr;
     struct elf_phdr *phdr = NULL, *ph;
@@ -280,6 +283,11 @@ static int glue(load_elf, SZ)(const char *name, int fd,
         goto fail;
     if (must_swab) {
         glue(bswap_ehdr, SZ)(&ehdr);
+    }
+
+    if (elf_machine <= EM_NONE) {
+        /* The caller didn't specify an ARCH, we can figure it out */
+        elf_machine = ehdr.e_machine;
     }
 
     switch (elf_machine) {
@@ -399,10 +407,15 @@ static int glue(load_elf, SZ)(const char *name, int fd,
                 *pentry = ehdr.e_entry - ph->p_vaddr + ph->p_paddr;
             }
 
-            snprintf(label, sizeof(label), "phdr #%d: %s", i, name);
+            if (load_rom) {
+                snprintf(label, sizeof(label), "phdr #%d: %s", i, name);
 
-            /* rom_add_elf_program() seize the ownership of 'data' */
-            rom_add_elf_program(label, data, file_size, mem_size, addr);
+                /* rom_add_elf_program() seize the ownership of 'data' */
+                rom_add_elf_program(label, data, file_size, mem_size, addr, as);
+            } else {
+                cpu_physical_memory_write(addr, data, file_size);
+                g_free(data);
+            }
 
             total_size += mem_size;
             if (addr < low)

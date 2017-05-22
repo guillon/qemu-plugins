@@ -65,16 +65,17 @@ static void start_auth_vencrypt_subauth(VncState *vs)
     }
 }
 
-static void vnc_tls_handshake_done(Object *source,
-                                   Error *err,
+static void vnc_tls_handshake_done(QIOTask *task,
                                    gpointer user_data)
 {
     VncState *vs = user_data;
+    Error *err = NULL;
 
-    if (err) {
+    if (qio_task_propagate_error(task, &err)) {
         VNC_DEBUG("Handshake failed %s\n",
                   error_get_pretty(err));
         vnc_client_error(vs);
+        error_free(err);
     } else {
         vs->ioc_tag = qio_channel_add_watch(
             vs->ioc, G_IO_IN | G_IO_OUT, vnc_client_io, vs, NULL);
@@ -116,6 +117,7 @@ static int protocol_client_vencrypt_auth(VncState *vs, uint8_t *data, size_t len
             return 0;
         }
 
+        qio_channel_set_name(QIO_CHANNEL(tls), "vnc-server-tls");
         VNC_DEBUG("Start TLS VeNCrypt handshake process\n");
         object_unref(OBJECT(vs->ioc));
         vs->ioc = QIO_CHANNEL(tls);

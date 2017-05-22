@@ -31,6 +31,7 @@
 #include "sysemu/block-backend.h"
 #include "sysemu/device_tree.h"
 #include "hw/sysbus.h"
+#include "hw/nvram/chrp_nvram.h"
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_vio.h"
 
@@ -39,6 +40,7 @@ typedef struct sPAPRNVRAM {
     uint32_t size;
     uint8_t *buf;
     BlockBackend *blk;
+    VMChangeStateEntry *vmstate;
 } sPAPRNVRAM;
 
 #define TYPE_VIO_SPAPR_NVRAM "spapr-nvram"
@@ -124,7 +126,7 @@ static void rtas_nvram_store(PowerPCCPU *cpu, sPAPRMachineState *spapr,
 
     alen = len;
     if (nvram->blk) {
-        alen = blk_pwrite(nvram->blk, offset, membuf, len);
+        alen = blk_pwrite(nvram->blk, offset, membuf, len, 0);
     }
 
     assert(nvram->buf);
@@ -139,9 +141,17 @@ static void rtas_nvram_store(PowerPCCPU *cpu, sPAPRMachineState *spapr,
 static void spapr_nvram_realize(VIOsPAPRDevice *dev, Error **errp)
 {
     sPAPRNVRAM *nvram = VIO_SPAPR_NVRAM(dev);
+    int ret;
 
     if (nvram->blk) {
         nvram->size = blk_getlength(nvram->blk);
+
+        ret = blk_set_perm(nvram->blk,
+                           BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE,
+                           BLK_PERM_ALL, errp);
+        if (ret < 0) {
+            return;
+        }
     } else {
         nvram->size = DEFAULT_NVRAM_SIZE;
     }
@@ -161,6 +171,11 @@ static void spapr_nvram_realize(VIOsPAPRDevice *dev, Error **errp)
             error_setg(errp, "can't read spapr-nvram contents");
             return;
         }
+    } else if (nb_prom_envs > 0) {
+        /* Create a system partition to pass the -prom-env variables */
+        chrp_nvram_create_system_partition(nvram->buf, MIN_NVRAM_SIZE / 4);
+        chrp_nvram_create_free_partition(&nvram->buf[MIN_NVRAM_SIZE / 4],
+                                         nvram->size - MIN_NVRAM_SIZE / 4);
     }
 
     spapr_rtas_register(RTAS_NVRAM_FETCH, "nvram-fetch", rtas_nvram_fetch);
@@ -185,19 +200,25 @@ static int spapr_nvram_pre_load(void *opaque)
     return 0;
 }
 
+static void postload_update_cb(void *opaque, int running, RunState state)
+{
+    sPAPRNVRAM *nvram = opaque;
+
+    /* This is called after bdrv_invalidate_cache_all.  */
+
+    qemu_del_vm_change_state_handler(nvram->vmstate);
+    nvram->vmstate = NULL;
+
+    blk_pwrite(nvram->blk, 0, nvram->buf, nvram->size, 0);
+}
+
 static int spapr_nvram_post_load(void *opaque, int version_id)
 {
     sPAPRNVRAM *nvram = VIO_SPAPR_NVRAM(opaque);
 
     if (nvram->blk) {
-        int alen = blk_pwrite(nvram->blk, 0, nvram->buf, nvram->size);
-
-        if (alen < 0) {
-            return alen;
-        }
-        if (alen != nvram->size) {
-            return -1;
-        }
+        nvram->vmstate = qemu_add_vm_change_state_handler(postload_update_cb,
+                                                          nvram);
     }
 
     return 0;
@@ -211,7 +232,7 @@ static const VMStateDescription vmstate_spapr_nvram = {
     .post_load = spapr_nvram_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32(size, sPAPRNVRAM),
-        VMSTATE_VBUFFER_ALLOC_UINT32(buf, sPAPRNVRAM, 1, NULL, 0, size),
+        VMSTATE_VBUFFER_ALLOC_UINT32(buf, sPAPRNVRAM, 1, NULL, size),
         VMSTATE_END_OF_LIST()
     },
 };

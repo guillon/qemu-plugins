@@ -25,14 +25,17 @@
 #include "hw/hw.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/dma.h"
+#include "hw/boards.h"
 #include "hw/isa/isa.h"
 #include "hw/nvram/fw_cfg.h"
 #include "hw/sysbus.h"
-#include "hw/boards.h"
 #include "trace.h"
 #include "qemu/error-report.h"
 #include "qemu/config-file.h"
 #include "qemu/cutils.h"
+#include "qapi/error.h"
+
+#define FW_CFG_FILE_SLOTS_DFLT 0x20
 
 #define FW_CFG_NAME "fw_cfg"
 #define FW_CFG_PATH "/machine/" FW_CFG_NAME
@@ -54,11 +57,13 @@
 #define FW_CFG_DMA_CTL_READ    0x02
 #define FW_CFG_DMA_CTL_SKIP    0x04
 #define FW_CFG_DMA_CTL_SELECT  0x08
+#define FW_CFG_DMA_CTL_WRITE   0x10
 
 #define FW_CFG_DMA_SIGNATURE 0x51454d5520434647ULL /* "QEMU CFG" */
 
 typedef struct FWCfgEntry {
     uint32_t len;
+    bool allow_write;
     uint8_t *data;
     void *callback_opaque;
     FWCfgReadCallback read_callback;
@@ -69,8 +74,9 @@ struct FWCfgState {
     SysBusDevice parent_obj;
     /*< public >*/
 
-    FWCfgEntry entries[2][FW_CFG_MAX_ENTRY];
-    int entry_order[FW_CFG_MAX_ENTRY];
+    uint16_t file_slots;
+    FWCfgEntry *entries[2];
+    int *entry_order;
     FWCfgFiles *files;
     uint16_t cur_entry;
     uint32_t cur_offset;
@@ -179,7 +185,7 @@ static void fw_cfg_bootsplash(FWCfgState *s)
         temp = qemu_opt_get(opts, "splash-time");
         if (temp != NULL) {
             p = (char *)temp;
-            boot_splash_time = strtol(p, (char **)&p, 10);
+            boot_splash_time = strtol(p, &p, 10);
         }
     }
 
@@ -239,7 +245,7 @@ static void fw_cfg_reboot(FWCfgState *s)
         temp = qemu_opt_get(opts, "reboot-timeout");
         if (temp != NULL) {
             p = (char *)temp;
-            reboot_timeout = strtol(p, (char **)&p, 10);
+            reboot_timeout = strtol(p, &p, 10);
         }
     }
     /* validate the input */
@@ -255,13 +261,24 @@ static void fw_cfg_write(FWCfgState *s, uint8_t value)
     /* nothing, write support removed in QEMU v2.4+ */
 }
 
+static inline uint16_t fw_cfg_file_slots(const FWCfgState *s)
+{
+    return s->file_slots;
+}
+
+/* Note: this function returns an exclusive limit. */
+static inline uint32_t fw_cfg_max_entry(const FWCfgState *s)
+{
+    return FW_CFG_FILE_FIRST + fw_cfg_file_slots(s);
+}
+
 static int fw_cfg_select(FWCfgState *s, uint16_t key)
 {
     int arch, ret;
     FWCfgEntry *e;
 
     s->cur_offset = 0;
-    if ((key & FW_CFG_ENTRY_MASK) >= FW_CFG_MAX_ENTRY) {
+    if ((key & FW_CFG_ENTRY_MASK) >= fw_cfg_max_entry(s)) {
         s->cur_entry = FW_CFG_INVALID;
         ret = 0;
     } else {
@@ -326,7 +343,7 @@ static void fw_cfg_dma_transfer(FWCfgState *s)
     FWCfgDmaAccess dma;
     int arch;
     FWCfgEntry *e;
-    int read;
+    int read = 0, write = 0;
     dma_addr_t dma_addr;
 
     /* Reset the address before the next access */
@@ -353,8 +370,13 @@ static void fw_cfg_dma_transfer(FWCfgState *s)
 
     if (dma.control & FW_CFG_DMA_CTL_READ) {
         read = 1;
+        write = 0;
+    } else if (dma.control & FW_CFG_DMA_CTL_WRITE) {
+        read = 0;
+        write = 1;
     } else if (dma.control & FW_CFG_DMA_CTL_SKIP) {
         read = 0;
+        write = 0;
     } else {
         dma.length = 0;
     }
@@ -374,7 +396,9 @@ static void fw_cfg_dma_transfer(FWCfgState *s)
                     dma.control |= FW_CFG_DMA_CTL_ERROR;
                 }
             }
-
+            if (write) {
+                dma.control |= FW_CFG_DMA_CTL_ERROR;
+            }
         } else {
             if (dma.length <= (e->len - s->cur_offset)) {
                 len = dma.length;
@@ -387,6 +411,14 @@ static void fw_cfg_dma_transfer(FWCfgState *s)
              */
             if (read) {
                 if (dma_memory_write(s->dma_as, dma.address,
+                                    &e->data[s->cur_offset], len)) {
+                    dma.control |= FW_CFG_DMA_CTL_ERROR;
+                }
+            }
+            if (write) {
+                if (!e->allow_write ||
+                    len != dma.length ||
+                    dma_memory_read(s->dma_as, dma.address,
                                     &e->data[s->cur_offset], len)) {
                     dma.control |= FW_CFG_DMA_CTL_ERROR;
                 }
@@ -523,17 +555,21 @@ static void fw_cfg_reset(DeviceState *d)
    Or we broke compatibility in the state, or we can't use struct tm
  */
 
-static int get_uint32_as_uint16(QEMUFile *f, void *pv, size_t size)
+static int get_uint32_as_uint16(QEMUFile *f, void *pv, size_t size,
+                                VMStateField *field)
 {
     uint32_t *v = pv;
     *v = qemu_get_be16(f);
     return 0;
 }
 
-static void put_unused(QEMUFile *f, void *pv, size_t size)
+static int put_unused(QEMUFile *f, void *pv, size_t size, VMStateField *field,
+                      QJSON *vmdesc)
 {
     fprintf(stderr, "uint32_as_uint16 is only used for backward compatibility.\n");
     fprintf(stderr, "This functions shouldn't be called.\n");
+
+    return 0;
 }
 
 static const VMStateInfo vmstate_hack_uint32_as_uint16 = {
@@ -551,7 +587,7 @@ static bool is_version_1(void *opaque, int version_id)
     return version_id == 1;
 }
 
-static bool fw_cfg_dma_enabled(void *opaque)
+bool fw_cfg_dma_enabled(void *opaque)
 {
     FWCfgState *s = opaque;
 
@@ -586,19 +622,21 @@ static const VMStateDescription vmstate_fw_cfg = {
 static void fw_cfg_add_bytes_read_callback(FWCfgState *s, uint16_t key,
                                            FWCfgReadCallback callback,
                                            void *callback_opaque,
-                                           void *data, size_t len)
+                                           void *data, size_t len,
+                                           bool read_only)
 {
     int arch = !!(key & FW_CFG_ARCH_LOCAL);
 
     key &= FW_CFG_ENTRY_MASK;
 
-    assert(key < FW_CFG_MAX_ENTRY && len < UINT32_MAX);
+    assert(key < fw_cfg_max_entry(s) && len < UINT32_MAX);
     assert(s->entries[arch][key].data == NULL); /* avoid key conflict */
 
     s->entries[arch][key].data = data;
     s->entries[arch][key].len = (uint32_t)len;
     s->entries[arch][key].read_callback = callback;
     s->entries[arch][key].callback_opaque = callback_opaque;
+    s->entries[arch][key].allow_write = !read_only;
 }
 
 static void *fw_cfg_modify_bytes_read(FWCfgState *s, uint16_t key,
@@ -609,20 +647,21 @@ static void *fw_cfg_modify_bytes_read(FWCfgState *s, uint16_t key,
 
     key &= FW_CFG_ENTRY_MASK;
 
-    assert(key < FW_CFG_MAX_ENTRY && len < UINT32_MAX);
+    assert(key < fw_cfg_max_entry(s) && len < UINT32_MAX);
 
     /* return the old data to the function caller, avoid memory leak */
     ptr = s->entries[arch][key].data;
     s->entries[arch][key].data = data;
     s->entries[arch][key].len = len;
     s->entries[arch][key].callback_opaque = NULL;
+    s->entries[arch][key].allow_write = false;
 
     return ptr;
 }
 
 void fw_cfg_add_bytes(FWCfgState *s, uint16_t key, void *data, size_t len)
 {
-    fw_cfg_add_bytes_read_callback(s, key, NULL, NULL, data, len);
+    fw_cfg_add_bytes_read_callback(s, key, NULL, NULL, data, len, true);
 }
 
 void fw_cfg_add_string(FWCfgState *s, uint16_t key, const char *value)
@@ -728,23 +767,28 @@ static int get_fw_cfg_order(FWCfgState *s, const char *name)
 {
     int i;
 
-    if (s->fw_cfg_order_override > 0)
-	return s->fw_cfg_order_override;
+    if (s->fw_cfg_order_override > 0) {
+        return s->fw_cfg_order_override;
+    }
 
     for (i = 0; i < ARRAY_SIZE(fw_cfg_order); i++) {
-	if (fw_cfg_order[i].name == NULL)
-	    continue;
-	if (strcmp(name, fw_cfg_order[i].name) == 0)
-	    return fw_cfg_order[i].order;
+        if (fw_cfg_order[i].name == NULL) {
+            continue;
+        }
+
+        if (strcmp(name, fw_cfg_order[i].name) == 0) {
+            return fw_cfg_order[i].order;
+        }
     }
+
     /* Stick unknown stuff at the end. */
-    error_report("warning: Unknown firmware file in legacy mode: %s\n", name);
+    error_report("warning: Unknown firmware file in legacy mode: %s", name);
     return FW_CFG_ORDER_OVERRIDE_LAST;
 }
 
 void fw_cfg_add_file_callback(FWCfgState *s,  const char *filename,
                               FWCfgReadCallback callback, void *callback_opaque,
-                              void *data, size_t len)
+                              void *data, size_t len, bool read_only)
 {
     int i, index, count;
     size_t dsize;
@@ -752,13 +796,13 @@ void fw_cfg_add_file_callback(FWCfgState *s,  const char *filename,
     int order = 0;
 
     if (!s->files) {
-        dsize = sizeof(uint32_t) + sizeof(FWCfgFile) * FW_CFG_FILE_SLOTS;
+        dsize = sizeof(uint32_t) + sizeof(FWCfgFile) * fw_cfg_file_slots(s);
         s->files = g_malloc0(dsize);
         fw_cfg_add_bytes(s, FW_CFG_FILE_DIR, s->files, dsize);
     }
 
     count = be32_to_cpu(s->files->count);
-    assert(count < FW_CFG_FILE_SLOTS);
+    assert(count < fw_cfg_file_slots(s));
 
     /* Find the insertion point. */
     if (mc->legacy_fw_cfg_order) {
@@ -806,7 +850,8 @@ void fw_cfg_add_file_callback(FWCfgState *s,  const char *filename,
     }
 
     fw_cfg_add_bytes_read_callback(s, FW_CFG_FILE_FIRST + index,
-                                   callback, callback_opaque, data, len);
+                                   callback, callback_opaque, data, len,
+                                   read_only);
 
     s->files->f[index].size   = cpu_to_be32(len);
     s->files->f[index].select = cpu_to_be16(FW_CFG_FILE_FIRST + index);
@@ -819,7 +864,7 @@ void fw_cfg_add_file_callback(FWCfgState *s,  const char *filename,
 void fw_cfg_add_file(FWCfgState *s,  const char *filename,
                      void *data, size_t len)
 {
-    fw_cfg_add_file_callback(s, filename, NULL, NULL, data, len);
+    fw_cfg_add_file_callback(s, filename, NULL, NULL, data, len, true);
 }
 
 void *fw_cfg_modify_file(FWCfgState *s, const char *filename,
@@ -831,7 +876,7 @@ void *fw_cfg_modify_file(FWCfgState *s, const char *filename,
     assert(s->files);
 
     index = be32_to_cpu(s->files->count);
-    assert(index < FW_CFG_FILE_SLOTS);
+    assert(index < fw_cfg_file_slots(s));
 
     for (i = 0; i < index; i++) {
         if (strcmp(filename, s->files->f[i].name) == 0) {
@@ -842,7 +887,7 @@ void *fw_cfg_modify_file(FWCfgState *s, const char *filename,
         }
     }
     /* add new one */
-    fw_cfg_add_file_callback(s, filename, NULL, NULL, data, len);
+    fw_cfg_add_file_callback(s, filename, NULL, NULL, data, len, true);
     return NULL;
 }
 
@@ -868,17 +913,17 @@ static void fw_cfg_machine_ready(struct Notifier *n, void *data)
 static void fw_cfg_init1(DeviceState *dev)
 {
     FWCfgState *s = FW_CFG(dev);
+    MachineState *machine = MACHINE(qdev_get_machine());
 
     assert(!object_resolve_path(FW_CFG_PATH, NULL));
 
-    object_property_add_child(qdev_get_machine(), FW_CFG_NAME, OBJECT(s), NULL);
+    object_property_add_child(OBJECT(machine), FW_CFG_NAME, OBJECT(s), NULL);
 
     qdev_init_nofail(dev);
 
     fw_cfg_add_bytes(s, FW_CFG_SIGNATURE, (char *)"QEMU", 4);
-    fw_cfg_add_bytes(s, FW_CFG_UUID, qemu_uuid, 16);
-    fw_cfg_add_i16(s, FW_CFG_NOGRAPHIC, (uint16_t)(display_type == DT_NOGRAPHIC));
-    fw_cfg_add_i16(s, FW_CFG_NB_CPUS, (uint16_t)smp_cpus);
+    fw_cfg_add_bytes(s, FW_CFG_UUID, &qemu_uuid, 16);
+    fw_cfg_add_i16(s, FW_CFG_NOGRAPHIC, (uint16_t)!machine->enable_graphics);
     fw_cfg_add_i16(s, FW_CFG_BOOT_MENU, (uint16_t)boot_menu);
     fw_cfg_bootsplash(s);
     fw_cfg_reboot(s);
@@ -983,16 +1028,43 @@ static void fw_cfg_class_init(ObjectClass *klass, void *data)
 static const TypeInfo fw_cfg_info = {
     .name          = TYPE_FW_CFG,
     .parent        = TYPE_SYS_BUS_DEVICE,
+    .abstract      = true,
     .instance_size = sizeof(FWCfgState),
     .class_init    = fw_cfg_class_init,
 };
 
+static void fw_cfg_file_slots_allocate(FWCfgState *s, Error **errp)
+{
+    uint16_t file_slots_max;
+
+    if (fw_cfg_file_slots(s) < FW_CFG_FILE_SLOTS_MIN) {
+        error_setg(errp, "\"file_slots\" must be at least 0x%x",
+                   FW_CFG_FILE_SLOTS_MIN);
+        return;
+    }
+
+    /* (UINT16_MAX & FW_CFG_ENTRY_MASK) is the highest inclusive selector value
+     * that we permit. The actual (exclusive) value coming from the
+     * configuration is (FW_CFG_FILE_FIRST + fw_cfg_file_slots(s)). */
+    file_slots_max = (UINT16_MAX & FW_CFG_ENTRY_MASK) - FW_CFG_FILE_FIRST + 1;
+    if (fw_cfg_file_slots(s) > file_slots_max) {
+        error_setg(errp, "\"file_slots\" must not exceed 0x%" PRIx16,
+                   file_slots_max);
+        return;
+    }
+
+    s->entries[0] = g_new0(FWCfgEntry, fw_cfg_max_entry(s));
+    s->entries[1] = g_new0(FWCfgEntry, fw_cfg_max_entry(s));
+    s->entry_order = g_new0(int, fw_cfg_max_entry(s));
+}
 
 static Property fw_cfg_io_properties[] = {
     DEFINE_PROP_UINT32("iobase", FWCfgIoState, iobase, -1),
     DEFINE_PROP_UINT32("dma_iobase", FWCfgIoState, dma_iobase, -1),
     DEFINE_PROP_BOOL("dma_enabled", FWCfgIoState, parent_obj.dma_enabled,
                      true),
+    DEFINE_PROP_UINT16("x-file-slots", FWCfgIoState, parent_obj.file_slots,
+                       FW_CFG_FILE_SLOTS_DFLT),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -1000,6 +1072,13 @@ static void fw_cfg_io_realize(DeviceState *dev, Error **errp)
 {
     FWCfgIoState *s = FW_CFG_IO(dev);
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+    Error *local_err = NULL;
+
+    fw_cfg_file_slots_allocate(FW_CFG(s), &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return;
+    }
 
     /* when using port i/o, the 8-bit data register ALWAYS overlaps
      * with half of the 16-bit control register. Hence, the total size
@@ -1036,6 +1115,8 @@ static Property fw_cfg_mem_properties[] = {
     DEFINE_PROP_UINT32("data_width", FWCfgMemState, data_width, -1),
     DEFINE_PROP_BOOL("dma_enabled", FWCfgMemState, parent_obj.dma_enabled,
                      true),
+    DEFINE_PROP_UINT16("x-file-slots", FWCfgMemState, parent_obj.file_slots,
+                       FW_CFG_FILE_SLOTS_DFLT),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -1044,6 +1125,13 @@ static void fw_cfg_mem_realize(DeviceState *dev, Error **errp)
     FWCfgMemState *s = FW_CFG_MEM(dev);
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     const MemoryRegionOps *data_ops = &fw_cfg_data_mem_ops;
+    Error *local_err = NULL;
+
+    fw_cfg_file_slots_allocate(FW_CFG(s), &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return;
+    }
 
     memory_region_init_io(&s->ctl_iomem, OBJECT(s), &fw_cfg_ctl_mem_ops,
                           FW_CFG(s), "fwcfg.ctl", FW_CFG_CTL_SIZE);

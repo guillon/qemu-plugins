@@ -10,7 +10,6 @@
  */
 
 #include "qemu/osdep.h"
-#include <glib.h>
 #include "libqtest.h"
 #include "libqos/pci.h"
 #include "libqos/pci-pc.h"
@@ -43,7 +42,7 @@ static void test_smram_lock(void)
     QPCIDevice *pcidev;
     QDict *response;
 
-    pcibus = qpci_init_pc();
+    pcibus = qpci_init_pc(NULL);
     g_assert(pcibus != NULL);
 
     pcidev = qpci_device_find(pcibus, 0);
@@ -72,6 +71,9 @@ static void test_smram_lock(void)
     g_assert(smram_test_bit(pcidev, MCH_HOST_BRIDGE_SMRAM_D_OPEN) == false);
     smram_set_bit(pcidev, MCH_HOST_BRIDGE_SMRAM_D_OPEN, true);
     g_assert(smram_test_bit(pcidev, MCH_HOST_BRIDGE_SMRAM_D_OPEN) == true);
+
+    g_free(pcidev);
+    qpci_free_pc(pcibus);
 }
 
 int main(int argc, char **argv)

@@ -51,8 +51,10 @@ export IMGOPTS=""
 export CACHEMODE="writeback"
 export QEMU_IO_OPTIONS=""
 export CACHEMODE_IS_DEFAULT=true
-export QEMU_OPTIONS="-nodefaults"
+export QEMU_OPTIONS="-nodefaults -machine accel=qtest"
 export VALGRIND_QEMU=
+export IMGKEYSECRET=
+export IMGOPTSSYNTAX=false
 
 for r
 do
@@ -154,7 +156,6 @@ check options
     -nbd                test nbd
     -ssh                test ssh
     -nfs                test nfs
-    -archipelago        test archipelago
     -luks               test luks
     -xdiff              graphical mode diff
     -nocache            use O_DIRECT on backing file
@@ -204,6 +205,13 @@ testlist options
 
         -qcow2)
             IMGFMT=qcow2
+            xpand=false
+            ;;
+
+        -luks)
+            IMGOPTSSYNTAX=true
+            IMGFMT=luks
+            IMGKEYSECRET=123456
             xpand=false
             ;;
 
@@ -259,11 +267,6 @@ testlist options
 
         -nfs)
             IMGPROTO=nfs
-            xpand=false
-            ;;
-
-        -archipelago)
-            IMGPROTO=archipelago
             xpand=false
             ;;
 
@@ -399,7 +402,11 @@ BEGIN        { for (t='$start'; t<='$end'; t++) printf "%03d\n",t }' \
 done
 
 # Set qemu-io cache mode with $CACHEMODE we have
-QEMU_IO_OPTIONS="$QEMU_IO_OPTIONS -f $IMGFMT --cache $CACHEMODE"
+if [ "$IMGOPTSSYNTAX" = "true" ]; then
+    QEMU_IO_OPTIONS="$QEMU_IO_OPTIONS --cache $CACHEMODE"
+else
+    QEMU_IO_OPTIONS="$QEMU_IO_OPTIONS -f $IMGFMT --cache $CACHEMODE"
+fi
 
 # Set default options for qemu-img create -o if they were not specified
 _set_default_imgopts

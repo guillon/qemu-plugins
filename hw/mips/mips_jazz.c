@@ -201,8 +201,8 @@ static void mips_jazz_init(MachineState *machine,
     }
 
     /* Init CPU internal devices */
-    cpu_mips_irq_init_cpu(env);
-    cpu_mips_clock_init(env);
+    cpu_mips_irq_init_cpu(cpu);
+    cpu_mips_clock_init(cpu);
 
     /* Chipset */
     rc4030 = rc4030_init(&dmas, &rc4030_dma_mr);
@@ -291,10 +291,6 @@ static void mips_jazz_init(MachineState *machine,
              qdev_get_gpio_in(rc4030, 5), &esp_reset, &dma_enable);
 
     /* Floppy */
-    if (drive_get_max_bus(IF_FLOPPY) >= MAX_FD) {
-        fprintf(stderr, "qemu: too many floppy drives\n");
-        exit(1);
-    }
     for (n = 0; n < MAX_FD; n++) {
         fds[n] = drive_get(IF_FLOPPY, 0, n);
     }

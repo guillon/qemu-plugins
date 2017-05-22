@@ -9,6 +9,7 @@
 #include "qemu/notify.h"
 #include "qemu/main-loop.h"
 #include "qemu/bitmap.h"
+#include "qemu/uuid.h"
 #include "qom/object.h"
 
 /* vl.c */
@@ -16,12 +17,8 @@
 extern const char *bios_name;
 
 extern const char *qemu_name;
-extern uint8_t qemu_uuid[];
+extern QemuUUID qemu_uuid;
 extern bool qemu_uuid_set;
-int qemu_uuid_parse(const char *str, uint8_t *uuid);
-
-#define UUID_FMT "%02hhx%02hhx%02hhx%02hhx-%02hhx%02hhx-%02hhx%02hhx-%02hhx%02hhx-%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx"
-#define UUID_NONE "00000000-0000-0000-0000-000000000000"
 
 bool runstate_check(RunState state);
 void runstate_set(RunState new_state);
@@ -40,6 +37,7 @@ void vm_state_notify(int running, RunState state);
 #define VMRESET_REPORT   true
 
 void vm_start(void);
+int vm_prepare_start(void);
 int vm_stop(RunState state);
 int vm_stop_force_state(RunState state);
 
@@ -63,20 +61,22 @@ void qemu_register_powerdown_notifier(Notifier *notifier);
 void qemu_system_debug_request(void);
 void qemu_system_vmstop_request(RunState reason);
 void qemu_system_vmstop_request_prepare(void);
+bool qemu_vmstop_requested(RunState *r);
 int qemu_shutdown_requested_get(void);
 int qemu_reset_requested_get(void);
 void qemu_system_killed(int signal, pid_t pid);
-void qemu_devices_reset(void);
 void qemu_system_reset(bool report);
-void qemu_system_guest_panicked(void);
+void qemu_system_guest_panicked(GuestPanicInformation *info);
 size_t qemu_target_page_bits(void);
 
 void qemu_add_exit_notifier(Notifier *notify);
 void qemu_remove_exit_notifier(Notifier *notify);
 
 void qemu_add_machine_init_done_notifier(Notifier *notify);
+void qemu_remove_machine_init_done_notifier(Notifier *notify);
 
 void hmp_savevm(Monitor *mon, const QDict *qdict);
+int save_vmstate(Monitor *mon, const char *name);
 int load_vmstate(const char *name);
 void hmp_delvm(Monitor *mon, const QDict *qdict);
 void hmp_info_snapshots(Monitor *mon, const QDict *qdict);
@@ -119,7 +119,7 @@ void qemu_savevm_command_send(QEMUFile *f, enum qemu_vm_cmd command,
                               uint16_t len, uint8_t *data);
 void qemu_savevm_send_ping(QEMUFile *f, uint32_t value);
 void qemu_savevm_send_open_return_path(QEMUFile *f);
-int qemu_savevm_send_packaged(QEMUFile *f, const QEMUSizedBuffer *qsb);
+int qemu_savevm_send_packaged(QEMUFile *f, const uint8_t *buf, size_t len);
 void qemu_savevm_send_postcopy_advise(QEMUFile *f);
 void qemu_savevm_send_postcopy_listen(QEMUFile *f);
 void qemu_savevm_send_postcopy_run(QEMUFile *f);
@@ -131,21 +131,12 @@ void qemu_savevm_send_postcopy_ram_discard(QEMUFile *f, const char *name,
 
 int qemu_loadvm_state(QEMUFile *f);
 
-typedef enum DisplayType
-{
-    DT_DEFAULT,
-    DT_CURSES,
-    DT_SDL,
-    DT_GTK,
-    DT_NOGRAPHIC,
-    DT_NONE,
-} DisplayType;
-
 extern int autostart;
 
 typedef enum {
     VGA_NONE, VGA_STD, VGA_CIRRUS, VGA_VMWARE, VGA_XENFB, VGA_QXL,
     VGA_TCX, VGA_CG3, VGA_DEVICE, VGA_VIRTIO,
+    VGA_TYPE_MAX,
 } VGAInterfaceType;
 
 extern int vga_interface_type;
@@ -154,7 +145,6 @@ extern int vga_interface_type;
 extern int graphic_width;
 extern int graphic_height;
 extern int graphic_depth;
-extern DisplayType display_type;
 extern int display_opengl;
 extern const char *keyboard_layout;
 extern int win2k_install_hack;
@@ -180,13 +170,6 @@ extern int mem_prealloc;
 #define MAX_NODES 128
 #define NUMA_NODE_UNASSIGNED MAX_NODES
 
-/* The following shall be true for all CPUs:
- *   cpu->cpu_index < max_cpus <= MAX_CPUMASK_BITS
- *
- * Note that cpu->get_arch_id() may be larger than MAX_CPUMASK_BITS.
- */
-#define MAX_CPUMASK_BITS 255
-
 #define MAX_OPTION_ROMS 16
 typedef struct QEMUOptionRom {
     const char *name;
@@ -209,13 +192,13 @@ void hmp_pcie_aer_inject_error(Monitor *mon, const QDict *qdict);
 
 #define MAX_SERIAL_PORTS 4
 
-extern CharDriverState *serial_hds[MAX_SERIAL_PORTS];
+extern Chardev *serial_hds[MAX_SERIAL_PORTS];
 
 /* parallel ports */
 
 #define MAX_PARALLEL_PORTS 3
 
-extern CharDriverState *parallel_hds[MAX_PARALLEL_PORTS];
+extern Chardev *parallel_hds[MAX_PARALLEL_PORTS];
 
 void hmp_usb_add(Monitor *mon, const QDict *qdict);
 void hmp_usb_del(Monitor *mon, const QDict *qdict);
@@ -243,11 +226,11 @@ void qemu_boot_set(const char *boot_order, Error **errp);
 QemuOpts *qemu_get_machine_opts(void);
 
 bool defaults_enabled(void);
-bool usb_enabled(void);
 
 extern QemuOptsList qemu_legacy_drive_opts;
 extern QemuOptsList qemu_common_drive_opts;
 extern QemuOptsList qemu_drive_opts;
+extern QemuOptsList bdrv_runtime_opts;
 extern QemuOptsList qemu_chardev_opts;
 extern QemuOptsList qemu_device_opts;
 extern QemuOptsList qemu_netdev_opts;

@@ -17,9 +17,6 @@
  *  along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
-#include <sys/mman.h>
-#include <linux/mman.h>
-#include <linux/unistd.h>
 
 #include "qemu.h"
 #include "qemu-common.h"
@@ -43,6 +40,11 @@ void mmap_unlock(void)
     if (--mmap_lock_count == 0) {
         pthread_mutex_unlock(&mmap_mutex);
     }
+}
+
+bool have_mmap_lock(void)
+{
+    return mmap_lock_count > 0 ? true : false;
 }
 
 /* Grab lock to make sure things are in a consistent state after fork().  */
@@ -192,9 +194,6 @@ static int mmap_frag(abi_ulong real_start,
 
 #if HOST_LONG_BITS == 64 && TARGET_ABI_BITS == 64
 # define TASK_UNMAPPED_BASE  (1ul << 38)
-#elif defined(__CYGWIN__)
-/* Cygwin doesn't have a whole lot of address space.  */
-# define TASK_UNMAPPED_BASE  0x18000000
 #else
 # define TASK_UNMAPPED_BASE  0x40000000
 #endif
@@ -428,9 +427,9 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int prot,
        may need to truncate file maps at EOF and add extra anonymous pages
        up to the targets page boundary.  */
 
-    if ((qemu_real_host_page_size < TARGET_PAGE_SIZE)
-        && !(flags & MAP_ANONYMOUS)) {
-       struct stat sb;
+    if ((qemu_real_host_page_size < qemu_host_page_size) &&
+        !(flags & MAP_ANONYMOUS)) {
+        struct stat sb;
 
        if (fstat (fd, &sb) == -1)
            goto fail;
@@ -688,10 +687,8 @@ abi_long target_mremap(abi_ulong old_addr, abi_ulong old_size,
     mmap_lock();
 
     if (flags & MREMAP_FIXED) {
-        host_addr = (void *) syscall(__NR_mremap, g2h(old_addr),
-                                     old_size, new_size,
-                                     flags,
-                                     g2h(new_addr));
+        host_addr = mremap(g2h(old_addr), old_size, new_size,
+                           flags, g2h(new_addr));
 
         if (reserved_va && host_addr != MAP_FAILED) {
             /* If new and old addresses overlap then the above mremap will
@@ -707,10 +704,8 @@ abi_long target_mremap(abi_ulong old_addr, abi_ulong old_size,
             errno = ENOMEM;
             host_addr = MAP_FAILED;
         } else {
-            host_addr = (void *) syscall(__NR_mremap, g2h(old_addr),
-                                         old_size, new_size,
-                                         flags | MREMAP_FIXED,
-                                         g2h(mmap_start));
+            host_addr = mremap(g2h(old_addr), old_size, new_size,
+                               flags | MREMAP_FIXED, g2h(mmap_start));
             if (reserved_va) {
                 mmap_reserve(old_addr, old_size);
             }

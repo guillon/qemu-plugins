@@ -36,7 +36,8 @@ static uint64_t *icount_total;
 
 static void pre_tb_helper_code(const TCGPluginInterface *tpi,
                                TPIHelperInfo info, uint64_t address,
-                               uint64_t data1, uint64_t data2)
+                               uint64_t data1, uint64_t data2,
+                               const TranslationBlock* tb)
 {
     atomic_add(&icount_total[info.cpu_index], info.icount);
 }

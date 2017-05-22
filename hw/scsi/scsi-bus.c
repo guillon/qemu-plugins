@@ -105,6 +105,7 @@ static void scsi_dma_restart_bh(void *opaque)
     qemu_bh_delete(s->bh);
     s->bh = NULL;
 
+    aio_context_acquire(blk_get_aio_context(s->conf.blk));
     QTAILQ_FOREACH_SAFE(req, &s->requests, next, next) {
         scsi_req_ref(req);
         if (req->retry) {
@@ -122,6 +123,7 @@ static void scsi_dma_restart_bh(void *opaque)
         }
         scsi_req_unref(req);
     }
+    aio_context_release(blk_get_aio_context(s->conf.blk));
 }
 
 void scsi_req_retry(SCSIRequest *req)
@@ -261,12 +263,11 @@ SCSIDevice *scsi_bus_legacy_add_drive(SCSIBus *bus, BlockBackend *blk,
     return SCSI_DEVICE(dev);
 }
 
-void scsi_bus_legacy_handle_cmdline(SCSIBus *bus, Error **errp)
+void scsi_bus_legacy_handle_cmdline(SCSIBus *bus, bool deprecated)
 {
     Location loc;
     DriveInfo *dinfo;
     int unit;
-    Error *err = NULL;
 
     loc_push_none(&loc);
     for (unit = 0; unit <= bus->info->max_target; unit++) {
@@ -275,14 +276,57 @@ void scsi_bus_legacy_handle_cmdline(SCSIBus *bus, Error **errp)
             continue;
         }
         qemu_opts_loc_restore(dinfo->opts);
-        scsi_bus_legacy_add_drive(bus, blk_by_legacy_dinfo(dinfo),
-                                  unit, false, -1, NULL, &err);
-        if (err != NULL) {
-            error_propagate(errp, err);
-            break;
+        if (deprecated) {
+            /* Handling -drive not claimed by machine initialization */
+            if (blk_get_attached_dev(blk_by_legacy_dinfo(dinfo))) {
+                continue;       /* claimed */
+            }
+            if (!dinfo->is_default) {
+                error_report("warning: bus=%d,unit=%d is deprecated with this"
+                             " machine type",
+                             bus->busnr, unit);
+            }
         }
+        scsi_bus_legacy_add_drive(bus, blk_by_legacy_dinfo(dinfo),
+                                  unit, false, -1, NULL, &error_fatal);
     }
     loc_pop(&loc);
+}
+
+static bool is_scsi_hba_with_legacy_magic(Object *obj)
+{
+    static const char *magic[] = {
+        "am53c974", "dc390", "esp", "lsi53c810", "lsi53c895a",
+        "megasas", "megasas-gen2", "mptsas1068", "spapr-vscsi",
+        "virtio-scsi-device",
+        NULL
+    };
+    const char *typename = object_get_typename(obj);
+    int i;
+
+    for (i = 0; magic[i]; i++)
+        if (!strcmp(typename, magic[i])) {
+            return true;
+    }
+
+    return false;
+}
+
+static int scsi_legacy_handle_cmdline_cb(Object *obj, void *opaque)
+{
+    SCSIBus *bus = (SCSIBus *)object_dynamic_cast(obj, TYPE_SCSI_BUS);
+
+    if (bus && is_scsi_hba_with_legacy_magic(OBJECT(bus->qbus.parent))) {
+        scsi_bus_legacy_handle_cmdline(bus, true);
+    }
+
+    return 0;
+}
+
+void scsi_legacy_handle_cmdline(void)
+{
+    object_child_foreach_recursive(object_get_root(),
+                                   scsi_legacy_handle_cmdline_cb, NULL);
 }
 
 static int32_t scsi_invalid_field(SCSIRequest *req, uint8_t *buf)
@@ -461,6 +505,14 @@ static bool scsi_target_emulate_inquiry(SCSITargetReq *r)
     return true;
 }
 
+static size_t scsi_sense_len(SCSIRequest *req)
+{
+    if (req->dev->type == TYPE_SCANNER)
+        return SCSI_SENSE_LEN_SCANNER;
+    else
+        return SCSI_SENSE_LEN;
+}
+
 static int32_t scsi_target_send_command(SCSIRequest *req, uint8_t *buf)
 {
     SCSITargetReq *r = DO_UPCAST(SCSITargetReq, req, req);
@@ -477,7 +529,7 @@ static int32_t scsi_target_send_command(SCSIRequest *req, uint8_t *buf)
         }
         break;
     case REQUEST_SENSE:
-        scsi_target_alloc_buf(&r->req, SCSI_SENSE_LEN);
+        scsi_target_alloc_buf(&r->req, scsi_sense_len(req));
         r->len = scsi_device_get_sense(r->req.dev, r->buf,
                                        MIN(req->cmd.xfer, r->buf_len),
                                        (req->cmd.buf[1] & 1) == 0);
@@ -1132,6 +1184,29 @@ static int scsi_req_medium_changer_xfer(SCSICommand *cmd, SCSIDevice *dev, uint8
     return 0;
 }
 
+static int scsi_req_scanner_length(SCSICommand *cmd, SCSIDevice *dev, uint8_t *buf)
+{
+    switch (buf[0]) {
+    /* Scanner commands */
+    case OBJECT_POSITION:
+        cmd->xfer = 0;
+        break;
+    case SCAN:
+        cmd->xfer = buf[4];
+        break;
+    case READ_10:
+    case SEND:
+    case GET_WINDOW:
+    case SET_WINDOW:
+        cmd->xfer = buf[8] | (buf[7] << 8) | (buf[6] << 16);
+        break;
+    default:
+        /* GET_DATA_BUFFER_STATUS xfer handled by scsi_req_xfer */
+        return scsi_req_xfer(cmd, dev, buf);
+    }
+
+    return 0;
+}
 
 static void scsi_cmd_xfer_mode(SCSICommand *cmd)
 {
@@ -1178,6 +1253,11 @@ static void scsi_cmd_xfer_mode(SCSICommand *cmd)
     case SEND_DVD_STRUCTURE:
     case PERSISTENT_RESERVE_OUT:
     case MAINTENANCE_OUT:
+    case SET_WINDOW:
+    case SCAN:
+        /* SCAN conflicts with START_STOP.  START_STOP has cmd->xfer set to 0 for
+         * non-scanner devices, so we only get here for SCAN and not for START_STOP.
+         */
         cmd->mode = SCSI_XFER_TO_DEV;
         break;
     case ATA_PASSTHROUGH_12:
@@ -1257,6 +1337,9 @@ int scsi_req_parse_cdb(SCSIDevice *dev, SCSICommand *cmd, uint8_t *buf)
         break;
     case TYPE_MEDIUM_CHANGER:
         rc = scsi_req_medium_changer_xfer(cmd, dev, buf);
+        break;
+    case TYPE_SCANNER:
+        rc = scsi_req_scanner_length(cmd, dev, buf);
         break;
     default:
         rc = scsi_req_xfer(cmd, dev, buf);
@@ -1906,7 +1989,8 @@ SCSIDevice *scsi_device_find(SCSIBus *bus, int channel, int id, int lun)
 
 /* SCSI request list.  For simplicity, pv points to the whole device */
 
-static void put_scsi_requests(QEMUFile *f, void *pv, size_t size)
+static int put_scsi_requests(QEMUFile *f, void *pv, size_t size,
+                             VMStateField *field, QJSON *vmdesc)
 {
     SCSIDevice *s = pv;
     SCSIBus *bus = DO_UPCAST(SCSIBus, qbus, s->qdev.parent_bus);
@@ -1929,9 +2013,12 @@ static void put_scsi_requests(QEMUFile *f, void *pv, size_t size)
         }
     }
     qemu_put_sbyte(f, 0);
+
+    return 0;
 }
 
-static int get_scsi_requests(QEMUFile *f, void *pv, size_t size)
+static int get_scsi_requests(QEMUFile *f, void *pv, size_t size,
+                             VMStateField *field)
 {
     SCSIDevice *s = pv;
     SCSIBus *bus = DO_UPCAST(SCSIBus, qbus, s->qdev.parent_bus);

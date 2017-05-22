@@ -22,11 +22,12 @@
  * THE SOFTWARE.
  */
 #include "qemu/osdep.h"
+#include "qemu-common.h"
+#include "cpu.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/arch_init.h"
 #include "hw/pci/pci.h"
 #include "hw/audio/audio.h"
-#include "hw/smbios/smbios.h"
 #include "qemu/config-file.h"
 #include "qemu/error-report.h"
 #include "qmp-commands.h"
@@ -62,6 +63,8 @@ int graphic_depth = 32;
 #define QEMU_ARCH QEMU_ARCH_MIPS
 #elif defined(TARGET_MOXIE)
 #define QEMU_ARCH QEMU_ARCH_MOXIE
+#elif defined(TARGET_NIOS2)
+#define QEMU_ARCH QEMU_ARCH_NIOS2
 #elif defined(TARGET_OPENRISC)
 #define QEMU_ARCH QEMU_ARCH_OPENRISC
 #elif defined(TARGET_PPC)
@@ -81,33 +84,6 @@ int graphic_depth = 32;
 #endif
 
 const uint32_t arch_type = QEMU_ARCH;
-
-static struct defconfig_file {
-    const char *filename;
-    /* Indicates it is an user config file (disabled by -no-user-config) */
-    bool userconfig;
-} default_config_files[] = {
-    { CONFIG_QEMU_CONFDIR "/qemu.conf",                   true },
-    { NULL }, /* end of list */
-};
-
-int qemu_read_default_config_files(bool userconfig)
-{
-    int ret;
-    struct defconfig_file *f;
-
-    for (f = default_config_files; f->filename; f++) {
-        if (!userconfig && f->userconfig) {
-            continue;
-        }
-        ret = qemu_read_config_file(f->filename);
-        if (ret < 0 && ret != -ENOENT) {
-            return ret;
-        }
-    }
-
-    return 0;
-}
 
 struct soundhw {
     const char *name;
@@ -231,52 +207,6 @@ void audio_init(void)
             }
         }
     }
-}
-
-int qemu_uuid_parse(const char *str, uint8_t *uuid)
-{
-    int ret;
-
-    if (strlen(str) != 36) {
-        return -1;
-    }
-
-    ret = sscanf(str, UUID_FMT, &uuid[0], &uuid[1], &uuid[2], &uuid[3],
-                 &uuid[4], &uuid[5], &uuid[6], &uuid[7], &uuid[8], &uuid[9],
-                 &uuid[10], &uuid[11], &uuid[12], &uuid[13], &uuid[14],
-                 &uuid[15]);
-
-    if (ret != 16) {
-        return -1;
-    }
-    return 0;
-}
-
-void do_acpitable_option(const QemuOpts *opts)
-{
-#ifdef TARGET_I386
-    Error *err = NULL;
-
-    acpi_table_add(opts, &err);
-    if (err) {
-        error_reportf_err(err, "Wrong acpi table provided: ");
-        exit(1);
-    }
-#endif
-}
-
-void do_smbios_option(QemuOpts *opts)
-{
-#ifdef TARGET_I386
-    smbios_entry_add(opts);
-#endif
-}
-
-void cpudef_init(void)
-{
-#if defined(cpudef_setup)
-    cpudef_setup(); /* parse cpu definitions in target config file */
-#endif
 }
 
 int kvm_available(void)

@@ -11,14 +11,15 @@
  * See the COPYING file in the top-level directory.
  */
 
-#ifndef _QEMU_VIRTIO_VGA_H
-#define _QEMU_VIRTIO_VGA_H
+#ifndef HW_VIRTIO_GPU_H
+#define HW_VIRTIO_GPU_H
 
 #include "qemu/queue.h"
 #include "ui/qemu-pixman.h"
 #include "ui/console.h"
 #include "hw/virtio/virtio.h"
 #include "hw/pci/pci.h"
+#include "qemu/log.h"
 
 #include "standard-headers/linux/virtio_gpu.h"
 #define TYPE_VIRTIO_GPU "virtio-gpu-device"
@@ -27,17 +28,17 @@
 
 #define VIRTIO_ID_GPU 16
 
-#define VIRTIO_GPU_MAX_SCANOUT 4
-
 struct virtio_gpu_simple_resource {
     uint32_t resource_id;
     uint32_t width;
     uint32_t height;
     uint32_t format;
+    uint64_t *addrs;
     struct iovec *iov;
     unsigned int iov_cnt;
     uint32_t scanout_bitmask;
     pixman_image_t *image;
+    uint64_t hostmem;
     QTAILQ_ENTRY(virtio_gpu_simple_resource) next;
 };
 
@@ -48,6 +49,7 @@ struct virtio_gpu_scanout {
     int x, y;
     int invalidate;
     uint32_t resource_id;
+    struct virtio_gpu_update_cursor cursor;
     QEMUCursor *current_cursor;
 };
 
@@ -67,6 +69,7 @@ enum virtio_gpu_conf_flags {
     (_cfg.flags & (1 << VIRTIO_GPU_FLAG_STATS_ENABLED))
 
 struct virtio_gpu_conf {
+    uint64_t max_hostmem;
     uint32_t max_outputs;
     uint32_t flags;
 };
@@ -98,16 +101,17 @@ typedef struct VirtIOGPU {
     QTAILQ_HEAD(, virtio_gpu_ctrl_command) cmdq;
     QTAILQ_HEAD(, virtio_gpu_ctrl_command) fenceq;
 
-    struct virtio_gpu_scanout scanout[VIRTIO_GPU_MAX_SCANOUT];
-    struct virtio_gpu_requested_state req_state[VIRTIO_GPU_MAX_SCANOUT];
+    struct virtio_gpu_scanout scanout[VIRTIO_GPU_MAX_SCANOUTS];
+    struct virtio_gpu_requested_state req_state[VIRTIO_GPU_MAX_SCANOUTS];
 
     struct virtio_gpu_conf conf;
+    uint64_t hostmem;
     int enabled_output_bitmask;
     struct virtio_gpu_config virtio_config;
 
     bool use_virgl_renderer;
     bool renderer_inited;
-    bool renderer_blocked;
+    int renderer_blocked;
     QEMUTimer *fence_poll;
     QEMUTimer *print_stats;
 
@@ -118,6 +122,8 @@ typedef struct VirtIOGPU {
         uint32_t req_3d;
         uint32_t bytes_3d;
     } stats;
+
+    Error *migration_blocker;
 } VirtIOGPU;
 
 extern const GraphicHwOps virtio_gpu_ops;
@@ -152,7 +158,7 @@ void virtio_gpu_get_display_info(VirtIOGPU *g,
                                  struct virtio_gpu_ctrl_command *cmd);
 int virtio_gpu_create_mapping_iov(struct virtio_gpu_resource_attach_backing *ab,
                                   struct virtio_gpu_ctrl_command *cmd,
-                                  struct iovec **iov);
+                                  uint64_t **addr, struct iovec **iov);
 void virtio_gpu_cleanup_mapping_iov(struct iovec *iov, uint32_t count);
 void virtio_gpu_process_cmdq(VirtIOGPU *g);
 

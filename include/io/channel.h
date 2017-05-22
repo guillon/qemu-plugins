@@ -18,11 +18,13 @@
  *
  */
 
-#ifndef QIO_CHANNEL_H__
-#define QIO_CHANNEL_H__
+#ifndef QIO_CHANNEL_H
+#define QIO_CHANNEL_H
 
 #include "qemu-common.h"
 #include "qom/object.h"
+#include "qemu/coroutine.h"
+#include "block/aio.h"
 
 #define TYPE_QIO_CHANNEL "qio-channel"
 #define QIO_CHANNEL(obj)                                    \
@@ -40,8 +42,9 @@ typedef struct QIOChannelClass QIOChannelClass;
 typedef enum QIOChannelFeature QIOChannelFeature;
 
 enum QIOChannelFeature {
-    QIO_CHANNEL_FEATURE_FD_PASS  = (1 << 0),
-    QIO_CHANNEL_FEATURE_SHUTDOWN = (1 << 1),
+    QIO_CHANNEL_FEATURE_FD_PASS,
+    QIO_CHANNEL_FEATURE_SHUTDOWN,
+    QIO_CHANNEL_FEATURE_LISTEN,
 };
 
 
@@ -78,6 +81,10 @@ typedef gboolean (*QIOChannelFunc)(QIOChannel *ioc,
 struct QIOChannel {
     Object parent;
     unsigned int features; /* bitmask of QIOChannelFeatures */
+    char *name;
+    AioContext *ctx;
+    Coroutine *read_coroutine;
+    Coroutine *write_coroutine;
 #ifdef _WIN32
     HANDLE event; /* For use with GSource on Win32 */
 #endif
@@ -130,6 +137,11 @@ struct QIOChannelClass {
                      off_t offset,
                      int whence,
                      Error **errp);
+    void (*io_set_aio_fd_handler)(QIOChannel *ioc,
+                                  AioContext *ctx,
+                                  IOHandler *io_read,
+                                  IOHandler *io_write,
+                                  void *opaque);
 };
 
 /* General I/O handling functions */
@@ -146,6 +158,28 @@ struct QIOChannelClass {
  */
 bool qio_channel_has_feature(QIOChannel *ioc,
                              QIOChannelFeature feature);
+
+/**
+ * qio_channel_set_feature:
+ * @ioc: the channel object
+ * @feature: the feature to set support for
+ *
+ * Add channel support for the feature named in @feature.
+ */
+void qio_channel_set_feature(QIOChannel *ioc,
+                             QIOChannelFeature feature);
+
+/**
+ * qio_channel_set_name:
+ * @ioc: the channel object
+ * @name: the name of the channel
+ *
+ * Sets the name of the channel, which serves as an aid
+ * to debugging. The name is used when creating GSource
+ * watches for this channel.
+ */
+void qio_channel_set_name(QIOChannel *ioc,
+                          const char *name);
 
 /**
  * qio_channel_readv_full:
@@ -473,13 +507,50 @@ guint qio_channel_add_watch(QIOChannel *ioc,
 
 
 /**
+ * qio_channel_attach_aio_context:
+ * @ioc: the channel object
+ * @ctx: the #AioContext to set the handlers on
+ *
+ * Request that qio_channel_yield() sets I/O handlers on
+ * the given #AioContext.  If @ctx is %NULL, qio_channel_yield()
+ * uses QEMU's main thread event loop.
+ *
+ * You can move a #QIOChannel from one #AioContext to another even if
+ * I/O handlers are set for a coroutine.  However, #QIOChannel provides
+ * no synchronization between the calls to qio_channel_yield() and
+ * qio_channel_attach_aio_context().
+ *
+ * Therefore you should first call qio_channel_detach_aio_context()
+ * to ensure that the coroutine is not entered concurrently.  Then,
+ * while the coroutine has yielded, call qio_channel_attach_aio_context(),
+ * and then aio_co_schedule() to place the coroutine on the new
+ * #AioContext.  The calls to qio_channel_detach_aio_context()
+ * and qio_channel_attach_aio_context() should be protected with
+ * aio_context_acquire() and aio_context_release().
+ */
+void qio_channel_attach_aio_context(QIOChannel *ioc,
+                                    AioContext *ctx);
+
+/**
+ * qio_channel_detach_aio_context:
+ * @ioc: the channel object
+ *
+ * Disable any I/O handlers set by qio_channel_yield().  With the
+ * help of aio_co_schedule(), this allows moving a coroutine that was
+ * paused by qio_channel_yield() to another context.
+ */
+void qio_channel_detach_aio_context(QIOChannel *ioc);
+
+/**
  * qio_channel_yield:
  * @ioc: the channel object
  * @condition: the I/O condition to wait for
  *
- * Yields execution from the current coroutine until
- * the condition indicated by @condition becomes
- * available.
+ * Yields execution from the current coroutine until the condition
+ * indicated by @condition becomes available.  @condition must
+ * be either %G_IO_IN or %G_IO_OUT; it cannot contain both.  In
+ * addition, no two coroutine can be waiting on the same condition
+ * and channel at the same time.
  *
  * This must only be called from coroutine context
  */
@@ -501,4 +572,23 @@ void qio_channel_yield(QIOChannel *ioc,
 void qio_channel_wait(QIOChannel *ioc,
                       GIOCondition condition);
 
-#endif /* QIO_CHANNEL_H__ */
+/**
+ * qio_channel_set_aio_fd_handler:
+ * @ioc: the channel object
+ * @ctx: the AioContext to set the handlers on
+ * @io_read: the read handler
+ * @io_write: the write handler
+ * @opaque: the opaque value passed to the handler
+ *
+ * This is used internally by qio_channel_yield().  It can
+ * be used by channel implementations to forward the handlers
+ * to another channel (e.g. from #QIOChannelTLS to the
+ * underlying socket).
+ */
+void qio_channel_set_aio_fd_handler(QIOChannel *ioc,
+                                    AioContext *ctx,
+                                    IOHandler *io_read,
+                                    IOHandler *io_write,
+                                    void *opaque);
+
+#endif /* QIO_CHANNEL_H */

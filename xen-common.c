@@ -25,7 +25,7 @@
     do { } while (0)
 #endif
 
-static int store_dev_info(int domid, CharDriverState *cs, const char *string)
+static int store_dev_info(int domid, Chardev *cs, const char *string)
 {
     struct xs_handle *xs = NULL;
     char *path = NULL;
@@ -74,7 +74,7 @@ out:
     return ret;
 }
 
-void xenstore_store_pv_console_info(int i, CharDriverState *chr)
+void xenstore_store_pv_console_info(int i, Chardev *chr)
 {
     if (i == 0) {
         store_dev_info(xen_domid, chr, "/console");
@@ -116,12 +116,12 @@ static int xen_init(MachineState *ms)
 {
     xen_xc = xc_interface_open(0, 0, 0);
     if (xen_xc == NULL) {
-        xen_be_printf(NULL, 0, "can't open xen interface\n");
+        xen_pv_printf(NULL, 0, "can't open xen interface\n");
         return -1;
     }
     xen_fmem = xenforeignmemory_open(0, 0);
     if (xen_fmem == NULL) {
-        xen_be_printf(NULL, 0, "can't open xen fmem interface\n");
+        xen_pv_printf(NULL, 0, "can't open xen fmem interface\n");
         xc_interface_close(xen_xc);
         return -1;
     }

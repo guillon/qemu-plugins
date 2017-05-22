@@ -1,5 +1,5 @@
-#ifndef TARGET_SYSCALL_H
-#define TARGET_SYSCALL_H
+#ifndef ALPHA_TARGET_SYSCALL_H
+#define ALPHA_TARGET_SYSCALL_H
 
 /* default linux values for the selectors */
 #define __USER_DS	(1)
@@ -235,6 +235,8 @@ struct target_pt_regs {
 #define TARGET_ENOTRECOVERABLE	137
 #undef TARGET_ERFKILL
 #define TARGET_ERFKILL		138
+#undef TARGET_EHWPOISON
+#define TARGET_EHWPOISON        139
 
 // For sys_osf_getsysinfo
 #define TARGET_GSI_UACPROC		8
@@ -259,4 +261,4 @@ struct target_pt_regs {
 #define TARGET_MLOCKALL_MCL_CURRENT     0x2000
 #define TARGET_MLOCKALL_MCL_FUTURE      0x4000
 
-#endif  /* TARGET_SYSCALL_H */
+#endif /* ALPHA_TARGET_SYSCALL_H */

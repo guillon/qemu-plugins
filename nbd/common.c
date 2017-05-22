@@ -23,7 +23,6 @@
 ssize_t nbd_wr_syncv(QIOChannel *ioc,
                      struct iovec *iov,
                      size_t niov,
-                     size_t offset,
                      size_t length,
                      bool do_read)
 {
@@ -33,9 +32,7 @@ ssize_t nbd_wr_syncv(QIOChannel *ioc,
     struct iovec *local_iov_head = local_iov;
     unsigned int nlocal_iov = niov;
 
-    nlocal_iov = iov_copy(local_iov, nlocal_iov,
-                          iov, niov,
-                          offset, length);
+    nlocal_iov = iov_copy(local_iov, nlocal_iov, iov, niov, 0, length);
 
     while (nlocal_iov > 0) {
         ssize_t len;
@@ -46,14 +43,7 @@ ssize_t nbd_wr_syncv(QIOChannel *ioc,
         }
         if (len == QIO_CHANNEL_ERR_BLOCK) {
             if (qemu_in_coroutine()) {
-                /* XXX figure out if we can create a variant on
-                 * qio_channel_yield() that works with AIO contexts
-                 * and consider using that in this branch */
-                qemu_coroutine_yield();
-            } else if (done) {
-                /* XXX this is needed by nbd_reply_ready.  */
-                qio_channel_wait(ioc,
-                                 do_read ? G_IO_IN : G_IO_OUT);
+                qio_channel_yield(ioc, do_read ? G_IO_IN : G_IO_OUT);
             } else {
                 return -EAGAIN;
             }
@@ -81,15 +71,13 @@ ssize_t nbd_wr_syncv(QIOChannel *ioc,
 }
 
 
-void nbd_tls_handshake(Object *src,
-                       Error *err,
+void nbd_tls_handshake(QIOTask *task,
                        void *opaque)
 {
     struct NBDTLSHandshakeData *data = opaque;
 
-    if (err) {
-        TRACE("TLS failed %s", error_get_pretty(err));
-        data->error = error_copy(err);
+    if (qio_task_propagate_error(task, &data->error)) {
+        TRACE("TLS failed %s", error_get_pretty(data->error));
     }
     data->complete = true;
     g_main_loop_quit(data->loop);

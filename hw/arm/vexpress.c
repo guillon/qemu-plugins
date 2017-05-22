@@ -39,6 +39,7 @@
 #include "sysemu/device_tree.h"
 #include "qemu/error-report.h"
 #include <libfdt.h>
+#include "hw/char/pl011.h"
 
 #define VEXPRESS_BOARD_ID 0x8e0
 #define VEXPRESS_FLASH_SIZE (64 * 1024 * 1024)
@@ -451,6 +452,7 @@ static int add_virtio_mmio_node(void *fdt, uint32_t acells, uint32_t scells,
                                        acells, addr, scells, size);
     qemu_fdt_setprop_cells(fdt, nodename, "interrupt-parent", intc);
     qemu_fdt_setprop_cells(fdt, nodename, "interrupts", 0, irq, 1);
+    qemu_fdt_setprop(fdt, nodename, "dma-coherent", NULL, 0);
     g_free(nodename);
     if (rc) {
         return -1;
@@ -631,10 +633,10 @@ static void vexpress_common_init(MachineState *machine)
     sysbus_create_simple("pl050_keyboard", map[VE_KMI0], pic[12]);
     sysbus_create_simple("pl050_mouse", map[VE_KMI1], pic[13]);
 
-    sysbus_create_simple("pl011", map[VE_UART0], pic[5]);
-    sysbus_create_simple("pl011", map[VE_UART1], pic[6]);
-    sysbus_create_simple("pl011", map[VE_UART2], pic[7]);
-    sysbus_create_simple("pl011", map[VE_UART3], pic[8]);
+    pl011_create(map[VE_UART0], pic[5], serial_hds[0]);
+    pl011_create(map[VE_UART1], pic[6], serial_hds[1]);
+    pl011_create(map[VE_UART2], pic[7], serial_hds[2]);
+    pl011_create(map[VE_UART3], pic[8], serial_hds[3]);
 
     sysbus_create_simple("sp804", map[VE_TIMER01], pic[2]);
     sysbus_create_simple("sp804", map[VE_TIMER23], pic[3]);
@@ -750,7 +752,6 @@ static void vexpress_class_init(ObjectClass *oc, void *data)
 
     mc->desc = "ARM Versatile Express";
     mc->init = vexpress_common_init;
-    mc->block_default_type = IF_SCSI;
     mc->max_cpus = 4;
 }
 

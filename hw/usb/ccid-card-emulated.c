@@ -407,7 +407,7 @@ static int init_event_notifier(EmulatedState *card)
         DPRINTF(card, 2, "event notifier creation failed\n");
         return -1;
     }
-    event_notifier_set_handler(&card->notifier, false, card_event_handler);
+    event_notifier_set_handler(&card->notifier, card_event_handler);
     return 0;
 }
 
@@ -547,7 +547,7 @@ static int emulated_initfn(CCIDCardState *base)
     return 0;
 }
 
-static int emulated_exitfn(CCIDCardState *base)
+static void emulated_exitfn(CCIDCardState *base)
 {
     EmulatedState *card = EMULATED_CCID_CARD(base);
     VEvent *vevent = vevent_new(VEVENT_LAST, NULL, NULL);
@@ -564,7 +564,6 @@ static int emulated_exitfn(CCIDCardState *base)
     qemu_mutex_destroy(&card->handle_apdu_mutex);
     qemu_mutex_destroy(&card->vreader_mutex);
     qemu_mutex_destroy(&card->event_list_mutex);
-    return 0;
 }
 
 static Property emulated_card_properties[] = {

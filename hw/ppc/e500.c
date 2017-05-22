@@ -196,7 +196,7 @@ static int create_devtree_etsec(SysBusDevice *sbdev, PlatformDevtreeData *data)
     return 0;
 }
 
-static int sysbus_device_create_devtree(SysBusDevice *sbdev, void *opaque)
+static void sysbus_device_create_devtree(SysBusDevice *sbdev, void *opaque)
 {
     PlatformDevtreeData *data = opaque;
     bool matched = false;
@@ -211,8 +211,6 @@ static int sysbus_device_create_devtree(SysBusDevice *sbdev, void *opaque)
                      qdev_fw_name(DEVICE(sbdev)));
         exit(1);
     }
-
-    return 0;
 }
 
 static void platform_bus_create_devtree(PPCE500Params *params, void *fdt,
@@ -601,7 +599,7 @@ static int ppce500_prep_device_tree(MachineState *machine,
 }
 
 /* Create -kernel TLB entries for BookE.  */
-static inline hwaddr booke206_page_size_to_tlb(uint64_t size)
+hwaddr booke206_page_size_to_tlb(uint64_t size)
 {
     return 63 - clz64(size >> 10);
 }
@@ -829,6 +827,12 @@ void ppce500_init(MachineState *machine, PPCE500Params *params)
         env = &cpu->env;
         cs = CPU(cpu);
 
+        if (env->mmu_model != POWERPC_MMU_BOOKE206) {
+            fprintf(stderr, "MMU model %i not supported by this machine.\n",
+                env->mmu_model);
+            exit(1);
+        }
+
         if (!firstenv) {
             firstenv = env;
         }
@@ -1051,27 +1055,18 @@ void ppce500_init(MachineState *machine, PPCE500Params *params)
     boot_info->dt_size = dt_size;
 }
 
-static int e500_ccsr_initfn(SysBusDevice *dev)
+static void e500_ccsr_initfn(Object *obj)
 {
-    PPCE500CCSRState *ccsr;
-
-    ccsr = CCSR(dev);
-    memory_region_init(&ccsr->ccsr_space, OBJECT(ccsr), "e500-ccsr",
+    PPCE500CCSRState *ccsr = CCSR(obj);
+    memory_region_init(&ccsr->ccsr_space, obj, "e500-ccsr",
                        MPC8544_CCSRBAR_SIZE);
-    return 0;
-}
-
-static void e500_ccsr_class_init(ObjectClass *klass, void *data)
-{
-    SysBusDeviceClass *k = SYS_BUS_DEVICE_CLASS(klass);
-    k->init = e500_ccsr_initfn;
 }
 
 static const TypeInfo e500_ccsr_info = {
     .name          = TYPE_CCSR,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(PPCE500CCSRState),
-    .class_init    = e500_ccsr_class_init,
+    .instance_init = e500_ccsr_initfn,
 };
 
 static void e500_register_types(void)

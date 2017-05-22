@@ -19,7 +19,6 @@
  */
 
 #include "qemu/osdep.h"
-#include <glib.h>
 
 #include "io/task.h"
 #include "qapi/error.h"
@@ -51,14 +50,13 @@ struct TestTaskData {
 };
 
 
-static void task_callback(Object *source,
-                          Error *err,
+static void task_callback(QIOTask *task,
                           gpointer opaque)
 {
     struct TestTaskData *data = opaque;
 
-    data->source = source;
-    data->err = err;
+    data->source = qio_task_get_source(task);
+    qio_task_propagate_error(task, &data->err);
 }
 
 
@@ -77,7 +75,6 @@ static void test_task_complete(void)
     g_assert(obj == src);
 
     object_unref(obj);
-    object_unref(src);
 
     g_assert(data.source == obj);
     g_assert(data.err == NULL);
@@ -111,7 +108,7 @@ static void test_task_data_free(void)
 }
 
 
-static void test_task_error(void)
+static void test_task_failure(void)
 {
     QIOTask *task;
     Object *obj = object_new(TYPE_DUMMY);
@@ -122,15 +119,15 @@ static void test_task_error(void)
 
     error_setg(&err, "Some error");
 
-    qio_task_abort(task, err);
+    qio_task_set_error(task, err);
+    qio_task_complete(task);
 
-    error_free(err);
     object_unref(obj);
 
     g_assert(data.source == obj);
     g_assert(data.err == err);
     g_assert(data.freed == false);
-
+    error_free(data.err);
 }
 
 
@@ -143,31 +140,28 @@ struct TestThreadWorkerData {
     GMainLoop *loop;
 };
 
-static int test_task_thread_worker(QIOTask *task,
-                                   Error **errp,
-                                   gpointer opaque)
+static void test_task_thread_worker(QIOTask *task,
+                                    gpointer opaque)
 {
     struct TestThreadWorkerData *data = opaque;
 
     data->worker = g_thread_self();
 
     if (data->fail) {
-        error_setg(errp, "Testing fail");
-        return -1;
+        Error *err = NULL;
+        error_setg(&err, "Testing fail");
+        qio_task_set_error(task, err);
     }
-
-    return 0;
 }
 
 
-static void test_task_thread_callback(Object *source,
-                                      Error *err,
+static void test_task_thread_callback(QIOTask *task,
                                       gpointer opaque)
 {
     struct TestThreadWorkerData *data = opaque;
 
-    data->source = source;
-    data->err = err;
+    data->source = qio_task_get_source(task);
+    qio_task_propagate_error(task, &data->err);
 
     data->complete = g_thread_self();
 
@@ -215,7 +209,7 @@ static void test_task_thread_complete(void)
 }
 
 
-static void test_task_thread_error(void)
+static void test_task_thread_failure(void)
 {
     QIOTask *task;
     Object *obj = object_new(TYPE_DUMMY);
@@ -244,6 +238,8 @@ static void test_task_thread_error(void)
     g_assert(data.source == obj);
     g_assert(data.err != NULL);
 
+    error_free(data.err);
+
     self = g_thread_self();
 
     /* Make sure the test_task_thread_worker actually got
@@ -263,8 +259,8 @@ int main(int argc, char **argv)
     type_register_static(&dummy_info);
     g_test_add_func("/crypto/task/complete", test_task_complete);
     g_test_add_func("/crypto/task/datafree", test_task_data_free);
-    g_test_add_func("/crypto/task/error", test_task_error);
+    g_test_add_func("/crypto/task/failure", test_task_failure);
     g_test_add_func("/crypto/task/thread_complete", test_task_thread_complete);
-    g_test_add_func("/crypto/task/thread_error", test_task_thread_error);
+    g_test_add_func("/crypto/task/thread_failure", test_task_thread_failure);
     return g_test_run();
 }

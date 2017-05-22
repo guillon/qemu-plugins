@@ -39,6 +39,7 @@
 #include "hw/qdev-properties.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
+#include "qemu/log.h"
 
 //#define DEBUG_SD 1
 
@@ -123,7 +124,6 @@ struct SDState {
     qemu_irq readonly_cb;
     qemu_irq inserted_cb;
     BlockBackend *blk;
-    uint8_t *buf;
 
     bool enable;
 };
@@ -458,7 +458,7 @@ static bool sd_get_readonly(SDState *sd)
     return sd->wp_switch;
 }
 
-static void sd_cardchange(void *opaque, bool load)
+static void sd_cardchange(void *opaque, bool load, Error **errp)
 {
     SDState *sd = opaque;
     DeviceState *dev = DEVICE(sd);
@@ -551,7 +551,7 @@ static const VMStateDescription sd_vmstate = {
         VMSTATE_UINT64(data_start, SDState),
         VMSTATE_UINT32(data_offset, SDState),
         VMSTATE_UINT8_ARRAY(data, SDState, 512),
-        VMSTATE_BUFFER_POINTER_UNSAFE(buf, SDState, 1, 512),
+        VMSTATE_UNUSED_V(1, 512),
         VMSTATE_BOOL(enable, SDState),
         VMSTATE_END_OF_LIST()
     },
@@ -1577,57 +1577,17 @@ send_response:
 
 static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
 {
-    uint64_t end = addr + len;
-
     DPRINTF("sd_blk_read: addr = 0x%08llx, len = %d\n",
             (unsigned long long) addr, len);
-    if (!sd->blk || blk_read(sd->blk, addr >> 9, sd->buf, 1) < 0) {
+    if (!sd->blk || blk_pread(sd->blk, addr, sd->data, len) < 0) {
         fprintf(stderr, "sd_blk_read: read error on host side\n");
-        return;
     }
-
-    if (end > (addr & ~511) + 512) {
-        memcpy(sd->data, sd->buf + (addr & 511), 512 - (addr & 511));
-
-        if (blk_read(sd->blk, end >> 9, sd->buf, 1) < 0) {
-            fprintf(stderr, "sd_blk_read: read error on host side\n");
-            return;
-        }
-        memcpy(sd->data + 512 - (addr & 511), sd->buf, end & 511);
-    } else
-        memcpy(sd->data, sd->buf + (addr & 511), len);
 }
 
 static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
 {
-    uint64_t end = addr + len;
-
-    if ((addr & 511) || len < 512)
-        if (!sd->blk || blk_read(sd->blk, addr >> 9, sd->buf, 1) < 0) {
-            fprintf(stderr, "sd_blk_write: read error on host side\n");
-            return;
-        }
-
-    if (end > (addr & ~511) + 512) {
-        memcpy(sd->buf + (addr & 511), sd->data, 512 - (addr & 511));
-        if (blk_write(sd->blk, addr >> 9, sd->buf, 1) < 0) {
-            fprintf(stderr, "sd_blk_write: write error on host side\n");
-            return;
-        }
-
-        if (blk_read(sd->blk, end >> 9, sd->buf, 1) < 0) {
-            fprintf(stderr, "sd_blk_write: read error on host side\n");
-            return;
-        }
-        memcpy(sd->buf, sd->data + 512 - (addr & 511), end & 511);
-        if (blk_write(sd->blk, end >> 9, sd->buf, 1) < 0) {
-            fprintf(stderr, "sd_blk_write: write error on host side\n");
-        }
-    } else {
-        memcpy(sd->buf + (addr & 511), sd->data, len);
-        if (!sd->blk || blk_write(sd->blk, addr >> 9, sd->buf, 1) < 0) {
-            fprintf(stderr, "sd_blk_write: write error on host side\n");
-        }
+    if (!sd->blk || blk_pwrite(sd->blk, addr, sd->data, len, 0) < 0) {
+        fprintf(stderr, "sd_blk_write: write error on host side\n");
     }
 }
 
@@ -1916,18 +1876,30 @@ static void sd_instance_init(Object *obj)
     sd->ocr_power_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sd_ocr_powerup, sd);
 }
 
+static void sd_instance_finalize(Object *obj)
+{
+    SDState *sd = SD_CARD(obj);
+
+    timer_del(sd->ocr_power_timer);
+    timer_free(sd->ocr_power_timer);
+}
+
 static void sd_realize(DeviceState *dev, Error **errp)
 {
     SDState *sd = SD_CARD(dev);
+    int ret;
 
     if (sd->blk && blk_is_read_only(sd->blk)) {
         error_setg(errp, "Cannot use read-only drive as SD card");
         return;
     }
 
-    sd->buf = blk_blockalign(sd->blk, 512);
-
     if (sd->blk) {
+        ret = blk_set_perm(sd->blk, BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE,
+                           BLK_PERM_ALL, errp);
+        if (ret < 0) {
+            return;
+        }
         blk_set_dev_ops(sd->blk, &sd_block_ops, sd);
     }
 }
@@ -1969,6 +1941,7 @@ static const TypeInfo sd_info = {
     .class_size = sizeof(SDCardClass),
     .class_init = sd_class_init,
     .instance_init = sd_instance_init,
+    .instance_finalize = sd_instance_finalize,
 };
 
 static void sd_register_types(void)

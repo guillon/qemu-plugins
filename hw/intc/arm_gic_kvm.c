@@ -21,26 +21,14 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qemu-common.h"
+#include "cpu.h"
 #include "hw/sysbus.h"
 #include "migration/migration.h"
 #include "sysemu/kvm.h"
 #include "kvm_arm.h"
 #include "gic_internal.h"
 #include "vgic_common.h"
-
-//#define DEBUG_GIC_KVM
-
-#ifdef DEBUG_GIC_KVM
-static const int debug_gic_kvm = 1;
-#else
-static const int debug_gic_kvm = 0;
-#endif
-
-#define DPRINTF(fmt, ...) do { \
-        if (debug_gic_kvm) { \
-            printf("arm_gic: " fmt , ## __VA_ARGS__); \
-        } \
-    } while (0)
 
 #define TYPE_KVM_ARM_GIC "kvm-arm-gic"
 #define KVM_ARM_GIC(obj) \
@@ -522,6 +510,17 @@ static void kvm_arm_gic_realize(DeviceState *dev, Error **errp)
         return;
     }
 
+    if (!kvm_arm_gic_can_save_restore(s)) {
+        error_setg(&s->migration_blocker, "This operating system kernel does "
+                                          "not support vGICv2 migration");
+        migrate_add_blocker(s->migration_blocker, &local_err);
+        if (local_err) {
+            error_propagate(errp, local_err);
+            error_free(s->migration_blocker);
+            return;
+        }
+    }
+
     gic_init_irqs_and_mmio(s, kvm_arm_gicv2_set_irq, NULL);
 
     for (i = 0; i < s->num_irq - GIC_INTERNAL; i++) {
@@ -570,10 +569,16 @@ static void kvm_arm_gic_realize(DeviceState *dev, Error **errp)
                             KVM_VGIC_V2_ADDR_TYPE_CPU,
                             s->dev_fd);
 
-    if (!kvm_arm_gic_can_save_restore(s)) {
-        error_setg(&s->migration_blocker, "This operating system kernel does "
-                                          "not support vGICv2 migration");
-        migrate_add_blocker(s->migration_blocker);
+    if (kvm_has_gsi_routing()) {
+        /* set up irq routing */
+        kvm_init_irq_routing(kvm_state);
+        for (i = 0; i < s->num_irq - GIC_INTERNAL; ++i) {
+            kvm_irqchip_add_irq_route(kvm_state, i, 0, i);
+        }
+
+        kvm_gsi_routing_allowed = true;
+
+        kvm_irqchip_commit_routes(kvm_state);
     }
 }
 

@@ -22,16 +22,18 @@
 #include "qapi/error.h"
 #include "vnc.h"
 #include "io/channel-websock.h"
+#include "qemu/bswap.h"
 
-static void vncws_tls_handshake_done(Object *source,
-                                     Error *err,
+static void vncws_tls_handshake_done(QIOTask *task,
                                      gpointer user_data)
 {
     VncState *vs = user_data;
+    Error *err = NULL;
 
-    if (err) {
+    if (qio_task_propagate_error(task, &err)) {
         VNC_DEBUG("Handshake failed %s\n", error_get_pretty(err));
         vnc_client_error(vs);
+        error_free(err);
     } else {
         VNC_DEBUG("TLS handshake complete, starting websocket handshake\n");
         vs->ioc_tag = qio_channel_add_watch(
@@ -66,6 +68,8 @@ gboolean vncws_tls_handshake_io(QIOChannel *ioc G_GNUC_UNUSED,
         return TRUE;
     }
 
+    qio_channel_set_name(QIO_CHANNEL(tls), "vnc-ws-server-tls");
+
     VNC_DEBUG("Start TLS WS handshake process\n");
     object_unref(OBJECT(vs->ioc));
     vs->ioc = QIO_CHANNEL(tls);
@@ -80,18 +84,19 @@ gboolean vncws_tls_handshake_io(QIOChannel *ioc G_GNUC_UNUSED,
 }
 
 
-static void vncws_handshake_done(Object *source,
-                                 Error *err,
+static void vncws_handshake_done(QIOTask *task,
                                  gpointer user_data)
 {
     VncState *vs = user_data;
+    Error *err = NULL;
 
-    if (err) {
+    if (qio_task_propagate_error(task, &err)) {
         VNC_DEBUG("Websock handshake failed %s\n", error_get_pretty(err));
         vnc_client_error(vs);
+        error_free(err);
     } else {
         VNC_DEBUG("Websock handshake complete, starting VNC protocol\n");
-        vnc_init_state(vs);
+        vnc_start_protocol(vs);
         vs->ioc_tag = qio_channel_add_watch(
             vs->ioc, G_IO_IN, vnc_client_io, vs, NULL);
     }
@@ -112,6 +117,7 @@ gboolean vncws_handshake_io(QIOChannel *ioc G_GNUC_UNUSED,
     }
 
     wioc = qio_channel_websock_new_server(vs->ioc);
+    qio_channel_set_name(QIO_CHANNEL(wioc), "vnc-ws-server-websock");
 
     object_unref(OBJECT(vs->ioc));
     vs->ioc = QIO_CHANNEL(wioc);

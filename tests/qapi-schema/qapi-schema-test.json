@@ -3,6 +3,13 @@
 # This file is a stress test of supported qapi constructs that must
 # parse and compile correctly.
 
+# Whitelists to permit QAPI rule violations
+{ 'pragma': {
+    # Commands allowed to return a non-dictionary:
+    'returns-whitelist': [
+        'guest-get-time',
+        'guest-sync' ] } }
+
 { 'struct': 'TestStruct',
   'data': { 'integer': 'int', 'boolean': 'bool', 'string': 'str' } }
 
@@ -127,6 +134,8 @@
 { 'command': 'guest-get-time', 'data': {'a': 'int', '*b': 'int' },
   'returns': 'int' }
 { 'command': 'guest-sync', 'data': { 'arg': 'any' }, 'returns': 'any' }
+{ 'command': 'boxed-struct', 'boxed': true, 'data': 'UserDefZero' }
+{ 'command': 'boxed-union', 'data': 'UserDefNativeListUnion', 'boxed': true }
 
 # For testing integer range flattening in opts-visitor. The following schema
 # corresponds to the option format:
@@ -154,6 +163,8 @@
   'data': { '*a': 'int', '*b': 'UserDefOne', 'c': 'str' } }
 { 'event': 'EVENT_D',
   'data': { 'a' : 'EventStructOne', 'b' : 'str', '*c': 'str', '*enum3': 'EnumOne' } }
+{ 'event': 'EVENT_E', 'boxed': true, 'data': 'UserDefZero' }
+{ 'event': 'EVENT_F', 'boxed': true, 'data': 'UserDefAlternate' }
 
 # test that we correctly compile downstream extensions, as well as munge
 # ticklish names

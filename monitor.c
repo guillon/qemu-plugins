@@ -23,6 +23,8 @@
  */
 #include "qemu/osdep.h"
 #include <dirent.h>
+#include "qemu-common.h"
+#include "cpu.h"
 #include "hw/hw.h"
 #include "monitor/qdev.h"
 #include "hw/usb.h"
@@ -38,6 +40,7 @@
 #include "sysemu/sysemu.h"
 #include "sysemu/numa.h"
 #include "monitor/monitor.h"
+#include "qemu/config-file.h"
 #include "qemu/readline.h"
 #include "ui/console.h"
 #include "ui/input.h"
@@ -48,27 +51,24 @@
 #include "sysemu/balloon.h"
 #include "qemu/timer.h"
 #include "migration/migration.h"
-#include "sysemu/kvm.h"
+#include "sysemu/hw_accel.h"
 #include "qemu/acl.h"
 #include "sysemu/tpm.h"
 #include "qapi/qmp/qerror.h"
-#include "qapi/qmp/qint.h"
-#include "qapi/qmp/qfloat.h"
-#include "qapi/qmp/qlist.h"
-#include "qapi/qmp/qbool.h"
-#include "qapi/qmp/qstring.h"
+#include "qapi/qmp/types.h"
 #include "qapi/qmp/qjson.h"
 #include "qapi/qmp/json-streamer.h"
 #include "qapi/qmp/json-parser.h"
-#include <qom/object_interfaces.h>
-#include "cpu.h"
-#include "trace.h"
+#include "qom/object_interfaces.h"
+#include "trace-root.h"
 #include "trace/control.h"
 #include "monitor/hmp-target.h"
 #ifdef CONFIG_TRACE_SIMPLE
 #include "trace/simple.h"
 #endif
 #include "exec/memory.h"
+#include "exec/exec-all.h"
+#include "qemu/log.h"
 #include "qmp-commands.h"
 #include "hmp.h"
 #include "qemu/thread.h"
@@ -76,15 +76,10 @@
 #include "qapi/qmp-event.h"
 #include "qapi-event.h"
 #include "qmp-introspect.h"
-#include "sysemu/block-backend.h"
 #include "sysemu/qtest.h"
+#include "sysemu/cpus.h"
 #include "qemu/cutils.h"
-
-/* for hmp_info_irq/pic */
-#if defined(TARGET_SPARC)
-#include "hw/sparc/sun4m.h"
-#endif
-#include "hw/lm32/lm32_pic.h"
+#include "qapi/qmp/dispatch.h"
 
 #if defined(TARGET_S390X)
 #include "hw/s390x/storage-keys.h"
@@ -129,13 +124,10 @@ typedef struct mon_cmd_t {
     const char *args_type;
     const char *params;
     const char *help;
-    union {
-        void (*cmd)(Monitor *mon, const QDict *qdict);
-        void (*cmd_new)(QDict *params, QObject **ret_data, Error **errp);
-    } mhandler;
-    /* @sub_table is a list of 2nd level of commands. If it do not exist,
-     * mhandler should be used. If it exist, sub_table[?].mhandler should be
-     * used, and mhandler of 1st level plays the role of help function.
+    void (*cmd)(Monitor *mon, const QDict *qdict);
+    /* @sub_table is a list of 2nd level of commands. If it does not exist,
+     * cmd should be used. If it exists, sub_table[?].cmd should be
+     * used, and cmd of 1st level plays the role of help function.
      */
     struct mon_cmd_t *sub_table;
     void (*command_completion)(ReadLineState *rs, int nb_args, const char *str);
@@ -168,14 +160,13 @@ struct MonFdset {
 };
 
 typedef struct {
-    QObject *id;
     JSONMessageParser parser;
     /*
      * When a client connects, we're in capabilities negotiation mode.
      * When command qmp_capabilities succeeds, we go into command
      * mode.
      */
-    bool in_command_mode;       /* are we in command mode? */
+    QmpCommandList *commands;
 } MonitorQMP;
 
 /*
@@ -195,7 +186,7 @@ typedef struct {
 } MonitorQAPIEventConf;
 
 struct Monitor {
-    CharDriverState *chr;
+    CharBackend chr;
     int reset_seen;
     int flags;
     int suspend_cnt;
@@ -231,7 +222,7 @@ static int mon_refcount;
 static mon_cmd_t mon_cmds[];
 static mon_cmd_t info_cmds[];
 
-static const mon_cmd_t qmp_cmds[];
+QmpCommandList qmp_commands, qmp_cap_negotiation_commands;
 
 Monitor *cur_mon;
 
@@ -308,7 +299,7 @@ static void monitor_flush_locked(Monitor *mon)
     len = qstring_get_length(mon->outbuf);
 
     if (len && !mon->mux_out) {
-        rc = qemu_chr_fe_write(mon->chr, (const uint8_t *) buf, len);
+        rc = qemu_chr_fe_write(&mon->chr, (const uint8_t *) buf, len);
         if ((rc < 0 && errno != EAGAIN) || (rc == len)) {
             /* all flushed or error */
             QDECREF(mon->outbuf);
@@ -316,14 +307,15 @@ static void monitor_flush_locked(Monitor *mon)
             return;
         }
         if (rc > 0) {
-            /* partinal write */
+            /* partial write */
             QString *tmp = qstring_from_str(buf + rc);
             QDECREF(mon->outbuf);
             mon->outbuf = tmp;
         }
         if (mon->out_watch == 0) {
-            mon->out_watch = qemu_chr_fe_add_watch(mon->chr, G_IO_OUT|G_IO_HUP,
-                                                   monitor_unblocked, mon);
+            mon->out_watch =
+                qemu_chr_fe_add_watch(&mon->chr, G_IO_OUT | G_IO_HUP,
+                                      monitor_unblocked, mon);
         }
     }
 }
@@ -403,49 +395,6 @@ static void monitor_json_emitter(Monitor *mon, const QObject *data)
     QDECREF(json);
 }
 
-static QDict *build_qmp_error_dict(Error *err)
-{
-    QObject *obj;
-
-    obj = qobject_from_jsonf("{ 'error': { 'class': %s, 'desc': %s } }",
-                             QapiErrorClass_lookup[error_get_class(err)],
-                             error_get_pretty(err));
-
-    return qobject_to_qdict(obj);
-}
-
-static void monitor_protocol_emitter(Monitor *mon, QObject *data,
-                                     Error *err)
-{
-    QDict *qmp;
-
-    trace_monitor_protocol_emitter(mon);
-
-    if (!err) {
-        /* success response */
-        qmp = qdict_new();
-        if (data) {
-            qobject_incref(data);
-            qdict_put_obj(qmp, "return", data);
-        } else {
-            /* return an empty QDict by default */
-            qdict_put(qmp, "return", qdict_new());
-        }
-    } else {
-        /* error response */
-        qmp = build_qmp_error_dict(err);
-    }
-
-    if (mon->qmp.id) {
-        qdict_put_obj(qmp, "id", mon->qmp.id);
-        mon->qmp.id = NULL;
-    }
-
-    monitor_json_emitter(mon, QOBJECT(qmp));
-    QDECREF(qmp);
-}
-
-
 static MonitorQAPIEventConf monitor_qapi_event_conf[QAPI_EVENT__MAX] = {
     /* Limit guest-triggerable events to 1 per second */
     [QAPI_EVENT_RTC_CHANGE]        = { 1000 * SCALE_MS },
@@ -468,7 +417,8 @@ static void monitor_qapi_event_emit(QAPIEvent event, QDict *qdict)
 
     trace_monitor_protocol_event_emit(event, qdict);
     QLIST_FOREACH(mon, &mon_list, entry) {
-        if (monitor_is_qmp(mon) && mon->qmp.in_command_mode) {
+        if (monitor_is_qmp(mon)
+            && mon->qmp.commands != &qmp_cap_negotiation_commands) {
             monitor_json_emitter(mon, QOBJECT(qdict));
         }
     }
@@ -617,11 +567,6 @@ static void monitor_qapi_event_init(void)
     qmp_event_set_func_emit(monitor_qapi_event_queue);
 }
 
-static void qmp_capabilities(QDict *params, QObject **ret_data, Error **errp)
-{
-    cur_mon->qmp.in_command_mode = true;
-}
-
 static void handle_hmp_command(Monitor *mon, const char *cmdline);
 
 static void monitor_data_init(Monitor *mon)
@@ -635,6 +580,11 @@ static void monitor_data_init(Monitor *mon)
 
 static void monitor_data_destroy(Monitor *mon)
 {
+    qemu_chr_fe_deinit(&mon->chr);
+    if (monitor_is_qmp(mon)) {
+        json_message_parser_destroy(&mon->qmp.parser);
+    }
+    g_free(mon->rs);
     QDECREF(mon->outbuf);
     qemu_mutex_destroy(&mon->out_lock);
 }
@@ -904,9 +854,16 @@ static void hmp_trace_event(Monitor *mon, const QDict *qdict)
 {
     const char *tp_name = qdict_get_str(qdict, "name");
     bool new_state = qdict_get_bool(qdict, "option");
+    bool has_vcpu = qdict_haskey(qdict, "vcpu");
+    int vcpu = qdict_get_try_int(qdict, "vcpu", 0);
     Error *local_err = NULL;
 
-    qmp_trace_event_set_state(tp_name, new_state, true, true, &local_err);
+    if (vcpu < 0) {
+        monitor_printf(mon, "argument vcpu must be positive");
+        return;
+    }
+
+    qmp_trace_event_set_state(tp_name, new_state, true, true, has_vcpu, vcpu, &local_err);
     if (local_err) {
         error_report_err(local_err);
     }
@@ -942,21 +899,28 @@ static void hmp_info_help(Monitor *mon, const QDict *qdict)
     help_cmd(mon, "info");
 }
 
-CommandInfoList *qmp_query_commands(Error **errp)
+static void query_commands_cb(QmpCommand *cmd, void *opaque)
 {
-    CommandInfoList *info, *cmd_list = NULL;
-    const mon_cmd_t *cmd;
+    CommandInfoList *info, **list = opaque;
 
-    for (cmd = qmp_cmds; cmd->name != NULL; cmd++) {
-        info = g_malloc0(sizeof(*info));
-        info->value = g_malloc0(sizeof(*info->value));
-        info->value->name = g_strdup(cmd->name);
-
-        info->next = cmd_list;
-        cmd_list = info;
+    if (!cmd->enabled) {
+        return;
     }
 
-    return cmd_list;
+    info = g_malloc0(sizeof(*info));
+    info->value = g_malloc0(sizeof(*info->value));
+    info->value->name = g_strdup(cmd->name);
+    info->next = *list;
+    *list = info;
+}
+
+CommandInfoList *qmp_query_commands(Error **errp)
+{
+    CommandInfoList *list = NULL;
+
+    qmp_for_each_command(cur_mon->qmp.commands, query_commands_cb, &list);
+
+    return list;
 }
 
 EventInfoList *qmp_query_events(Error **errp)
@@ -984,13 +948,90 @@ EventInfoList *qmp_query_events(Error **errp)
  * directly into QObject instead of first parsing it with
  * visit_type_SchemaInfoList() into a SchemaInfoList, then marshal it
  * to QObject with generated output marshallers, every time.  Instead,
- * we do it in test-qmp-input-visitor.c, just to make sure
+ * we do it in test-qobject-input-visitor.c, just to make sure
  * qapi-introspect.py's output actually conforms to the schema.
  */
 static void qmp_query_qmp_schema(QDict *qdict, QObject **ret_data,
                                  Error **errp)
 {
-    *ret_data = qobject_from_json(qmp_schema_json);
+    *ret_data = qobject_from_json(qmp_schema_json, &error_abort);
+}
+
+/*
+ * We used to define commands in qmp-commands.hx in addition to the
+ * QAPI schema.  This permitted defining some of them only in certain
+ * configurations.  query-commands has always reflected that (good,
+ * because it lets QMP clients figure out what's actually available),
+ * while query-qmp-schema never did (not so good).  This function is a
+ * hack to keep the configuration-specific commands defined exactly as
+ * before, even though qmp-commands.hx is gone.
+ *
+ * FIXME Educate the QAPI schema on configuration-specific commands,
+ * and drop this hack.
+ */
+static void qmp_unregister_commands_hack(void)
+{
+#ifndef CONFIG_SPICE
+    qmp_unregister_command(&qmp_commands, "query-spice");
+#endif
+#ifndef TARGET_I386
+    qmp_unregister_command(&qmp_commands, "rtc-reset-reinjection");
+#endif
+#ifndef TARGET_S390X
+    qmp_unregister_command(&qmp_commands, "dump-skeys");
+#endif
+#ifndef TARGET_ARM
+    qmp_unregister_command(&qmp_commands, "query-gic-capabilities");
+#endif
+#if !defined(TARGET_S390X) && !defined(TARGET_I386)
+    qmp_unregister_command(&qmp_commands, "query-cpu-model-expansion");
+#endif
+#if !defined(TARGET_S390X)
+    qmp_unregister_command(&qmp_commands, "query-cpu-model-baseline");
+    qmp_unregister_command(&qmp_commands, "query-cpu-model-comparison");
+#endif
+#if !defined(TARGET_PPC) && !defined(TARGET_ARM) && !defined(TARGET_I386) \
+    && !defined(TARGET_S390X)
+    qmp_unregister_command(&qmp_commands, "query-cpu-definitions");
+#endif
+}
+
+void monitor_init_qmp_commands(void)
+{
+    /*
+     * Two command lists:
+     * - qmp_commands contains all QMP commands
+     * - qmp_cap_negotiation_commands contains just
+     *   "qmp_capabilities", to enforce capability negotiation
+     */
+
+    qmp_init_marshal(&qmp_commands);
+
+    qmp_register_command(&qmp_commands, "query-qmp-schema",
+                         qmp_query_qmp_schema,
+                         QCO_NO_OPTIONS);
+    qmp_register_command(&qmp_commands, "device_add", qmp_device_add,
+                         QCO_NO_OPTIONS);
+    qmp_register_command(&qmp_commands, "netdev_add", qmp_netdev_add,
+                         QCO_NO_OPTIONS);
+
+    qmp_unregister_commands_hack();
+
+    QTAILQ_INIT(&qmp_cap_negotiation_commands);
+    qmp_register_command(&qmp_cap_negotiation_commands, "qmp_capabilities",
+                         qmp_marshal_qmp_capabilities, QCO_NO_OPTIONS);
+}
+
+void qmp_qmp_capabilities(Error **errp)
+{
+    if (cur_mon->qmp.commands == &qmp_commands) {
+        error_set(errp, ERROR_CLASS_COMMAND_NOT_FOUND,
+                  "Capabilities negotiation is already complete, command "
+                  "ignored");
+        return;
+    }
+
+    cur_mon->qmp.commands = &qmp_commands;
 }
 
 /* set the current CPU defined by the user */
@@ -1009,7 +1050,10 @@ int monitor_set_cpu(int cpu_index)
 CPUState *mon_get_cpu(void)
 {
     if (!cur_mon->mon_cpu) {
-        monitor_set_cpu(0);
+        if (!first_cpu) {
+            return NULL;
+        }
+        monitor_set_cpu(first_cpu->cpu_index);
     }
     cpu_synchronize_state(cur_mon->mon_cpu);
     return cur_mon->mon_cpu;
@@ -1017,17 +1061,27 @@ CPUState *mon_get_cpu(void)
 
 CPUArchState *mon_get_cpu_env(void)
 {
-    return mon_get_cpu()->env_ptr;
+    CPUState *cs = mon_get_cpu();
+
+    return cs ? cs->env_ptr : NULL;
 }
 
 int monitor_get_cpu_index(void)
 {
-    return mon_get_cpu()->cpu_index;
+    CPUState *cs = mon_get_cpu();
+
+    return cs ? cs->cpu_index : UNASSIGNED_CPU_INDEX;
 }
 
 static void hmp_info_registers(Monitor *mon, const QDict *qdict)
 {
-    cpu_dump_state(mon_get_cpu(), (FILE *)mon, monitor_fprintf, CPU_DUMP_FPU);
+    CPUState *cs = mon_get_cpu();
+
+    if (!cs) {
+        monitor_printf(mon, "No CPU available\n");
+        return;
+    }
+    cpu_dump_state(cs, (FILE *)mon, monitor_fprintf, CPU_DUMP_FPU);
 }
 
 static void hmp_info_jit(Monitor *mon, const QDict *qdict)
@@ -1060,13 +1114,37 @@ static void hmp_info_history(Monitor *mon, const QDict *qdict)
 
 static void hmp_info_cpustats(Monitor *mon, const QDict *qdict)
 {
-    cpu_dump_statistics(mon_get_cpu(), (FILE *)mon, &monitor_fprintf, 0);
+    CPUState *cs = mon_get_cpu();
+
+    if (!cs) {
+        monitor_printf(mon, "No CPU available\n");
+        return;
+    }
+    cpu_dump_statistics(cs, (FILE *)mon, &monitor_fprintf, 0);
 }
 
 static void hmp_info_trace_events(Monitor *mon, const QDict *qdict)
 {
-    TraceEventInfoList *events = qmp_trace_event_get_state("*", NULL);
+    const char *name = qdict_get_try_str(qdict, "name");
+    bool has_vcpu = qdict_haskey(qdict, "vcpu");
+    int vcpu = qdict_get_try_int(qdict, "vcpu", 0);
+    TraceEventInfoList *events;
     TraceEventInfoList *elem;
+    Error *local_err = NULL;
+
+    if (name == NULL) {
+        name = "*";
+    }
+    if (vcpu < 0) {
+        monitor_printf(mon, "argument vcpu must be positive");
+        return;
+    }
+
+    events = qmp_trace_event_get_state(name, has_vcpu, vcpu, &local_err);
+    if (local_err) {
+        error_report_err(local_err);
+        return;
+    }
 
     for (elem = events; elem != NULL; elem = elem->next) {
         monitor_printf(mon, "%s : state %u\n",
@@ -1107,7 +1185,12 @@ void qmp_client_migrate_info(const char *protocol, const char *hostname,
 
 static void hmp_logfile(Monitor *mon, const QDict *qdict)
 {
-    qemu_set_log_filename(qdict_get_str(qdict, "filename"));
+    Error *err = NULL;
+
+    qemu_set_log_filename(qdict_get_str(qdict, "filename"), &err);
+    if (err) {
+        error_report_err(err);
+    }
 }
 
 static void hmp_log(Monitor *mon, const QDict *qdict)
@@ -1196,6 +1279,12 @@ static void memory_dump(Monitor *mon, int count, int format, int wsize,
     int l, line_size, i, max_digits, len;
     uint8_t buf[16];
     uint64_t v;
+    CPUState *cs = mon_get_cpu();
+
+    if (!cs && (format == 'i' || !is_physical)) {
+        monitor_printf(mon, "Can not dump without CPU\n");
+        return;
+    }
 
     if (format == 'i') {
         int flags = 0;
@@ -1225,7 +1314,7 @@ static void memory_dump(Monitor *mon, int count, int format, int wsize,
         flags = msr_le << 16;
         flags |= env->bfd_mach;
 #endif
-        monitor_disas(mon, mon_get_cpu(), addr, count, is_physical, flags);
+        monitor_disas(mon, cs, addr, count, is_physical, flags);
         return;
     }
 
@@ -1264,7 +1353,7 @@ static void memory_dump(Monitor *mon, int count, int format, int wsize,
         if (is_physical) {
             cpu_physical_memory_read(addr, buf, l);
         } else {
-            if (cpu_memory_rw_debug(mon_get_cpu(), addr, buf, l, 0) < 0) {
+            if (cpu_memory_rw_debug(cs, addr, buf, l, 0) < 0) {
                 monitor_printf(mon, " Cannot access memory\n");
                 break;
             }
@@ -1490,7 +1579,9 @@ static void hmp_boot_set(Monitor *mon, const QDict *qdict)
 
 static void hmp_info_mtree(Monitor *mon, const QDict *qdict)
 {
-    mtree_info((fprintf_function)monitor_printf, mon);
+    bool flatview = qdict_get_try_bool(qdict, "flatview", false);
+
+    mtree_info((fprintf_function)monitor_printf, mon, flatview);
 }
 
 static void hmp_info_numa(Monitor *mon, const QDict *qdict)
@@ -1703,7 +1794,7 @@ void qmp_getfd(const char *fdname, Error **errp)
     mon_fd_t *monfd;
     int fd;
 
-    fd = qemu_chr_fe_get_msgfd(cur_mon->chr);
+    fd = qemu_chr_fe_get_msgfd(&cur_mon->chr);
     if (fd == -1) {
         error_setg(errp, QERR_FD_NOT_SUPPLIED);
         return;
@@ -1828,7 +1919,7 @@ AddfdInfo *qmp_add_fd(bool has_fdset_id, int64_t fdset_id, bool has_opaque,
     Monitor *mon = cur_mon;
     AddfdInfo *fdinfo;
 
-    fd = qemu_chr_fe_get_msgfd(mon->chr);
+    fd = qemu_chr_fe_get_msgfd(&mon->chr);
     if (fd == -1) {
         error_setg(errp, QERR_FD_NOT_SUPPLIED);
         goto error;
@@ -2126,11 +2217,6 @@ static mon_cmd_t mon_cmds[] = {
     { NULL, NULL, },
 };
 
-static const mon_cmd_t qmp_cmds[] = {
-#include "qmp-commands-old.h"
-    { /* NULL */ },
-};
-
 /*******************************************************************/
 
 static const char *pch;
@@ -2152,11 +2238,12 @@ expr_error(Monitor *mon, const char *fmt, ...)
 static int get_monitor_def(target_long *pval, const char *name)
 {
     const MonitorDef *md = target_monitor_defs();
+    CPUState *cs = mon_get_cpu();
     void *ptr;
     uint64_t tmp = 0;
     int ret;
 
-    if (md == NULL) {
+    if (cs == NULL || md == NULL) {
         return -1;
     }
 
@@ -2183,7 +2270,7 @@ static int get_monitor_def(target_long *pval, const char *name)
         }
     }
 
-    ret = target_get_monitor_def(mon_get_cpu(), name, &tmp);
+    ret = target_get_monitor_def(cs, name, &tmp);
     if (!ret) {
         *pval = (target_long) tmp;
     }
@@ -2481,11 +2568,6 @@ static const mon_cmd_t *search_dispatch_table(const mon_cmd_t *disp_table,
     return NULL;
 }
 
-static const mon_cmd_t *qmp_find_cmd(const char *cmdname)
-{
-    return search_dispatch_table(qmp_cmds, cmdname);
-}
-
 /*
  * Parse command name from @cmdp according to command table @table.
  * If blank, return NULL.
@@ -2741,7 +2823,8 @@ static QDict *monitor_parse_arguments(Monitor *mon,
             break;
         case 'o':
             {
-                int64_t val;
+                int ret;
+                uint64_t val;
                 char *end;
 
                 while (qemu_isspace(*p)) {
@@ -2753,8 +2836,8 @@ static QDict *monitor_parse_arguments(Monitor *mon,
                         break;
                     }
                 }
-                val = qemu_strtosz(p, &end);
-                if (val < 0) {
+                ret = qemu_strtosz_MiB(p, &end, &val);
+                if (ret < 0 || val > INT64_MAX) {
                     monitor_printf(mon, "invalid size\n");
                     goto fail;
                 }
@@ -2917,7 +3000,7 @@ static void handle_hmp_command(Monitor *mon, const char *cmdline)
         return;
     }
 
-    cmd->mhandler.cmd(mon, qdict);
+    cmd->cmd(mon, qdict);
     QDECREF(qdict);
 }
 
@@ -3050,8 +3133,8 @@ void netdev_add_completion(ReadLineState *rs, int nb_args, const char *str)
     }
     len = strlen(str);
     readline_set_completion_index(rs, len);
-    for (i = 0; NetClientOptionsKind_lookup[i]; i++) {
-        add_completion_option(rs, str, NetClientOptionsKind_lookup[i]);
+    for (i = 0; NetClientDriver_lookup[i]; i++) {
+        add_completion_option(rs, str, NetClientDriver_lookup[i]);
     }
 }
 
@@ -3164,8 +3247,8 @@ static void ringbuf_completion(ReadLineState *rs, const char *str)
         ChardevInfo *chr_info = list->value;
 
         if (!strncmp(chr_info->label, str, len)) {
-            CharDriverState *chr = qemu_chr_find(chr_info->label);
-            if (chr && chr_is_ringbuf(chr)) {
+            Chardev *chr = qemu_chr_find(chr_info->label);
+            if (chr && CHARDEV_IS_RINGBUF(chr)) {
                 readline_add_completion(rs, chr_info->label);
             }
         }
@@ -3251,7 +3334,7 @@ void set_link_completion(ReadLineState *rs, int nb_args, const char *str)
         NetClientState *ncs[MAX_QUEUE_NUM];
         int count, i;
         count = qemu_find_net_clients_except(NULL, ncs,
-                                             NET_CLIENT_OPTIONS_KIND_NONE,
+                                             NET_CLIENT_DRIVER_NONE,
                                              MAX_QUEUE_NUM);
         for (i = 0; i < MIN(count, MAX_QUEUE_NUM); i++) {
             const char *name = ncs[i]->name;
@@ -3276,7 +3359,7 @@ void netdev_del_completion(ReadLineState *rs, int nb_args, const char *str)
 
     len = strlen(str);
     readline_set_completion_index(rs, len);
-    count = qemu_find_net_clients_except(NULL, ncs, NET_CLIENT_OPTIONS_KIND_NIC,
+    count = qemu_find_net_clients_except(NULL, ncs, NET_CLIENT_DRIVER_NIC,
                                          MAX_QUEUE_NUM);
     for (i = 0; i < MIN(count, MAX_QUEUE_NUM); i++) {
         QemuOpts *opts;
@@ -3291,6 +3374,24 @@ void netdev_del_completion(ReadLineState *rs, int nb_args, const char *str)
     }
 }
 
+void info_trace_events_completion(ReadLineState *rs, int nb_args, const char *str)
+{
+    size_t len;
+
+    len = strlen(str);
+    readline_set_completion_index(rs, len);
+    if (nb_args == 2) {
+        TraceEventIter iter;
+        TraceEvent *ev;
+        char *pattern = g_strdup_printf("%s*", str);
+        trace_event_iter_init(&iter, pattern);
+        while ((ev = trace_event_iter_next(&iter)) != NULL) {
+            readline_add_completion(rs, trace_event_get_name(ev));
+        }
+        g_free(pattern);
+    }
+}
+
 void trace_event_completion(ReadLineState *rs, int nb_args, const char *str)
 {
     size_t len;
@@ -3298,13 +3399,14 @@ void trace_event_completion(ReadLineState *rs, int nb_args, const char *str)
     len = strlen(str);
     readline_set_completion_index(rs, len);
     if (nb_args == 2) {
-        TraceEventID id;
-        for (id = 0; id < trace_event_count(); id++) {
-            const char *event_name = trace_event_get_name(trace_event_id(id));
-            if (!strncmp(str, event_name, len)) {
-                readline_add_completion(rs, event_name);
-            }
+        TraceEventIter iter;
+        TraceEvent *ev;
+        char *pattern = g_strdup_printf("%s*", str);
+        trace_event_iter_init(&iter, pattern);
+        while ((ev = trace_event_iter_next(&iter)) != NULL) {
+            readline_add_completion(rs, trace_event_get_name(ev));
         }
+        g_free(pattern);
     } else if (nb_args == 3) {
         add_completion_option(rs, str, "on");
         add_completion_option(rs, str, "off");
@@ -3388,7 +3490,7 @@ void host_net_remove_completion(ReadLineState *rs, int nb_args, const char *str)
     readline_set_completion_index(rs, len);
     if (nb_args == 2) {
         count = qemu_find_net_clients_except(NULL, ncs,
-                                             NET_CLIENT_OPTIONS_KIND_NONE,
+                                             NET_CLIENT_DRIVER_NONE,
                                              MAX_QUEUE_NUM);
         for (i = 0; i < MIN(count, MAX_QUEUE_NUM); i++) {
             int id;
@@ -3405,13 +3507,13 @@ void host_net_remove_completion(ReadLineState *rs, int nb_args, const char *str)
         return;
     } else if (nb_args == 3) {
         count = qemu_find_net_clients_except(NULL, ncs,
-                                             NET_CLIENT_OPTIONS_KIND_NIC,
+                                             NET_CLIENT_DRIVER_NIC,
                                              MAX_QUEUE_NUM);
         for (i = 0; i < MIN(count, MAX_QUEUE_NUM); i++) {
             int id;
             const char *name;
 
-            if (ncs[i]->info->type == NET_CLIENT_OPTIONS_KIND_HUBPORT ||
+            if (ncs[i]->info->type == NET_CLIENT_DRIVER_HUBPORT ||
                 net_hub_id_for_client(ncs[i], &id)) {
                 continue;
             }
@@ -3427,11 +3529,13 @@ void host_net_remove_completion(ReadLineState *rs, int nb_args, const char *str)
 static void vm_completion(ReadLineState *rs, const char *str)
 {
     size_t len;
-    BlockDriverState *bs = NULL;
+    BlockDriverState *bs;
+    BdrvNextIterator it;
 
     len = strlen(str);
     readline_set_completion_index(rs, len);
-    while ((bs = bdrv_next(bs))) {
+
+    for (bs = bdrv_first(&it); bs; bs = bdrv_next(&it)) {
         SnapshotInfoList *snapshots, *snapshot;
         AioContext *ctx = bdrv_get_aio_context(bs);
         bool ok = false;
@@ -3597,336 +3701,64 @@ static int monitor_can_read(void *opaque)
     return (mon->suspend_cnt == 0) ? 1 : 0;
 }
 
-static bool invalid_qmp_mode(const Monitor *mon, const mon_cmd_t *cmd,
-                             Error **errp)
-{
-    bool is_cap = cmd->mhandler.cmd_new == qmp_capabilities;
-
-    if (is_cap && mon->qmp.in_command_mode) {
-        error_set(errp, ERROR_CLASS_COMMAND_NOT_FOUND,
-                  "Capabilities negotiation is already complete, command "
-                  "'%s' ignored", cmd->name);
-        return true;
-    }
-    if (!is_cap && !mon->qmp.in_command_mode) {
-        error_set(errp, ERROR_CLASS_COMMAND_NOT_FOUND,
-                  "Expecting capabilities negotiation with "
-                  "'qmp_capabilities' before command '%s'", cmd->name);
-        return true;
-    }
-    return false;
-}
-
-/*
- * Argument validation rules:
- *
- * 1. The argument must exist in cmd_args qdict
- * 2. The argument type must be the expected one
- *
- * Special case: If the argument doesn't exist in cmd_args and
- *               the QMP_ACCEPT_UNKNOWNS flag is set, then the
- *               checking is skipped for it.
- */
-static void check_client_args_type(const QDict *client_args,
-                                   const QDict *cmd_args, int flags,
-                                   Error **errp)
-{
-    const QDictEntry *ent;
-
-    for (ent = qdict_first(client_args); ent;ent = qdict_next(client_args,ent)){
-        QObject *obj;
-        QString *arg_type;
-        const QObject *client_arg = qdict_entry_value(ent);
-        const char *client_arg_name = qdict_entry_key(ent);
-
-        obj = qdict_get(cmd_args, client_arg_name);
-        if (!obj) {
-            if (flags & QMP_ACCEPT_UNKNOWNS) {
-                /* handler accepts unknowns */
-                continue;
-            }
-            /* client arg doesn't exist */
-            error_setg(errp, QERR_INVALID_PARAMETER, client_arg_name);
-            return;
-        }
-
-        arg_type = qobject_to_qstring(obj);
-        assert(arg_type != NULL);
-
-        /* check if argument's type is correct */
-        switch (qstring_get_str(arg_type)[0]) {
-        case 'F':
-        case 'B':
-        case 's':
-            if (qobject_type(client_arg) != QTYPE_QSTRING) {
-                error_setg(errp, QERR_INVALID_PARAMETER_TYPE,
-                           client_arg_name, "string");
-                return;
-            }
-        break;
-        case 'i':
-        case 'l':
-        case 'M':
-        case 'o':
-            if (qobject_type(client_arg) != QTYPE_QINT) {
-                error_setg(errp, QERR_INVALID_PARAMETER_TYPE,
-                           client_arg_name, "int");
-                return;
-            }
-            break;
-        case 'T':
-            if (qobject_type(client_arg) != QTYPE_QINT &&
-                qobject_type(client_arg) != QTYPE_QFLOAT) {
-                error_setg(errp, QERR_INVALID_PARAMETER_TYPE,
-                           client_arg_name, "number");
-                return;
-            }
-            break;
-        case 'b':
-        case '-':
-            if (qobject_type(client_arg) != QTYPE_QBOOL) {
-                error_setg(errp, QERR_INVALID_PARAMETER_TYPE,
-                           client_arg_name, "bool");
-                return;
-            }
-            break;
-        case 'O':
-            assert(flags & QMP_ACCEPT_UNKNOWNS);
-            break;
-        case 'q':
-            /* Any QObject can be passed.  */
-            break;
-        case '/':
-        case '.':
-            /*
-             * These types are not supported by QMP and thus are not
-             * handled here. Fall through.
-             */
-        default:
-            abort();
-        }
-    }
-}
-
-/*
- * - Check if the client has passed all mandatory args
- * - Set special flags for argument validation
- */
-static void check_mandatory_args(const QDict *cmd_args,
-                                 const QDict *client_args, int *flags,
-                                 Error **errp)
-{
-    const QDictEntry *ent;
-
-    for (ent = qdict_first(cmd_args); ent; ent = qdict_next(cmd_args, ent)) {
-        const char *cmd_arg_name = qdict_entry_key(ent);
-        QString *type = qobject_to_qstring(qdict_entry_value(ent));
-        assert(type != NULL);
-
-        if (qstring_get_str(type)[0] == 'O') {
-            assert((*flags & QMP_ACCEPT_UNKNOWNS) == 0);
-            *flags |= QMP_ACCEPT_UNKNOWNS;
-        } else if (qstring_get_str(type)[0] != '-' &&
-                   qstring_get_str(type)[1] != '?' &&
-                   !qdict_haskey(client_args, cmd_arg_name)) {
-            error_setg(errp, QERR_MISSING_PARAMETER, cmd_arg_name);
-            return;
-        }
-    }
-}
-
-static QDict *qdict_from_args_type(const char *args_type)
-{
-    int i;
-    QDict *qdict;
-    QString *key, *type, *cur_qs;
-
-    assert(args_type != NULL);
-
-    qdict = qdict_new();
-
-    if (args_type == NULL || args_type[0] == '\0') {
-        /* no args, empty qdict */
-        goto out;
-    }
-
-    key = qstring_new();
-    type = qstring_new();
-
-    cur_qs = key;
-
-    for (i = 0;; i++) {
-        switch (args_type[i]) {
-            case ',':
-            case '\0':
-                qdict_put(qdict, qstring_get_str(key), type);
-                QDECREF(key);
-                if (args_type[i] == '\0') {
-                    goto out;
-                }
-                type = qstring_new(); /* qdict has ref */
-                cur_qs = key = qstring_new();
-                break;
-            case ':':
-                cur_qs = type;
-                break;
-            default:
-                qstring_append_chr(cur_qs, args_type[i]);
-                break;
-        }
-    }
-
-out:
-    return qdict;
-}
-
-/*
- * Client argument checking rules:
- *
- * 1. Client must provide all mandatory arguments
- * 2. Each argument provided by the client must be expected
- * 3. Each argument provided by the client must have the type expected
- *    by the command
- */
-static void qmp_check_client_args(const mon_cmd_t *cmd, QDict *client_args,
-                                  Error **errp)
-{
-    Error *err = NULL;
-    int flags;
-    QDict *cmd_args;
-
-    cmd_args = qdict_from_args_type(cmd->args_type);
-
-    flags = 0;
-    check_mandatory_args(cmd_args, client_args, &flags, &err);
-    if (err) {
-        goto out;
-    }
-
-    check_client_args_type(client_args, cmd_args, flags, &err);
-
-out:
-    error_propagate(errp, err);
-    QDECREF(cmd_args);
-}
-
-/*
- * Input object checking rules
- *
- * 1. Input object must be a dict
- * 2. The "execute" key must exist
- * 3. The "execute" key must be a string
- * 4. If the "arguments" key exists, it must be a dict
- * 5. If the "id" key exists, it can be anything (ie. json-value)
- * 6. Any argument not listed above is considered invalid
- */
-static QDict *qmp_check_input_obj(QObject *input_obj, Error **errp)
-{
-    const QDictEntry *ent;
-    int has_exec_key = 0;
-    QDict *input_dict;
-
-    if (qobject_type(input_obj) != QTYPE_QDICT) {
-        error_setg(errp, QERR_QMP_BAD_INPUT_OBJECT, "object");
-        return NULL;
-    }
-
-    input_dict = qobject_to_qdict(input_obj);
-
-    for (ent = qdict_first(input_dict); ent; ent = qdict_next(input_dict, ent)){
-        const char *arg_name = qdict_entry_key(ent);
-        const QObject *arg_obj = qdict_entry_value(ent);
-
-        if (!strcmp(arg_name, "execute")) {
-            if (qobject_type(arg_obj) != QTYPE_QSTRING) {
-                error_setg(errp, QERR_QMP_BAD_INPUT_OBJECT_MEMBER,
-                           "execute", "string");
-                return NULL;
-            }
-            has_exec_key = 1;
-        } else if (!strcmp(arg_name, "arguments")) {
-            if (qobject_type(arg_obj) != QTYPE_QDICT) {
-                error_setg(errp, QERR_QMP_BAD_INPUT_OBJECT_MEMBER,
-                           "arguments", "object");
-                return NULL;
-            }
-        } else if (!strcmp(arg_name, "id")) {
-            /* Any string is acceptable as "id", so nothing to check */
-        } else {
-            error_setg(errp, QERR_QMP_EXTRA_MEMBER, arg_name);
-            return NULL;
-        }
-    }
-
-    if (!has_exec_key) {
-        error_setg(errp, QERR_QMP_BAD_INPUT_OBJECT, "execute");
-        return NULL;
-    }
-
-    return input_dict;
-}
-
 static void handle_qmp_command(JSONMessageParser *parser, GQueue *tokens)
 {
-    Error *local_err = NULL;
-    QObject *obj, *data;
-    QDict *input, *args;
-    const mon_cmd_t *cmd;
-    const char *cmd_name;
+    QObject *req, *rsp = NULL, *id = NULL;
+    QDict *qdict = NULL;
     Monitor *mon = cur_mon;
+    Error *err = NULL;
 
-    args = input = NULL;
-    data = NULL;
-
-    obj = json_parser_parse(tokens, NULL);
-    if (!obj) {
-        // FIXME: should be triggered in json_parser_parse()
-        error_setg(&local_err, QERR_JSON_PARSING);
+    req = json_parser_parse_err(tokens, NULL, &err);
+    if (!req && !err) {
+        /* json_parser_parse_err() sucks: can fail without setting @err */
+        error_setg(&err, QERR_JSON_PARSING);
+    }
+    if (err) {
         goto err_out;
     }
 
-    input = qmp_check_input_obj(obj, &local_err);
-    if (!input) {
-        qobject_decref(obj);
-        goto err_out;
-    }
+    qdict = qobject_to_qdict(req);
+    if (qdict) {
+        id = qdict_get(qdict, "id");
+        qobject_incref(id);
+        qdict_del(qdict, "id");
+    } /* else will fail qmp_dispatch() */
 
-    mon->qmp.id = qdict_get(input, "id");
-    qobject_incref(mon->qmp.id);
+    rsp = qmp_dispatch(cur_mon->qmp.commands, req);
 
-    cmd_name = qdict_get_str(input, "execute");
-    trace_handle_qmp_command(mon, cmd_name);
-    cmd = qmp_find_cmd(cmd_name);
-    if (!cmd) {
-        error_set(&local_err, ERROR_CLASS_COMMAND_NOT_FOUND,
-                  "The command %s has not been found", cmd_name);
-        goto err_out;
+    if (mon->qmp.commands == &qmp_cap_negotiation_commands) {
+        qdict = qdict_get_qdict(qobject_to_qdict(rsp), "error");
+        if (qdict
+            && !g_strcmp0(qdict_get_try_str(qdict, "class"),
+                    QapiErrorClass_lookup[ERROR_CLASS_COMMAND_NOT_FOUND])) {
+            /* Provide a more useful error message */
+            qdict_del(qdict, "desc");
+            qdict_put(qdict, "desc",
+                      qstring_from_str("Expecting capabilities negotiation"
+                                       " with 'qmp_capabilities'"));
+        }
     }
-    if (invalid_qmp_mode(mon, cmd, &local_err)) {
-        goto err_out;
-    }
-
-    obj = qdict_get(input, "arguments");
-    if (!obj) {
-        args = qdict_new();
-    } else {
-        args = qobject_to_qdict(obj);
-        QINCREF(args);
-    }
-
-    qmp_check_client_args(cmd, args, &local_err);
-    if (local_err) {
-        goto err_out;
-    }
-
-    cmd->mhandler.cmd_new(args, &data, &local_err);
 
 err_out:
-    monitor_protocol_emitter(mon, data, local_err);
-    qobject_decref(data);
-    error_free(local_err);
-    QDECREF(input);
-    QDECREF(args);
+    if (err) {
+        qdict = qdict_new();
+        qdict_put_obj(qdict, "error", qmp_build_error_object(err));
+        error_free(err);
+        rsp = QOBJECT(qdict);
+    }
+
+    if (rsp) {
+        if (id) {
+            qdict_put_obj(qobject_to_qdict(rsp), "id", id);
+            id = NULL;
+        }
+
+        monitor_json_emitter(mon, rsp);
+    }
+
+    qobject_decref(id);
+    qobject_decref(rsp);
+    qobject_decref(req);
 }
 
 static void monitor_qmp_read(void *opaque, const uint8_t *buf, int size)
@@ -3991,7 +3823,9 @@ static QObject *get_qmp_greeting(void)
     QObject *ver = NULL;
 
     qmp_marshal_query_version(NULL, &ver, NULL);
-    return qobject_from_jsonf("{'QMP':{'version': %p,'capabilities': []}}",ver);
+
+    return qobject_from_jsonf("{'QMP': {'version': %p, 'capabilities': []}}",
+                              ver);
 }
 
 static void monitor_qmp_event(void *opaque, int event)
@@ -4001,7 +3835,7 @@ static void monitor_qmp_event(void *opaque, int event)
 
     switch (event) {
     case CHR_EVENT_OPENED:
-        mon->qmp.in_command_mode = false;
+        mon->qmp.commands = &qmp_cap_negotiation_commands;
         data = get_qmp_greeting();
         monitor_json_emitter(mon, data);
         qobject_decref(data);
@@ -4086,15 +3920,6 @@ static void sortcmdlist(void)
     qsort((void *)info_cmds, array_num, elem_size, compare_mon_cmd);
 }
 
-
-/*
- * Local variables:
- *  c-indent-level: 4
- *  c-basic-offset: 4
- *  tab-width: 8
- * End:
- */
-
 /* These functions just adapt the readline interface in a typesafe way.  We
  * could cast function pointers but that discards compiler checks.
  */
@@ -4112,12 +3937,35 @@ static void monitor_readline_flush(void *opaque)
     monitor_flush(opaque);
 }
 
+/*
+ * Print to current monitor if we have one, else to stderr.
+ * TODO should return int, so callers can calculate width, but that
+ * requires surgery to monitor_vprintf().  Left for another day.
+ */
+void error_vprintf(const char *fmt, va_list ap)
+{
+    if (cur_mon && !monitor_cur_is_qmp()) {
+        monitor_vprintf(cur_mon, fmt, ap);
+    } else {
+        vfprintf(stderr, fmt, ap);
+    }
+}
+
+void error_vprintf_unless_qmp(const char *fmt, va_list ap)
+{
+    if (cur_mon && !monitor_cur_is_qmp()) {
+        monitor_vprintf(cur_mon, fmt, ap);
+    } else if (!cur_mon) {
+        vfprintf(stderr, fmt, ap);
+    }
+}
+
 static void __attribute__((constructor)) monitor_lock_init(void)
 {
     qemu_mutex_init(&monitor_lock);
 }
 
-void monitor_init(CharDriverState *chr, int flags)
+void monitor_init(Chardev *chr, int flags)
 {
     static int is_first_init = 1;
     Monitor *mon;
@@ -4131,7 +3979,7 @@ void monitor_init(CharDriverState *chr, int flags)
     mon = g_malloc(sizeof(*mon));
     monitor_data_init(mon);
 
-    mon->chr = chr;
+    qemu_chr_fe_init(&mon->chr, chr, &error_abort);
     mon->flags = flags;
     if (flags & MONITOR_USE_READLINE) {
         mon->rs = readline_init(monitor_readline_printf,
@@ -4142,17 +3990,30 @@ void monitor_init(CharDriverState *chr, int flags)
     }
 
     if (monitor_is_qmp(mon)) {
-        qemu_chr_add_handlers(chr, monitor_can_read, monitor_qmp_read,
-                              monitor_qmp_event, mon);
-        qemu_chr_fe_set_echo(chr, true);
+        qemu_chr_fe_set_handlers(&mon->chr, monitor_can_read, monitor_qmp_read,
+                                 monitor_qmp_event, mon, NULL, true);
+        qemu_chr_fe_set_echo(&mon->chr, true);
         json_message_parser_init(&mon->qmp.parser, handle_qmp_command);
     } else {
-        qemu_chr_add_handlers(chr, monitor_can_read, monitor_read,
-                              monitor_event, mon);
+        qemu_chr_fe_set_handlers(&mon->chr, monitor_can_read, monitor_read,
+                                 monitor_event, mon, NULL, true);
     }
 
     qemu_mutex_lock(&monitor_lock);
     QLIST_INSERT_HEAD(&mon_list, mon, entry);
+    qemu_mutex_unlock(&monitor_lock);
+}
+
+void monitor_cleanup(void)
+{
+    Monitor *mon, *next;
+
+    qemu_mutex_lock(&monitor_lock);
+    QLIST_FOREACH_SAFE(mon, &mon_list, entry, next) {
+        QLIST_REMOVE(mon, entry);
+        monitor_data_destroy(mon);
+        g_free(mon);
+    }
     qemu_mutex_unlock(&monitor_lock);
 }
 
@@ -4236,7 +4097,7 @@ QemuOptsList qemu_mon_opts = {
             .name = "chardev",
             .type = QEMU_OPT_STRING,
         },{
-            .name = "default",
+            .name = "default",  /* deprecated */
             .type = QEMU_OPT_BOOL,
         },{
             .name = "pretty",
@@ -4267,3 +4128,16 @@ GICCapabilityList *qmp_query_gic_capabilities(Error **errp)
     return NULL;
 }
 #endif
+
+HotpluggableCPUList *qmp_query_hotpluggable_cpus(Error **errp)
+{
+    MachineState *ms = MACHINE(qdev_get_machine());
+    MachineClass *mc = MACHINE_GET_CLASS(ms);
+
+    if (!mc->has_hotpluggable_cpus) {
+        error_setg(errp, QERR_FEATURE_DISABLED, "query-hotpluggable-cpus");
+        return NULL;
+    }
+
+    return machine_query_hotpluggable_cpus(ms);
+}

@@ -6,6 +6,8 @@
 #include "qapi/qmp/qdict.h"
 #include "qemu/notify.h"
 #include "qapi-types.h"
+#include "qemu/error-report.h"
+#include "qapi/error.h"
 
 #ifdef CONFIG_OPENGL
 # include <epoxy/gl.h>
@@ -187,9 +189,6 @@ typedef struct DisplayChangeListenerOps {
                            int x, int y, int w, int h);
     void (*dpy_gfx_switch)(DisplayChangeListener *dcl,
                            struct DisplaySurface *new_surface);
-    void (*dpy_gfx_copy)(DisplayChangeListener *dcl,
-                         int src_x, int src_y,
-                         int dst_x, int dst_y, int w, int h);
     bool (*dpy_gfx_check_format)(DisplayChangeListener *dcl,
                                  pixman_format_code_t format);
 
@@ -213,9 +212,14 @@ typedef struct DisplayChangeListenerOps {
                                    QEMUGLContext ctx);
     QEMUGLContext (*dpy_gl_ctx_get_current)(DisplayChangeListener *dcl);
 
-    void (*dpy_gl_scanout)(DisplayChangeListener *dcl,
-                           uint32_t backing_id, bool backing_y_0_top,
-                           uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+    void (*dpy_gl_scanout_disable)(DisplayChangeListener *dcl);
+    void (*dpy_gl_scanout_texture)(DisplayChangeListener *dcl,
+                                   uint32_t backing_id,
+                                   bool backing_y_0_top,
+                                   uint32_t backing_width,
+                                   uint32_t backing_height,
+                                   uint32_t x, uint32_t y,
+                                   uint32_t w, uint32_t h);
     void (*dpy_gl_update)(DisplayChangeListener *dcl,
                           uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
@@ -270,8 +274,6 @@ int dpy_set_ui_info(QemuConsole *con, QemuUIInfo *info);
 void dpy_gfx_update(QemuConsole *con, int x, int y, int w, int h);
 void dpy_gfx_replace_surface(QemuConsole *con,
                              DisplaySurface *surface);
-void dpy_gfx_copy(QemuConsole *con, int src_x, int src_y,
-                  int dst_x, int dst_y, int w, int h);
 void dpy_text_cursor(QemuConsole *con, int x, int y);
 void dpy_text_update(QemuConsole *con, int x, int y, int w, int h);
 void dpy_text_resize(QemuConsole *con, int w, int h);
@@ -281,9 +283,11 @@ bool dpy_cursor_define_supported(QemuConsole *con);
 bool dpy_gfx_check_format(QemuConsole *con,
                           pixman_format_code_t format);
 
-void dpy_gl_scanout(QemuConsole *con,
-                    uint32_t backing_id, bool backing_y_0_top,
-                    uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+void dpy_gl_scanout_disable(QemuConsole *con);
+void dpy_gl_scanout_texture(QemuConsole *con,
+                            uint32_t backing_id, bool backing_y_0_top,
+                            uint32_t backing_width, uint32_t backing_height,
+                            uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 void dpy_gl_update(QemuConsole *con,
                    uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
@@ -333,7 +337,10 @@ static inline pixman_format_code_t surface_format(DisplaySurface *s)
 }
 
 #ifdef CONFIG_CURSES
+/* KEY_EVENT is defined in wincon.h and in curses.h. Avoid redefinition. */
+#undef KEY_EVENT
 #include <curses.h>
+#undef KEY_EVENT
 typedef chtype console_ch_t;
 extern chtype vga_to_curses[];
 #else
@@ -376,6 +383,8 @@ void graphic_hw_invalidate(QemuConsole *con);
 void graphic_hw_text_update(QemuConsole *con, console_ch_t *chardata);
 void graphic_hw_gl_block(QemuConsole *con, bool block);
 
+void qemu_console_early_init(void);
+
 QemuConsole *qemu_console_lookup_by_index(unsigned int index);
 QemuConsole *qemu_console_lookup_by_device(DeviceState *dev, uint32_t head);
 QemuConsole *qemu_console_lookup_by_device_name(const char *device_id,
@@ -383,19 +392,20 @@ QemuConsole *qemu_console_lookup_by_device_name(const char *device_id,
 bool qemu_console_is_visible(QemuConsole *con);
 bool qemu_console_is_graphic(QemuConsole *con);
 bool qemu_console_is_fixedsize(QemuConsole *con);
+bool qemu_console_is_gl_blocked(QemuConsole *con);
 char *qemu_console_get_label(QemuConsole *con);
 int qemu_console_get_index(QemuConsole *con);
 uint32_t qemu_console_get_head(QemuConsole *con);
 QemuUIInfo *qemu_console_get_ui_info(QemuConsole *con);
 int qemu_console_get_width(QemuConsole *con, int fallback);
 int qemu_console_get_height(QemuConsole *con, int fallback);
+/* Return the low-level window id for the console */
+int qemu_console_get_window_id(QemuConsole *con);
+/* Set the low-level window id for the console */
+void qemu_console_set_window_id(QemuConsole *con, int window_id);
 
-void text_consoles_set_display(DisplayState *ds);
 void console_select(unsigned int index);
-void console_color_init(DisplayState *ds);
 void qemu_console_resize(QemuConsole *con, int width, int height);
-void qemu_console_copy(QemuConsole *con, int src_x, int src_y,
-                       int dst_x, int dst_y, int w, int h);
 DisplaySurface *qemu_console_surface(QemuConsole *con);
 
 /* console-gl.c */
@@ -420,17 +430,41 @@ void surface_gl_setup_viewport(ConsoleGLState *gls,
 #endif
 
 /* sdl.c */
+#ifdef CONFIG_SDL
 void sdl_display_early_init(int opengl);
 void sdl_display_init(DisplayState *ds, int full_screen, int no_frame);
+#else
+static inline void sdl_display_early_init(int opengl)
+{
+    /* This must never be called if CONFIG_SDL is disabled */
+    error_report("SDL support is disabled");
+    abort();
+}
+static inline void sdl_display_init(DisplayState *ds, int full_screen,
+                                    int no_frame)
+{
+    /* This must never be called if CONFIG_SDL is disabled */
+    error_report("SDL support is disabled");
+    abort();
+}
+#endif
 
 /* cocoa.m */
+#ifdef CONFIG_COCOA
 void cocoa_display_init(DisplayState *ds, int full_screen);
+#else
+static inline void cocoa_display_init(DisplayState *ds, int full_screen)
+{
+    /* This must never be called if CONFIG_COCOA is disabled */
+    error_report("Cocoa support is disabled");
+    abort();
+}
+#endif
 
 /* vnc.c */
 void vnc_display_init(const char *id);
 void vnc_display_open(const char *id, Error **errp);
 void vnc_display_add_client(const char *id, int csock, bool skipauth);
-char *vnc_display_local_addr(const char *id);
 #ifdef CONFIG_VNC
 int vnc_display_password(const char *id, const char *password);
 int vnc_display_pw_expire(const char *id, time_t expires);
@@ -445,16 +479,52 @@ static inline int vnc_display_pw_expire(const char *id, time_t expires)
 {
     return -ENODEV;
 };
+static inline QemuOpts *vnc_parse(const char *str, Error **errp)
+{
+    error_setg(errp, "VNC support is disabled");
+    return NULL;
+}
+static inline int vnc_init_func(void *opaque, QemuOpts *opts, Error **errp)
+{
+    error_setg(errp, "VNC support is disabled");
+    return -1;
+}
 #endif
 
 /* curses.c */
+#ifdef CONFIG_CURSES
 void curses_display_init(DisplayState *ds, int full_screen);
+#else
+static inline void curses_display_init(DisplayState *ds, int full_screen)
+{
+    /* This must never be called if CONFIG_CURSES is disabled */
+    error_report("curses support is disabled");
+    abort();
+}
+#endif
 
 /* input.c */
 int index_from_key(const char *key, size_t key_length);
 
 /* gtk.c */
+#ifdef CONFIG_GTK
 void early_gtk_display_init(int opengl);
 void gtk_display_init(DisplayState *ds, bool full_screen, bool grab_on_hover);
+#else
+static inline void gtk_display_init(DisplayState *ds, bool full_screen,
+                                    bool grab_on_hover)
+{
+    /* This must never be called if CONFIG_GTK is disabled */
+    error_report("GTK support is disabled");
+    abort();
+}
+
+static inline void early_gtk_display_init(int opengl)
+{
+    /* This must never be called if CONFIG_GTK is disabled */
+    error_report("GTK support is disabled");
+    abort();
+}
+#endif
 
 #endif

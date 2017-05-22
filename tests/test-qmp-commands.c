@@ -1,13 +1,14 @@
 #include "qemu/osdep.h"
-#include <glib.h>
 #include "qemu-common.h"
 #include "qapi/qmp/types.h"
 #include "test-qmp-commands.h"
 #include "qapi/qmp/dispatch.h"
 #include "qemu/module.h"
-#include "qapi/qmp-input-visitor.h"
+#include "qapi/qobject-input-visitor.h"
 #include "tests/test-qapi-types.h"
 #include "tests/test-qapi-visit.h"
+
+static QmpCommandList qmp_commands;
 
 void qmp_user_def_cmd(Error **errp)
 {
@@ -60,6 +61,14 @@ QObject *qmp_guest_sync(QObject *arg, Error **errp)
     return arg;
 }
 
+void qmp_boxed_struct(UserDefZero *arg, Error **errp)
+{
+}
+
+void qmp_boxed_union(UserDefNativeListUnion *arg, Error **errp)
+{
+}
+
 __org_qemu_x_Union1 *qmp___org_qemu_x_command(__org_qemu_x_EnumList *a,
                                               __org_qemu_x_StructList *b,
                                               __org_qemu_x_Union2 *c,
@@ -87,7 +96,7 @@ static void test_dispatch_cmd(void)
 
     qdict_put_obj(req, "execute", QOBJECT(qstring_from_str("user_def_cmd")));
 
-    resp = qmp_dispatch(QOBJECT(req));
+    resp = qmp_dispatch(&qmp_commands, QOBJECT(req));
     assert(resp != NULL);
     assert(!qdict_haskey(qobject_to_qdict(resp), "error"));
 
@@ -96,14 +105,29 @@ static void test_dispatch_cmd(void)
 }
 
 /* test commands that return an error due to invalid parameters */
-static void test_dispatch_cmd_error(void)
+static void test_dispatch_cmd_failure(void)
 {
     QDict *req = qdict_new();
+    QDict *args = qdict_new();
     QObject *resp;
 
     qdict_put_obj(req, "execute", QOBJECT(qstring_from_str("user_def_cmd2")));
 
-    resp = qmp_dispatch(QOBJECT(req));
+    resp = qmp_dispatch(&qmp_commands, QOBJECT(req));
+    assert(resp != NULL);
+    assert(qdict_haskey(qobject_to_qdict(resp), "error"));
+
+    qobject_decref(resp);
+    QDECREF(req);
+
+    /* check that with extra arguments it throws an error */
+    req = qdict_new();
+    qdict_put(args, "a", qint_from_int(66));
+    qdict_put(req, "arguments", args);
+
+    qdict_put_obj(req, "execute", QOBJECT(qstring_from_str("user_def_cmd")));
+
+    resp = qmp_dispatch(&qmp_commands, QOBJECT(req));
     assert(resp != NULL);
     assert(qdict_haskey(qobject_to_qdict(resp), "error"));
 
@@ -117,7 +141,7 @@ static QObject *test_qmp_dispatch(QDict *req)
     QDict *resp;
     QObject *ret;
 
-    resp_obj = qmp_dispatch(QOBJECT(req));
+    resp_obj = qmp_dispatch(&qmp_commands, QOBJECT(req));
     assert(resp_obj);
     resp = qobject_to_qdict(resp_obj);
     assert(resp && !qdict_haskey(resp, "error"));
@@ -217,25 +241,24 @@ static void test_dealloc_partial(void)
     /* create partial object */
     {
         QDict *ud2_dict;
-        QmpInputVisitor *qiv;
+        Visitor *v;
 
         ud2_dict = qdict_new();
         qdict_put_obj(ud2_dict, "string0", QOBJECT(qstring_from_str(text)));
 
-        qiv = qmp_input_visitor_new(QOBJECT(ud2_dict));
-        visit_type_UserDefTwo(qmp_input_get_visitor(qiv), NULL, &ud2, &err);
-        qmp_input_visitor_cleanup(qiv);
+        v = qobject_input_visitor_new(QOBJECT(ud2_dict));
+        visit_type_UserDefTwo(v, NULL, &ud2, &err);
+        visit_free(v);
         QDECREF(ud2_dict);
     }
 
-    /* verify partial success */
-    assert(ud2 != NULL);
-    assert(ud2->string0 != NULL);
-    assert(strcmp(ud2->string0, text) == 0);
-    assert(ud2->dict1 == NULL);
-
-    /* confirm & release construction error */
+    /* verify that visit_type_XXX() cleans up properly on error */
     error_free_or_abort(&err);
+    assert(!ud2);
+
+    /* Manually create a partial object, leaving ud2->dict1 at NULL */
+    ud2 = g_new0(UserDefTwo, 1);
+    ud2->string0 = g_strdup(text);
 
     /* tear down partial object */
     qapi_free_UserDefTwo(ud2);
@@ -247,12 +270,12 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
 
     g_test_add_func("/0.15/dispatch_cmd", test_dispatch_cmd);
-    g_test_add_func("/0.15/dispatch_cmd_error", test_dispatch_cmd_error);
+    g_test_add_func("/0.15/dispatch_cmd_failure", test_dispatch_cmd_failure);
     g_test_add_func("/0.15/dispatch_cmd_io", test_dispatch_cmd_io);
     g_test_add_func("/0.15/dealloc_types", test_dealloc_types);
     g_test_add_func("/0.15/dealloc_partial", test_dealloc_partial);
 
-    module_call_init(MODULE_INIT_QAPI);
+    test_qmp_init_marshal(&qmp_commands);
     g_test_run();
 
     return 0;

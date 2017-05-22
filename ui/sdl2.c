@@ -357,6 +357,10 @@ static void handle_keydown(SDL_Event *ev)
         case SDL_SCANCODE_7:
         case SDL_SCANCODE_8:
         case SDL_SCANCODE_9:
+            if (gui_grab) {
+                sdl_grab_end(scon);
+            }
+
             win = ev->key.keysym.scancode - SDL_SCANCODE_1;
             if (win < sdl2_num_outputs) {
                 sdl2_console[win].hidden = !sdl2_console[win].hidden;
@@ -729,7 +733,8 @@ static const DisplayChangeListenerOps dcl_gl_ops = {
     .dpy_gl_ctx_destroy      = sdl2_gl_destroy_context,
     .dpy_gl_ctx_make_current = sdl2_gl_make_context_current,
     .dpy_gl_ctx_get_current  = sdl2_gl_get_current_context,
-    .dpy_gl_scanout          = sdl2_gl_scanout,
+    .dpy_gl_scanout_disable  = sdl2_gl_scanout_disable,
+    .dpy_gl_scanout_texture  = sdl2_gl_scanout_texture,
     .dpy_gl_update           = sdl2_gl_scanout_flush,
 };
 #endif
@@ -757,6 +762,7 @@ void sdl_display_init(DisplayState *ds, int full_screen, int no_frame)
     uint8_t data = 0;
     char *filename;
     int i;
+    SDL_SysWMinfo info;
 
     if (no_frame) {
         gui_noframe = 1;
@@ -782,6 +788,8 @@ void sdl_display_init(DisplayState *ds, int full_screen, int no_frame)
         exit(1);
     }
     SDL_SetHint(SDL_HINT_GRAB_KEYBOARD, "1");
+    memset(&info, 0, sizeof(info));
+    SDL_VERSION(&info.version);
 
     for (i = 0;; i++) {
         QemuConsole *con = qemu_console_lookup_by_index(i);
@@ -790,6 +798,9 @@ void sdl_display_init(DisplayState *ds, int full_screen, int no_frame)
         }
     }
     sdl2_num_outputs = i;
+    if (sdl2_num_outputs == 0) {
+        return;
+    }
     sdl2_console = g_new0(struct sdl2_console, sdl2_num_outputs);
     for (i = 0; i < sdl2_num_outputs; i++) {
         QemuConsole *con = qemu_console_lookup_by_index(i);
@@ -806,6 +817,16 @@ void sdl_display_init(DisplayState *ds, int full_screen, int no_frame)
 #endif
         sdl2_console[i].dcl.con = con;
         register_displaychangelistener(&sdl2_console[i].dcl);
+
+#if defined(SDL_VIDEO_DRIVER_WINDOWS) || defined(SDL_VIDEO_DRIVER_X11)
+        if (SDL_GetWindowWMInfo(sdl2_console[i].real_window, &info)) {
+#if defined(SDL_VIDEO_DRIVER_WINDOWS)
+            qemu_console_set_window_id(con, (uintptr_t)info.info.win.window);
+#elif defined(SDL_VIDEO_DRIVER_X11)
+            qemu_console_set_window_id(con, info.info.x11.window);
+#endif
+        }
+#endif
     }
 
     /* Load a 32x32x4 image. White pixels are transparent. */

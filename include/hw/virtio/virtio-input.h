@@ -1,5 +1,5 @@
-#ifndef _QEMU_VIRTIO_INPUT_H
-#define _QEMU_VIRTIO_INPUT_H
+#ifndef QEMU_VIRTIO_INPUT_H
+#define QEMU_VIRTIO_INPUT_H
 
 #include "ui/input.h"
 
@@ -62,7 +62,10 @@ struct VirtIOInput {
     VirtQueue                         *evt, *sts;
     char                              *serial;
 
-    virtio_input_event                *queue;
+    struct {
+        virtio_input_event event;
+        VirtQueueElement *elem;
+    }                                 *queue;
     uint32_t                          qindex, qsize;
 
     bool                              active;
@@ -105,4 +108,4 @@ void virtio_input_add_config(VirtIOInput *vinput,
 void virtio_input_idstr_config(VirtIOInput *vinput,
                                uint8_t select, const char *string);
 
-#endif /* _QEMU_VIRTIO_INPUT_H */
+#endif /* QEMU_VIRTIO_INPUT_H */

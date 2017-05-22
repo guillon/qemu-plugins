@@ -53,21 +53,41 @@ fi
 # make sure we have a standard umask
 umask 022
 
-if [ "$IMGPROTO" = "file" ]; then
-    TEST_IMG=$TEST_DIR/t.$IMGFMT
-elif [ "$IMGPROTO" = "nbd" ]; then
-    TEST_IMG_FILE=$TEST_DIR/t.$IMGFMT
-    TEST_IMG="nbd:127.0.0.1:10810"
-elif [ "$IMGPROTO" = "ssh" ]; then
-    TEST_IMG_FILE=$TEST_DIR/t.$IMGFMT
-    TEST_IMG="ssh://127.0.0.1$TEST_IMG_FILE"
-elif [ "$IMGPROTO" = "nfs" ]; then
-    TEST_DIR="nfs://127.0.0.1/$TEST_DIR"
-    TEST_IMG=$TEST_DIR/t.$IMGFMT
-elif [ "$IMGPROTO" = "archipelago" ]; then
-    TEST_IMG="archipelago:at.$IMGFMT"
+if [ "$IMGOPTSSYNTAX" = "true" ]; then
+    DRIVER="driver=$IMGFMT"
+    if [ "$IMGFMT" = "luks" ]; then
+        DRIVER="$DRIVER,key-secret=keysec0"
+    fi
+    if [ "$IMGPROTO" = "file" ]; then
+        TEST_IMG_FILE=$TEST_DIR/t.$IMGFMT
+        TEST_IMG="$DRIVER,file.filename=$TEST_DIR/t.$IMGFMT"
+    elif [ "$IMGPROTO" = "nbd" ]; then
+        TEST_IMG_FILE=$TEST_DIR/t.$IMGFMT
+        TEST_IMG="$DRIVER,file.driver=nbd,file.host=127.0.0.1,file.port=10810"
+    elif [ "$IMGPROTO" = "ssh" ]; then
+        TEST_IMG_FILE=$TEST_DIR/t.$IMGFMT
+        TEST_IMG="$DRIVER,file.driver=ssh,file.host=127.0.0.1,file.path=$TEST_IMG_FILE"
+    elif [ "$IMGPROTO" = "nfs" ]; then
+        TEST_DIR="$DRIVER,file.driver=nfs,file.filename=nfs://127.0.0.1/$TEST_DIR"
+        TEST_IMG=$TEST_DIR/t.$IMGFMT
+    else
+        TEST_IMG="$DRIVER,file.driver=$IMGPROTO,file.filename=$TEST_DIR/t.$IMGFMT"
+    fi
 else
-    TEST_IMG=$IMGPROTO:$TEST_DIR/t.$IMGFMT
+    if [ "$IMGPROTO" = "file" ]; then
+        TEST_IMG=$TEST_DIR/t.$IMGFMT
+    elif [ "$IMGPROTO" = "nbd" ]; then
+        TEST_IMG_FILE=$TEST_DIR/t.$IMGFMT
+        TEST_IMG="nbd:127.0.0.1:10810"
+    elif [ "$IMGPROTO" = "ssh" ]; then
+        TEST_IMG_FILE=$TEST_DIR/t.$IMGFMT
+        TEST_IMG="ssh://127.0.0.1$TEST_IMG_FILE"
+    elif [ "$IMGPROTO" = "nfs" ]; then
+        TEST_DIR="nfs://127.0.0.1/$TEST_DIR"
+        TEST_IMG=$TEST_DIR/t.$IMGFMT
+    else
+        TEST_IMG=$IMGPROTO:$TEST_DIR/t.$IMGFMT
+    fi
 fi
 
 _optstr_add()
@@ -108,6 +128,7 @@ _make_test_img()
     local img_name=""
     local use_backing=0
     local backing_file=""
+    local object_options=""
 
     if [ -n "$TEST_IMG_FILE" ]; then
         img_name=$TEST_IMG_FILE
@@ -117,6 +138,10 @@ _make_test_img()
 
     if [ -n "$IMGOPTS" ]; then
         optstr=$(_optstr_add "$optstr" "$IMGOPTS")
+    fi
+    if [ -n "$IMGKEYSECRET" ]; then
+        object_options="--object secret,id=keysec0,data=$IMGKEYSECRET"
+        optstr=$(_optstr_add "$optstr" "key-secret=keysec0")
     fi
 
     if [ "$1" = "-b" ]; then
@@ -135,15 +160,15 @@ _make_test_img()
     # XXX(hch): have global image options?
     (
      if [ $use_backing = 1 ]; then
-        $QEMU_IMG create -f $IMGFMT $extra_img_options -b "$backing_file" "$img_name" $image_size 2>&1
+        $QEMU_IMG create $object_options -f $IMGFMT $extra_img_options -b "$backing_file" "$img_name" $image_size 2>&1
      else
-        $QEMU_IMG create -f $IMGFMT $extra_img_options "$img_name" $image_size 2>&1
+        $QEMU_IMG create $object_options -f $IMGFMT $extra_img_options "$img_name" $image_size 2>&1
      fi
     ) | _filter_img_create
 
     # Start an NBD server on the image file, which is what we'll be talking to
     if [ $IMGPROTO = "nbd" ]; then
-        eval "$QEMU_NBD -v -t -b 127.0.0.1 -p 10810 -f $IMGFMT  $TEST_IMG_FILE &"
+        eval "$QEMU_NBD -v -t -b 127.0.0.1 -p 10810 -f $IMGFMT  $TEST_IMG_FILE >/dev/null &"
         sleep 1 # FIXME: qemu-nbd needs to be listening before we continue
     fi
 }
@@ -164,11 +189,11 @@ _cleanup_test_img()
     case "$IMGPROTO" in
 
         nbd)
-            if [ -f "${TEST_DIR}/qemu-nbd.pid" ]; then
+            if [ -f "${QEMU_TEST_DIR}/qemu-nbd.pid" ]; then
                 local QEMU_NBD_PID
-                read QEMU_NBD_PID < "${TEST_DIR}/qemu-nbd.pid"
+                read QEMU_NBD_PID < "${QEMU_TEST_DIR}/qemu-nbd.pid"
                 kill ${QEMU_NBD_PID}
-                rm -f "${TEST_DIR}/qemu-nbd.pid"
+                rm -f "${QEMU_TEST_DIR}/qemu-nbd.pid"
             fi
             rm -f "$TEST_IMG_FILE"
             ;;
@@ -186,10 +211,6 @@ _cleanup_test_img()
             rbd --no-progress rm "$TEST_DIR/t.$IMGFMT" > /dev/null
             ;;
 
-        archipelago)
-            vlmc remove "at.$IMGFMT" > /dev/null
-            ;;
-
         sheepdog)
             collie vdi delete "$TEST_DIR/t.$IMGFMT"
             ;;
@@ -199,10 +220,13 @@ _cleanup_test_img()
 
 _check_test_img()
 {
-    $QEMU_IMG check "$@" -f $IMGFMT "$TEST_IMG" 2>&1 | _filter_testdir | \
-        sed -e '/allocated.*fragmented.*compressed clusters/d' \
-            -e 's/qemu-img: This image format does not support checks/No errors were found on the image./' \
-            -e '/Image end offset: [0-9]\+/d'
+    (
+        if [ "$IMGOPTSSYNTAX" = "true" ]; then
+            $QEMU_IMG check $QEMU_IMG_EXTRA_ARGS "$@" "$TEST_IMG" 2>&1
+        else
+            $QEMU_IMG check "$@" -f $IMGFMT "$TEST_IMG" 2>&1
+        fi
+    ) | _filter_testdir | _filter_qemu_img_check
 }
 
 _img_info()
@@ -323,6 +347,17 @@ _supported_fmt()
     _notrun "not suitable for this image format: $IMGFMT"
 }
 
+# tests whether $IMGFMT is one of the unsupported image format for a test
+#
+_unsupported_fmt()
+{
+    for f; do
+        if [ "$f" = "$IMGFMT" ]; then
+            _notrun "not suitable for this image format: $IMGFMT"
+        fi
+    done
+}
+
 # tests whether $IMGPROTO is one of the supported image protocols for a test
 #
 _supported_proto()
@@ -334,6 +369,18 @@ _supported_proto()
     done
 
     _notrun "not suitable for this image protocol: $IMGPROTO"
+}
+
+# tests whether $IMGPROTO is specified as an unsupported image protocol for a test
+#
+_unsupported_proto()
+{
+    for f; do
+        if [ "$f" = "$IMGPROTO" ]; then
+            _notrun "not suitable for this image protocol: $IMGPROTO"
+            return
+        fi
+    done
 }
 
 # tests whether the host OS is one of the supported OSes for a test

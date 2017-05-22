@@ -37,40 +37,30 @@
 #define IPMI_BT_HBUSY_BIT          6
 #define IPMI_BT_BBUSY_BIT          7
 
-#define IPMI_BT_CLR_WR_MASK        (1 << IPMI_BT_CLR_WR_BIT)
 #define IPMI_BT_GET_CLR_WR(d)      (((d) >> IPMI_BT_CLR_WR_BIT) & 0x1)
-#define IPMI_BT_SET_CLR_WR(d, v)   (d) = (((d) & ~IPMI_BT_CLR_WR_MASK) | \
-                                       (((v & 1) << IPMI_BT_CLR_WR_BIT)))
 
-#define IPMI_BT_CLR_RD_MASK        (1 << IPMI_BT_CLR_RD_BIT)
 #define IPMI_BT_GET_CLR_RD(d)      (((d) >> IPMI_BT_CLR_RD_BIT) & 0x1)
-#define IPMI_BT_SET_CLR_RD(d, v)   (d) = (((d) & ~IPMI_BT_CLR_RD_MASK) | \
-                                       (((v & 1) << IPMI_BT_CLR_RD_BIT)))
 
-#define IPMI_BT_H2B_ATN_MASK       (1 << IPMI_BT_H2B_ATN_BIT)
 #define IPMI_BT_GET_H2B_ATN(d)     (((d) >> IPMI_BT_H2B_ATN_BIT) & 0x1)
-#define IPMI_BT_SET_H2B_ATN(d, v)  (d) = (((d) & ~IPMI_BT_H2B_ATN_MASK) | \
-                                        (((v & 1) << IPMI_BT_H2B_ATN_BIT)))
 
 #define IPMI_BT_B2H_ATN_MASK       (1 << IPMI_BT_B2H_ATN_BIT)
 #define IPMI_BT_GET_B2H_ATN(d)     (((d) >> IPMI_BT_B2H_ATN_BIT) & 0x1)
-#define IPMI_BT_SET_B2H_ATN(d, v)  (d) = (((d) & ~IPMI_BT_B2H_ATN_MASK) | \
-                                        (((v & 1) << IPMI_BT_B2H_ATN_BIT)))
+#define IPMI_BT_SET_B2H_ATN(d, v)  ((d) = (((d) & ~IPMI_BT_B2H_ATN_MASK) | \
+                                        (((v) & 1) << IPMI_BT_B2H_ATN_BIT)))
 
 #define IPMI_BT_SMS_ATN_MASK       (1 << IPMI_BT_SMS_ATN_BIT)
 #define IPMI_BT_GET_SMS_ATN(d)     (((d) >> IPMI_BT_SMS_ATN_BIT) & 0x1)
-#define IPMI_BT_SET_SMS_ATN(d, v)  (d) = (((d) & ~IPMI_BT_SMS_ATN_MASK) | \
-                                        (((v & 1) << IPMI_BT_SMS_ATN_BIT)))
+#define IPMI_BT_SET_SMS_ATN(d, v)  ((d) = (((d) & ~IPMI_BT_SMS_ATN_MASK) | \
+                                        (((v) & 1) << IPMI_BT_SMS_ATN_BIT)))
 
 #define IPMI_BT_HBUSY_MASK         (1 << IPMI_BT_HBUSY_BIT)
 #define IPMI_BT_GET_HBUSY(d)       (((d) >> IPMI_BT_HBUSY_BIT) & 0x1)
-#define IPMI_BT_SET_HBUSY(d, v)    (d) = (((d) & ~IPMI_BT_HBUSY_MASK) | \
-                                       (((v & 1) << IPMI_BT_HBUSY_BIT)))
+#define IPMI_BT_SET_HBUSY(d, v)    ((d) = (((d) & ~IPMI_BT_HBUSY_MASK) | \
+                                       (((v) & 1) << IPMI_BT_HBUSY_BIT)))
 
 #define IPMI_BT_BBUSY_MASK         (1 << IPMI_BT_BBUSY_BIT)
-#define IPMI_BT_GET_BBUSY(d)       (((d) >> IPMI_BT_BBUSY_BIT) & 0x1)
-#define IPMI_BT_SET_BBUSY(d, v)    (d) = (((d) & ~IPMI_BT_BBUSY_MASK) | \
-                                       (((v & 1) << IPMI_BT_BBUSY_BIT)))
+#define IPMI_BT_SET_BBUSY(d, v)    ((d) = (((d) & ~IPMI_BT_BBUSY_MASK) | \
+                                       (((v) & 1) << IPMI_BT_BBUSY_BIT)))
 
 
 /* Mask register */
@@ -79,13 +69,13 @@
 
 #define IPMI_BT_B2H_IRQ_EN_MASK      (1 << IPMI_BT_B2H_IRQ_EN_BIT)
 #define IPMI_BT_GET_B2H_IRQ_EN(d)    (((d) >> IPMI_BT_B2H_IRQ_EN_BIT) & 0x1)
-#define IPMI_BT_SET_B2H_IRQ_EN(d, v) (d) = (((d) & ~IPMI_BT_B2H_IRQ_EN_MASK) | \
-                                        (((v & 1) << IPMI_BT_B2H_IRQ_EN_BIT)))
+#define IPMI_BT_SET_B2H_IRQ_EN(d, v) ((d) = (((d) & ~IPMI_BT_B2H_IRQ_EN_MASK) |\
+                                        (((v) & 1) << IPMI_BT_B2H_IRQ_EN_BIT)))
 
 #define IPMI_BT_B2H_IRQ_MASK         (1 << IPMI_BT_B2H_IRQ_BIT)
 #define IPMI_BT_GET_B2H_IRQ(d)       (((d) >> IPMI_BT_B2H_IRQ_BIT) & 0x1)
-#define IPMI_BT_SET_B2H_IRQ(d, v)    (d) = (((d) & ~IPMI_BT_B2H_IRQ_MASK) | \
-                                        (((v & 1) << IPMI_BT_B2H_IRQ_BIT)))
+#define IPMI_BT_SET_B2H_IRQ(d, v)    ((d) = (((d) & ~IPMI_BT_B2H_IRQ_MASK) | \
+                                        (((v) & 1) << IPMI_BT_B2H_IRQ_BIT)))
 
 typedef struct IPMIBT {
     IPMIBmc *bmc;
@@ -390,16 +380,6 @@ static void ipmi_bt_init(IPMIInterface *ii, Error **errp)
     memory_region_init_io(&ib->io, NULL, &ipmi_bt_io_ops, ii, "ipmi-bt", 3);
 }
 
-static void ipmi_bt_class_init(IPMIInterfaceClass *iic)
-{
-    iic->init = ipmi_bt_init;
-    iic->set_atn = ipmi_bt_set_atn;
-    iic->handle_rsp = ipmi_bt_handle_rsp;
-    iic->handle_if_event = ipmi_bt_handle_event;
-    iic->set_irq_enable = ipmi_bt_set_irq_enable;
-    iic->reset = ipmi_bt_handle_reset;
-}
-
 
 #define TYPE_ISA_IPMI_BT "isa-ipmi-bt"
 #define ISA_IPMI_BT(obj) OBJECT_CHECK(ISAIPMIBTDevice, (obj), \
@@ -409,8 +389,37 @@ typedef struct ISAIPMIBTDevice {
     ISADevice dev;
     int32_t isairq;
     IPMIBT bt;
-    IPMIFwInfo fwinfo;
+    uint32_t uuid;
 } ISAIPMIBTDevice;
+
+static void ipmi_bt_get_fwinfo(struct IPMIInterface *ii, IPMIFwInfo *info)
+{
+    ISAIPMIBTDevice *iib = ISA_IPMI_BT(ii);
+
+    info->interface_name = "bt";
+    info->interface_type = IPMI_SMBIOS_BT;
+    info->ipmi_spec_major_revision = 2;
+    info->ipmi_spec_minor_revision = 0;
+    info->base_address = iib->bt.io_base;
+    info->register_length = iib->bt.io_length;
+    info->register_spacing = 1;
+    info->memspace = IPMI_MEMSPACE_IO;
+    info->irq_type = IPMI_LEVEL_IRQ;
+    info->interrupt_number = iib->isairq;
+    info->i2c_slave_address = iib->bt.bmc->slave_addr;
+    info->uuid = iib->uuid;
+}
+
+static void ipmi_bt_class_init(IPMIInterfaceClass *iic)
+{
+    iic->init = ipmi_bt_init;
+    iic->set_atn = ipmi_bt_set_atn;
+    iic->handle_rsp = ipmi_bt_handle_rsp;
+    iic->handle_if_event = ipmi_bt_handle_event;
+    iic->set_irq_enable = ipmi_bt_set_irq_enable;
+    iic->reset = ipmi_bt_handle_reset;
+    iic->get_fwinfo = ipmi_bt_get_fwinfo;
+}
 
 static void isa_ipmi_bt_realize(DeviceState *dev, Error **errp)
 {
@@ -423,6 +432,8 @@ static void isa_ipmi_bt_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "IPMI device requires a bmc attribute to be set");
         return;
     }
+
+    iib->uuid = ipmi_next_uuid();
 
     iib->bt.bmc->intf = ii;
 
@@ -438,20 +449,6 @@ static void isa_ipmi_bt_realize(DeviceState *dev, Error **errp)
     qdev_set_legacy_instance_id(dev, iib->bt.io_base, iib->bt.io_length);
 
     isa_register_ioport(isadev, &iib->bt.io, iib->bt.io_base);
-
-    iib->fwinfo.interface_name = "bt";
-    iib->fwinfo.interface_type = IPMI_SMBIOS_BT;
-    iib->fwinfo.ipmi_spec_major_revision = 2;
-    iib->fwinfo.ipmi_spec_minor_revision = 0;
-    iib->fwinfo.base_address = iib->bt.io_base;
-    iib->fwinfo.register_length = iib->bt.io_length;
-    iib->fwinfo.register_spacing = 1;
-    iib->fwinfo.memspace = IPMI_MEMSPACE_IO;
-    iib->fwinfo.irq_type = IPMI_LEVEL_IRQ;
-    iib->fwinfo.interrupt_number = iib->isairq;
-    iib->fwinfo.acpi_parent = "\\_SB.PCI0.ISA";
-    iib->fwinfo.i2c_slave_address = iib->bt.bmc->slave_addr;
-    ipmi_add_fwinfo(&iib->fwinfo, errp);
 }
 
 static const VMStateDescription vmstate_ISAIPMIBTDevice = {
@@ -464,10 +461,8 @@ static const VMStateDescription vmstate_ISAIPMIBTDevice = {
         VMSTATE_BOOL(bt.use_irq, ISAIPMIBTDevice),
         VMSTATE_BOOL(bt.irqs_enabled, ISAIPMIBTDevice),
         VMSTATE_UINT32(bt.outpos, ISAIPMIBTDevice),
-        VMSTATE_VBUFFER_UINT32(bt.outmsg, ISAIPMIBTDevice, 1, NULL, 0,
-                               bt.outlen),
-        VMSTATE_VBUFFER_UINT32(bt.inmsg, ISAIPMIBTDevice, 1, NULL, 0,
-                               bt.inlen),
+        VMSTATE_VBUFFER_UINT32(bt.outmsg, ISAIPMIBTDevice, 1, NULL, bt.outlen),
+        VMSTATE_VBUFFER_UINT32(bt.inmsg, ISAIPMIBTDevice, 1, NULL, bt.inlen),
         VMSTATE_UINT8(bt.control_reg, ISAIPMIBTDevice),
         VMSTATE_UINT8(bt.mask_reg, ISAIPMIBTDevice),
         VMSTATE_UINT8(bt.waiting_rsp, ISAIPMIBTDevice),

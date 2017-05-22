@@ -29,7 +29,7 @@
 #include "block/write-threshold.h"
 #include "qmp-commands.h"
 #include "qapi-visit.h"
-#include "qapi/qmp-output-visitor.h"
+#include "qapi/qobject-output-visitor.h"
 #include "qapi/qmp/types.h"
 #include "sysemu/block-backend.h"
 #include "qemu/cutils.h"
@@ -67,10 +67,10 @@ BlockDeviceInfo *bdrv_block_device_info(BlockBackend *blk,
     info->backing_file_depth = bdrv_get_backing_file_depth(bs);
     info->detect_zeroes = bs->detect_zeroes;
 
-    if (bs->throttle_state) {
+    if (blk && blk_get_public(blk)->throttle_state) {
         ThrottleConfig cfg;
 
-        throttle_group_get_config(bs, &cfg);
+        throttle_group_get_config(blk, &cfg);
 
         info->bps     = cfg.buckets[THROTTLE_BPS_TOTAL].avg;
         info->bps_rd  = cfg.buckets[THROTTLE_BPS_READ].avg;
@@ -118,7 +118,7 @@ BlockDeviceInfo *bdrv_block_device_info(BlockBackend *blk,
         info->iops_size = cfg.op_size;
 
         info->has_group = true;
-        info->group = g_strdup(throttle_group_get_name(bs));
+        info->group = g_strdup(throttle_group_get_name(blk));
     }
 
     info->write_threshold = bdrv_write_threshold_get(bs);
@@ -237,8 +237,8 @@ void bdrv_query_image_info(BlockDriverState *bs,
 
     size = bdrv_getlength(bs);
     if (size < 0) {
-        error_setg_errno(errp, -size, "Can't get size of device '%s'",
-                         bdrv_get_device_name(bs));
+        error_setg_errno(errp, -size, "Can't get image size '%s'",
+                         bs->exact_filename);
         goto out;
     }
 
@@ -357,10 +357,6 @@ static void bdrv_query_info(BlockBackend *blk, BlockInfo **p_info,
     qapi_free_BlockInfo(info);
 }
 
-static BlockStats *bdrv_query_stats(BlockBackend *blk,
-                                    const BlockDriverState *bs,
-                                    bool query_backing);
-
 static void bdrv_query_blk_stats(BlockDeviceStats *ds, BlockBackend *blk)
 {
     BlockAcctStats *stats = blk_get_stats(blk);
@@ -428,9 +424,18 @@ static void bdrv_query_blk_stats(BlockDeviceStats *ds, BlockBackend *blk)
     }
 }
 
-static void bdrv_query_bds_stats(BlockStats *s, const BlockDriverState *bs,
+static BlockStats *bdrv_query_bds_stats(const BlockDriverState *bs,
                                  bool query_backing)
 {
+    BlockStats *s = NULL;
+
+    s = g_malloc0(sizeof(*s));
+    s->stats = g_malloc0(sizeof(*s->stats));
+
+    if (!bs) {
+        return s;
+    }
+
     if (bdrv_get_node_name(bs)[0]) {
         s->has_node_name = true;
         s->node_name = g_strdup(bdrv_get_node_name(bs));
@@ -440,32 +445,12 @@ static void bdrv_query_bds_stats(BlockStats *s, const BlockDriverState *bs,
 
     if (bs->file) {
         s->has_parent = true;
-        s->parent = bdrv_query_stats(NULL, bs->file->bs, query_backing);
+        s->parent = bdrv_query_bds_stats(bs->file->bs, query_backing);
     }
 
     if (query_backing && bs->backing) {
         s->has_backing = true;
-        s->backing = bdrv_query_stats(NULL, bs->backing->bs, query_backing);
-    }
-
-}
-
-static BlockStats *bdrv_query_stats(BlockBackend *blk,
-                                    const BlockDriverState *bs,
-                                    bool query_backing)
-{
-    BlockStats *s;
-
-    s = g_malloc0(sizeof(*s));
-    s->stats = g_malloc0(sizeof(*s->stats));
-
-    if (blk) {
-        s->has_device = true;
-        s->device = g_strdup(blk_name(blk));
-        bdrv_query_blk_stats(s->stats, blk);
-    }
-    if (bs) {
-        bdrv_query_bds_stats(s, bs, query_backing);
+        s->backing = bdrv_query_bds_stats(bs->backing->bs, query_backing);
     }
 
     return s;
@@ -494,42 +479,44 @@ BlockInfoList *qmp_query_block(Error **errp)
     return head;
 }
 
-static bool next_query_bds(BlockBackend **blk, BlockDriverState **bs,
-                           bool query_nodes)
-{
-    if (query_nodes) {
-        *bs = bdrv_next_node(*bs);
-        return !!*bs;
-    }
-
-    *blk = blk_next(*blk);
-    *bs = *blk ? blk_bs(*blk) : NULL;
-
-    return !!*blk;
-}
-
 BlockStatsList *qmp_query_blockstats(bool has_query_nodes,
                                      bool query_nodes,
                                      Error **errp)
 {
     BlockStatsList *head = NULL, **p_next = &head;
-    BlockBackend *blk = NULL;
-    BlockDriverState *bs = NULL;
+    BlockBackend *blk;
+    BlockDriverState *bs;
 
     /* Just to be safe if query_nodes is not always initialized */
-    query_nodes = has_query_nodes && query_nodes;
+    if (has_query_nodes && query_nodes) {
+        for (bs = bdrv_next_node(NULL); bs; bs = bdrv_next_node(bs)) {
+            BlockStatsList *info = g_malloc0(sizeof(*info));
+            AioContext *ctx = bdrv_get_aio_context(bs);
 
-    while (next_query_bds(&blk, &bs, query_nodes)) {
-        BlockStatsList *info = g_malloc0(sizeof(*info));
-        AioContext *ctx = blk ? blk_get_aio_context(blk)
-                              : bdrv_get_aio_context(bs);
+            aio_context_acquire(ctx);
+            info->value = bdrv_query_bds_stats(bs, false);
+            aio_context_release(ctx);
 
-        aio_context_acquire(ctx);
-        info->value = bdrv_query_stats(blk, bs, !query_nodes);
-        aio_context_release(ctx);
+            *p_next = info;
+            p_next = &info->next;
+        }
+    } else {
+        for (blk = blk_next(NULL); blk; blk = blk_next(blk)) {
+            BlockStatsList *info = g_malloc0(sizeof(*info));
+            AioContext *ctx = blk_get_aio_context(blk);
+            BlockStats *s;
 
-        *p_next = info;
-        p_next = &info->next;
+            aio_context_acquire(ctx);
+            s = bdrv_query_bds_stats(blk_bs(blk), true);
+            s->has_device = true;
+            s->device = g_strdup(blk_name(blk));
+            bdrv_query_blk_stats(s->stats, blk);
+            aio_context_release(ctx);
+
+            info->value = s;
+            *p_next = info;
+            p_next = &info->next;
+        }
     }
 
     return head;
@@ -690,16 +677,15 @@ static void dump_qdict(fprintf_function func_fprintf, void *f, int indentation,
 void bdrv_image_info_specific_dump(fprintf_function func_fprintf, void *f,
                                    ImageInfoSpecific *info_spec)
 {
-    QmpOutputVisitor *ov = qmp_output_visitor_new();
     QObject *obj, *data;
+    Visitor *v = qobject_output_visitor_new(&obj);
 
-    visit_type_ImageInfoSpecific(qmp_output_get_visitor(ov), NULL, &info_spec,
-                                 &error_abort);
-    obj = qmp_output_get_qobject(ov);
-    assert(qobject_type(obj) == QTYPE_QDICT);
+    visit_type_ImageInfoSpecific(v, NULL, &info_spec, &error_abort);
+    visit_complete(v, &obj);
     data = qdict_get(qobject_to_qdict(obj), "data");
     dump_qobject(func_fprintf, f, 1, data);
-    qmp_output_visitor_cleanup(ov);
+    qobject_decref(obj);
+    visit_free(v);
 }
 
 void bdrv_image_info_dump(fprintf_function func_fprintf, void *f,

@@ -57,7 +57,6 @@ do {                                                       \
 
 #define PFLASH_LAZY_ROMD_THRESHOLD 42
 
-#define TYPE_CFI_PFLASH02 "cfi.pflash02"
 #define CFI_PFLASH02(obj) OBJECT_CHECK(pflash_t, (obj), TYPE_CFI_PFLASH02)
 
 struct pflash_t {
@@ -253,11 +252,11 @@ static void pflash_update(pflash_t *pfl, int offset,
     int offset_end;
     if (pfl->blk) {
         offset_end = offset + size;
-        /* round to sectors */
-        offset = offset >> 9;
-        offset_end = (offset_end + 511) >> 9;
-        blk_write(pfl->blk, offset, pfl->storage + (offset << 9),
-                  offset_end - offset);
+        /* widen to sector boundaries */
+        offset = QEMU_ALIGN_DOWN(offset, BDRV_SECTOR_SIZE);
+        offset_end = QEMU_ALIGN_UP(offset_end, BDRV_SECTOR_SIZE);
+        blk_pwrite(pfl->blk, offset, pfl->storage + offset,
+                   offset_end - offset, 0);
     }
 }
 
@@ -601,6 +600,19 @@ static void pflash_cfi02_realize(DeviceState *dev, Error **errp)
     int ret;
     Error *local_err = NULL;
 
+    if (pfl->sector_len == 0) {
+        error_setg(errp, "attribute \"sector-length\" not specified or zero.");
+        return;
+    }
+    if (pfl->nb_blocs == 0) {
+        error_setg(errp, "attribute \"num-blocks\" not specified or zero.");
+        return;
+    }
+    if (pfl->name == NULL) {
+        error_setg(errp, "attribute \"name\" not specified.");
+        return;
+    }
+
     chip_len = pfl->sector_len * pfl->nb_blocs;
     /* XXX: to be fixed */
 #if 0
@@ -620,9 +632,22 @@ static void pflash_cfi02_realize(DeviceState *dev, Error **errp)
     vmstate_register_ram(&pfl->orig_mem, DEVICE(pfl));
     pfl->storage = memory_region_get_ram_ptr(&pfl->orig_mem);
     pfl->chip_len = chip_len;
+
+    if (pfl->blk) {
+        uint64_t perm;
+        pfl->ro = blk_is_read_only(pfl->blk);
+        perm = BLK_PERM_CONSISTENT_READ | (pfl->ro ? 0 : BLK_PERM_WRITE);
+        ret = blk_set_perm(pfl->blk, perm, BLK_PERM_ALL, errp);
+        if (ret < 0) {
+            return;
+        }
+    } else {
+        pfl->ro = 0;
+    }
+
     if (pfl->blk) {
         /* read the initial flash content */
-        ret = blk_read(pfl->blk, 0, pfl->storage, chip_len >> 9);
+        ret = blk_pread(pfl->blk, 0, pfl->storage, chip_len);
         if (ret < 0) {
             vmstate_unregister_ram(&pfl->orig_mem, DEVICE(pfl));
             error_setg(errp, "failed to read the initial flash content");
@@ -633,12 +658,6 @@ static void pflash_cfi02_realize(DeviceState *dev, Error **errp)
     pflash_setup_mappings(pfl);
     pfl->rom_mode = 1;
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &pfl->mem);
-
-    if (pfl->blk) {
-        pfl->ro = blk_is_read_only(pfl->blk);
-    } else {
-        pfl->ro = 0;
-    }
 
     pfl->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, pflash_timer, pfl);
     pfl->wcycle = 0;

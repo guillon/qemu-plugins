@@ -24,15 +24,15 @@
  */
 
 #include "qemu/osdep.h"
-#include <hw/hw.h>
-#include <hw/i386/pc.h>
-#include <hw/pci/pci.h>
-#include <hw/isa/isa.h>
+#include "hw/hw.h"
+#include "hw/i386/pc.h"
+#include "hw/pci/pci.h"
+#include "hw/isa/isa.h"
 #include "sysemu/block-backend.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/dma.h"
 
-#include <hw/ide/pci.h>
+#include "hw/ide/pci.h"
 
 static uint64_t bmdma_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -165,7 +165,7 @@ static void pci_piix_ide_realize(PCIDevice *dev, Error **errp)
     pci_piix_init_ports(d);
 }
 
-int pci_piix3_xen_ide_unplug(DeviceState *dev)
+int pci_piix3_xen_ide_unplug(DeviceState *dev, bool aux)
 {
     PCIIDEState *pci_ide;
     DriveInfo *di;
@@ -174,11 +174,15 @@ int pci_piix3_xen_ide_unplug(DeviceState *dev)
 
     pci_ide = PCI_IDE(dev);
 
-    for (i = 0; i < 4; i++) {
+    for (i = aux ? 1 : 0; i < 4; i++) {
         di = drive_get_by_index(IF_IDE, i);
         if (di != NULL && !di->media_cd) {
             BlockBackend *blk = blk_by_legacy_dinfo(di);
             DeviceState *ds = blk_get_attached_dev(blk);
+
+            blk_drain(blk);
+            blk_flush(blk);
+
             if (ds) {
                 blk_detach_dev(blk, ds);
             }

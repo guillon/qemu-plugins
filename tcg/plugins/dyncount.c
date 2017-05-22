@@ -42,15 +42,15 @@
 #error "dyncount plugin required capstone library >= 3.x. Please install from http://www.capstone-engine.org/."
 #endif
 
-#if defined(TARGET_I386)
+#if defined(TARGET_X86_64)
 #define CS_ARCH CS_ARCH_X86
-#define CS_MODE CS_MODE_32
+#define CS_MODE CS_MODE_64
 #define CS_GROUPS_NAME "x86"
 #define CS_INS_COUNT X86_INS_ENDING
 #define CS_GRP_COUNT X86_GRP_ENDING
-#elif defined(TARGET_X86_64)
+#elif defined(TARGET_I386)
 #define CS_ARCH CS_ARCH_X86
-#define CS_MODE CS_MODE_64
+#define CS_MODE CS_MODE_32
 #define CS_GROUPS_NAME "x86"
 #define CS_INS_COUNT X86_INS_ENDING
 #define CS_GRP_COUNT X86_GRP_ENDING

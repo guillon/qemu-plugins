@@ -1,5 +1,5 @@
 /*
- * Virtio 9p
+ * 9p
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or
  * later.  See the COPYING file in the top-level directory.
@@ -9,6 +9,7 @@
 #include "qemu/config-file.h"
 #include "qemu/option.h"
 #include "qemu/module.h"
+#include "qemu/throttle-options.h"
 
 static QemuOptsList qemu_fsdev_opts = {
     .name = "fsdev",
@@ -38,6 +39,8 @@ static QemuOptsList qemu_fsdev_opts = {
             .name = "sock_fd",
             .type = QEMU_OPT_NUMBER,
         },
+
+        THROTTLE_OPTS,
 
         { /*End of list */ }
     },

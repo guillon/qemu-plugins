@@ -25,7 +25,7 @@
 #include "hw/hw.h"
 #include "hw/isa/isa.h"
 #include "hw/i386/pc.h"
-#include "sysemu/kvm.h"
+#include "sysemu/hw_accel.h"
 #include "hw/qdev.h"
 
 //#define VMPORT_DEBUG
@@ -36,7 +36,6 @@
 #define VMPORT_ENTRIES 0x2c
 #define VMPORT_MAGIC   0x564D5868
 
-#define TYPE_VMPORT "vmport"
 #define VMPORT(obj) OBJECT_CHECK(VMPortState, (obj), TYPE_VMPORT)
 
 typedef struct VMPortState

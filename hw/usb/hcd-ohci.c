@@ -42,6 +42,8 @@
 
 #define OHCI_MAX_PORTS 15
 
+#define ED_LINK_LIMIT 32
+
 static int64_t usb_frame_time;
 static int64_t usb_bit_time;
 
@@ -725,7 +727,7 @@ static int ohci_service_iso_td(OHCIState *ohci, struct ohci_ed *ed,
     if (ohci_read_iso_td(ohci, addr, &iso_td)) {
         trace_usb_ohci_iso_td_read_failed(addr);
         ohci_die(ohci);
-        return 0;
+        return 1;
     }
 
     starting_frame = OHCI_BM(iso_td.flags, TD_SF);
@@ -999,7 +1001,7 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
     if (ohci_read_td(ohci, addr, &td)) {
         trace_usb_ohci_td_read_error(addr);
         ohci_die(ohci);
-        return 0;
+        return 1;
     }
 
     dir = OHCI_BM(ed->flags, ED_D);
@@ -1184,7 +1186,7 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head, int completion)
     uint32_t next_ed;
     uint32_t cur;
     int active;
-
+    uint32_t link_cnt = 0;
     active = 0;
 
     if (head == 0)
@@ -1198,6 +1200,11 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head, int completion)
         }
 
         next_ed = ed.next & OHCI_DPTR_MASK;
+
+        if (++link_cnt > ED_LINK_LIMIT) {
+            ohci_die(ohci);
+            return 0;
+        }
 
         if ((ed.head & OHCI_ED_H) || (ed.flags & OHCI_ED_K)) {
             uint32_t addr;
@@ -1474,7 +1481,7 @@ static uint32_t ohci_get_frame_remaining(OHCIState *ohci)
     if (tks >= usb_frame_time)
         return (ohci->frt << 31);
 
-    tks = muldiv64(1, tks, usb_bit_time);
+    tks = tks / usb_bit_time;
     fr = (uint16_t)(ohci->fi - tks);
 
     return (ohci->frt << 31) | fr;
@@ -1848,6 +1855,12 @@ static void usb_ohci_init(OHCIState *ohci, DeviceState *dev,
 
     ohci->as = as;
 
+    if (num_ports > OHCI_MAX_PORTS) {
+        error_setg(errp, "OHCI num-ports=%d is too big (limit is %d ports)",
+                   num_ports, OHCI_MAX_PORTS);
+        return;
+    }
+
     if (usb_frame_time == 0) {
 #ifdef OHCI_TIME_WARP
         usb_frame_time = NANOSECONDS_PER_SECOND;
@@ -2133,7 +2146,7 @@ static const TypeInfo ohci_pci_info = {
 
 static Property ohci_sysbus_properties[] = {
     DEFINE_PROP_UINT32("num-ports", OHCISysBusState, num_ports, 3),
-    DEFINE_PROP_DMAADDR("dma-offset", OHCISysBusState, dma_offset, 3),
+    DEFINE_PROP_DMAADDR("dma-offset", OHCISysBusState, dma_offset, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 

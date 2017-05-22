@@ -97,7 +97,8 @@ static int run_ccw(VDev *vdev, int cmd, void *ptr, int len)
 
     /* start command processing */
     stsch_err(vdev->schid, &schib);
-    schib.scsw.ctrl = SCSW_FCTL_START_FUNC;
+    /* enable the subchannel for IPL device */
+    schib.pmcw.ena = 1;
     msch(vdev->schid, &schib);
 
     /* start subchannel command */
@@ -584,6 +585,7 @@ bool virtio_is_supported(SubChannelId schid)
         switch (vdev.senseid.cu_model) {
         case VIRTIO_ID_BLOCK:
         case VIRTIO_ID_SCSI:
+        case VIRTIO_ID_NET:
             return true;
         }
     }

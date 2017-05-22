@@ -19,6 +19,7 @@
 #include "qemu/atomic.h"
 #include "qemu/coroutine.h"
 #include "qemu/coroutine_int.h"
+#include "block/aio.h"
 
 enum {
     POOL_BATCH_SIZE = 64,
@@ -42,7 +43,7 @@ static void coroutine_pool_cleanup(Notifier *n, void *value)
     }
 }
 
-Coroutine *qemu_coroutine_create(CoroutineEntry *entry)
+Coroutine *qemu_coroutine_create(CoroutineEntry *entry, void *opaque)
 {
     Coroutine *co = NULL;
 
@@ -76,7 +77,8 @@ Coroutine *qemu_coroutine_create(CoroutineEntry *entry)
     }
 
     co->entry = entry;
-    QTAILQ_INIT(&co->co_queue_wakeup);
+    co->entry_arg = opaque;
+    QSIMPLEQ_INIT(&co->co_queue_wakeup);
     return co;
 }
 
@@ -100,12 +102,12 @@ static void coroutine_delete(Coroutine *co)
     qemu_coroutine_delete(co);
 }
 
-void qemu_coroutine_enter(Coroutine *co, void *opaque)
+void qemu_aio_coroutine_enter(AioContext *ctx, Coroutine *co)
 {
     Coroutine *self = qemu_coroutine_self();
     CoroutineAction ret;
 
-    trace_qemu_coroutine_enter(self, co, opaque);
+    trace_qemu_aio_coroutine_enter(ctx, self, co, co->entry_arg);
 
     if (co->caller) {
         fprintf(stderr, "Co-routine re-entered recursively\n");
@@ -113,7 +115,13 @@ void qemu_coroutine_enter(Coroutine *co, void *opaque)
     }
 
     co->caller = self;
-    co->entry_arg = opaque;
+    co->ctx = ctx;
+
+    /* Store co->ctx before anything that stores co.  Matches
+     * barrier in aio_co_wake and qemu_co_mutex_wake.
+     */
+    smp_wmb();
+
     ret = qemu_coroutine_switch(self, co, COROUTINE_ENTER);
 
     qemu_co_queue_run_restart(co);
@@ -122,11 +130,24 @@ void qemu_coroutine_enter(Coroutine *co, void *opaque)
     case COROUTINE_YIELD:
         return;
     case COROUTINE_TERMINATE:
+        assert(!co->locks_held);
         trace_qemu_coroutine_terminate(co);
         coroutine_delete(co);
         return;
     default:
         abort();
+    }
+}
+
+void qemu_coroutine_enter(Coroutine *co)
+{
+    qemu_aio_coroutine_enter(qemu_get_current_aio_context(), co);
+}
+
+void qemu_coroutine_enter_if_inactive(Coroutine *co)
+{
+    if (!qemu_coroutine_entered(co)) {
+        qemu_coroutine_enter(co);
     }
 }
 
@@ -144,4 +165,9 @@ void coroutine_fn qemu_coroutine_yield(void)
 
     self->caller = NULL;
     qemu_coroutine_switch(self, to, COROUTINE_YIELD);
+}
+
+bool qemu_coroutine_entered(Coroutine *co)
+{
+    return co->caller;
 }

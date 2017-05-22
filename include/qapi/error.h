@@ -134,7 +134,7 @@ typedef enum ErrorClass {
 /*
  * Get @err's human-readable error message.
  */
-const char *error_get_pretty(Error *err);
+const char *error_get_pretty(const Error *err);
 
 /*
  * Get @err's error class.
@@ -170,6 +170,9 @@ void error_setg_internal(Error **errp,
  * Just like error_setg(), with @os_error info added to the message.
  * If @os_error is non-zero, ": " + strerror(os_error) is appended to
  * the human-readable error message.
+ *
+ * The value of errno (which usually can get clobbered by almost any
+ * function call) will be preserved.
  */
 #define error_setg_errno(errp, os_error, fmt, ...)                      \
     error_setg_errno_internal((errp), __FILE__, __LINE__, __func__,     \

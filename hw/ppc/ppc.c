@@ -33,6 +33,7 @@
 #include "hw/timer/m48t59.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
+#include "qapi/error.h"
 #include "hw/loader.h"
 #include "sysemu/kvm.h"
 #include "kvm_ppc.h"
@@ -61,7 +62,16 @@ void ppc_set_irq(PowerPCCPU *cpu, int n_IRQ, int level)
 {
     CPUState *cs = CPU(cpu);
     CPUPPCState *env = &cpu->env;
-    unsigned int old_pending = env->pending_interrupts;
+    unsigned int old_pending;
+    bool locked = false;
+
+    /* We may already have the BQL if coming from the reset path */
+    if (!qemu_mutex_iothread_locked()) {
+        locked = true;
+        qemu_mutex_lock_iothread();
+    }
+
+    old_pending = env->pending_interrupts;
 
     if (level) {
         env->pending_interrupts |= 1 << n_IRQ;
@@ -79,9 +89,14 @@ void ppc_set_irq(PowerPCCPU *cpu, int n_IRQ, int level)
 #endif
     }
 
+
     LOG_IRQ("%s: %p n_IRQ %d level %d => pending %08" PRIx32
                 "req %08x\n", __func__, env, n_IRQ, level,
                 env->pending_interrupts, CPU(cpu)->interrupt_request);
+
+    if (locked) {
+        qemu_mutex_unlock_iothread();
+    }
 }
 
 /* PowerPC 6xx / 7xx internal IRQ controller */
@@ -164,9 +179,9 @@ static void ppc6xx_set_irq(void *opaque, int pin, int level)
     }
 }
 
-void ppc6xx_irq_init(CPUPPCState *env)
+void ppc6xx_irq_init(PowerPCCPU *cpu)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    CPUPPCState *env = &cpu->env;
 
     env->irq_inputs = (void **)qemu_allocate_irqs(&ppc6xx_set_irq, cpu,
                                                   PPC6xx_INPUT_NB);
@@ -251,9 +266,9 @@ static void ppc970_set_irq(void *opaque, int pin, int level)
     }
 }
 
-void ppc970_irq_init(CPUPPCState *env)
+void ppc970_irq_init(PowerPCCPU *cpu)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    CPUPPCState *env = &cpu->env;
 
     env->irq_inputs = (void **)qemu_allocate_irqs(&ppc970_set_irq, cpu,
                                                   PPC970_INPUT_NB);
@@ -287,9 +302,9 @@ static void power7_set_irq(void *opaque, int pin, int level)
     }
 }
 
-void ppcPOWER7_irq_init(CPUPPCState *env)
+void ppcPOWER7_irq_init(PowerPCCPU *cpu)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    CPUPPCState *env = &cpu->env;
 
     env->irq_inputs = (void **)qemu_allocate_irqs(&power7_set_irq, cpu,
                                                   POWER7_INPUT_NB);
@@ -372,9 +387,9 @@ static void ppc40x_set_irq(void *opaque, int pin, int level)
     }
 }
 
-void ppc40x_irq_init(CPUPPCState *env)
+void ppc40x_irq_init(PowerPCCPU *cpu)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    CPUPPCState *env = &cpu->env;
 
     env->irq_inputs = (void **)qemu_allocate_irqs(&ppc40x_set_irq,
                                                   cpu, PPC40x_INPUT_NB);
@@ -436,9 +451,9 @@ static void ppce500_set_irq(void *opaque, int pin, int level)
     }
 }
 
-void ppce500_irq_init(CPUPPCState *env)
+void ppce500_irq_init(PowerPCCPU *cpu)
 {
-    PowerPCCPU *cpu = ppc_env_get_cpu(env);
+    CPUPPCState *env = &cpu->env;
 
     env->irq_inputs = (void **)qemu_allocate_irqs(&ppce500_set_irq,
                                                   cpu, PPCE500_INPUT_NB);
@@ -699,9 +714,18 @@ static inline void cpu_ppc_decr_lower(PowerPCCPU *cpu)
 
 static inline void cpu_ppc_hdecr_excp(PowerPCCPU *cpu)
 {
+    CPUPPCState *env = &cpu->env;
+
     /* Raise it */
-    LOG_TB("raise decrementer exception\n");
-    ppc_set_irq(cpu, PPC_INTERRUPT_HDECR, 1);
+    LOG_TB("raise hv decrementer exception\n");
+
+    /* The architecture specifies that we don't deliver HDEC
+     * interrupts in a PM state. Not only they don't cause a
+     * wakeup but they also get effectively discarded.
+     */
+    if (!env->in_pm_state) {
+        ppc_set_irq(cpu, PPC_INTERRUPT_HDECR, 1);
+    }
 }
 
 static inline void cpu_ppc_hdecr_lower(PowerPCCPU *cpu)
@@ -837,9 +861,8 @@ static void cpu_ppc_set_tb_clk (void *opaque, uint32_t freq)
     cpu_ppc_store_purr(cpu, 0x0000000000000000ULL);
 }
 
-static void timebase_pre_save(void *opaque)
+static void timebase_save(PPCTimebase *tb)
 {
-    PPCTimebase *tb = opaque;
     uint64_t ticks = cpu_get_host_ticks();
     PowerPCCPU *first_ppc_cpu = POWERPC_CPU(first_cpu);
 
@@ -848,43 +871,30 @@ static void timebase_pre_save(void *opaque)
         return;
     }
 
+    /* not used anymore, we keep it for compatibility */
     tb->time_of_the_day_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
     /*
-     * tb_offset is only expected to be changed by migration so
+     * tb_offset is only expected to be changed by QEMU so
      * there is no need to update it from KVM here
      */
     tb->guest_timebase = ticks + first_ppc_cpu->env.tb_env->tb_offset;
 }
 
-static int timebase_post_load(void *opaque, int version_id)
+static void timebase_load(PPCTimebase *tb)
 {
-    PPCTimebase *tb_remote = opaque;
     CPUState *cpu;
     PowerPCCPU *first_ppc_cpu = POWERPC_CPU(first_cpu);
-    int64_t tb_off_adj, tb_off, ns_diff;
-    int64_t migration_duration_ns, migration_duration_tb, guest_tb, host_ns;
+    int64_t tb_off_adj, tb_off;
     unsigned long freq;
 
     if (!first_ppc_cpu->env.tb_env) {
         error_report("No timebase object");
-        return -1;
+        return;
     }
 
     freq = first_ppc_cpu->env.tb_env->tb_freq;
-    /*
-     * Calculate timebase on the destination side of migration.
-     * The destination timebase must be not less than the source timebase.
-     * We try to adjust timebase by downtime if host clocks are not
-     * too much out of sync (1 second for now).
-     */
-    host_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-    ns_diff = MAX(0, host_ns - tb_remote->time_of_the_day_ns);
-    migration_duration_ns = MIN(NANOSECONDS_PER_SECOND, ns_diff);
-    migration_duration_tb = muldiv64(migration_duration_ns, freq,
-                                     NANOSECONDS_PER_SECOND);
-    guest_tb = tb_remote->guest_timebase + MIN(0, migration_duration_tb);
 
-    tb_off_adj = guest_tb - cpu_get_host_ticks();
+    tb_off_adj = tb->guest_timebase - cpu_get_host_ticks();
 
     tb_off = first_ppc_cpu->env.tb_env->tb_offset;
     trace_ppc_tb_adjust(tb_off, tb_off_adj, tb_off_adj - tb_off,
@@ -894,9 +904,44 @@ static int timebase_post_load(void *opaque, int version_id)
     CPU_FOREACH(cpu) {
         PowerPCCPU *pcpu = POWERPC_CPU(cpu);
         pcpu->env.tb_env->tb_offset = tb_off_adj;
+#if defined(CONFIG_KVM)
+        kvm_set_one_reg(cpu, KVM_REG_PPC_TB_OFFSET,
+                        &pcpu->env.tb_env->tb_offset);
+#endif
     }
+}
 
-    return 0;
+void cpu_ppc_clock_vm_state_change(void *opaque, int running,
+                                   RunState state)
+{
+    PPCTimebase *tb = opaque;
+
+    if (running) {
+        timebase_load(tb);
+    } else {
+        timebase_save(tb);
+    }
+}
+
+/*
+ * When migrating, read the clock just before migration,
+ * so that the guest clock counts during the events
+ * between:
+ *
+ *  * vm_stop()
+ *  *
+ *  * pre_save()
+ *
+ *  This reduces clock difference on migration from 5s
+ *  to 0.1s (when max_downtime == 5s), because sending the
+ *  final pages of memory (which happens between vm_stop()
+ *  and pre_save()) takes max_downtime.
+ */
+static void timebase_pre_save(void *opaque)
+{
+    PPCTimebase *tb = opaque;
+
+    timebase_save(tb);
 }
 
 const VMStateDescription vmstate_ppc_timebase = {
@@ -905,7 +950,6 @@ const VMStateDescription vmstate_ppc_timebase = {
     .minimum_version_id = 1,
     .minimum_version_id_old = 1,
     .pre_save = timebase_pre_save,
-    .post_load = timebase_post_load,
     .fields      = (VMStateField []) {
         VMSTATE_UINT64(guest_timebase, PPCTimebase),
         VMSTATE_INT64(time_of_the_day_ns, PPCTimebase),
@@ -928,9 +972,7 @@ clk_setup_cb cpu_ppc_tb_init (CPUPPCState *env, uint32_t freq)
     }
     /* Create new timer */
     tb_env->decr_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, &cpu_ppc_decr_cb, cpu);
-    if (0) {
-        /* XXX: find a suitable condition to enable the hypervisor decrementer
-         */
+    if (env->has_hv_mode) {
         tb_env->hdecr_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, &cpu_ppc_hdecr_cb,
                                                 cpu);
     } else {
@@ -942,13 +984,6 @@ clk_setup_cb cpu_ppc_tb_init (CPUPPCState *env, uint32_t freq)
 }
 
 /* Specific helpers for POWER & PowerPC 601 RTC */
-#if 0
-static clk_setup_cb cpu_ppc601_rtc_init (CPUPPCState *env)
-{
-    return cpu_ppc_tb_init(env, 7812500);
-}
-#endif
-
 void cpu_ppc601_store_rtcu (CPUPPCState *env, uint32_t value)
 {
     _cpu_ppc_store_tbu(env, value);
@@ -1342,4 +1377,29 @@ PowerPCCPU *ppc_get_vcpu_by_dt_id(int cpu_dt_id)
     }
 
     return NULL;
+}
+
+void ppc_cpu_parse_features(const char *cpu_model)
+{
+    CPUClass *cc;
+    ObjectClass *oc;
+    const char *typename;
+    gchar **model_pieces;
+
+    model_pieces = g_strsplit(cpu_model, ",", 2);
+    if (!model_pieces[0]) {
+        error_report("Invalid/empty CPU model name");
+        exit(1);
+    }
+
+    oc = cpu_class_by_name(TYPE_POWERPC_CPU, model_pieces[0]);
+    if (oc == NULL) {
+        error_report("Unable to find CPU definition: %s", model_pieces[0]);
+        exit(1);
+    }
+
+    typename = object_class_get_name(oc);
+    cc = CPU_CLASS(oc);
+    cc->parse_features(typename, model_pieces[1], &error_fatal);
+    g_strfreev(model_pieces);
 }

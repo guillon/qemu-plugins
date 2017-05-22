@@ -9,7 +9,6 @@
  */
 
 #include "qemu/osdep.h"
-#include <glib.h>
 #include "libqtest.h"
 #include "qemu/iov.h"
 #include "qemu/sockets.h"
@@ -58,7 +57,7 @@ static void test_mirror(void)
     };
 
     /* send a qmp command to guarantee that 'connected' is setting to true. */
-    qmp("{ 'execute' : 'query-status'}");
+    qmp_discard_response("{ 'execute' : 'query-status'}");
     ret = iov_send(send_sock[0], iov, 2, 0, sizeof(size) + sizeof(send_buf));
     g_assert_cmpint(ret, ==, sizeof(send_buf) + sizeof(size));
     close(send_sock[0]);

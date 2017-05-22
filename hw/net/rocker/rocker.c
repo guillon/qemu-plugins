@@ -860,7 +860,7 @@ static void rocker_io_writel(void *opaque, hwaddr addr, uint32_t val)
         rocker_msix_irq(r, val);
         break;
     case ROCKER_TEST_DMA_SIZE:
-        r->test_dma_size = val;
+        r->test_dma_size = val & 0xFFFF;
         break;
     case ROCKER_TEST_DMA_ADDR + 4:
         r->test_dma_addr = ((uint64_t)val) << 32 | r->lower32;
@@ -1256,14 +1256,16 @@ static int rocker_msix_init(Rocker *r)
 {
     PCIDevice *dev = PCI_DEVICE(r);
     int err;
+    Error *local_err = NULL;
 
     err = msix_init(dev, ROCKER_MSIX_VEC_COUNT(r->fp_ports),
                     &r->msix_bar,
                     ROCKER_PCI_MSIX_BAR_IDX, ROCKER_PCI_MSIX_TABLE_OFFSET,
                     &r->msix_bar,
                     ROCKER_PCI_MSIX_BAR_IDX, ROCKER_PCI_MSIX_PBA_OFFSET,
-                    0);
+                    0, &local_err);
     if (err) {
+        error_report_err(local_err);
         return err;
     }
 

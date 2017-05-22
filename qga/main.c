@@ -11,7 +11,6 @@
  * See the COPYING file in the top-level directory.
  */
 #include "qemu/osdep.h"
-#include <glib.h>
 #include <getopt.h>
 #include <glib/gstdio.h>
 #ifndef _WIN32
@@ -29,6 +28,8 @@
 #include "qga/channel.h"
 #include "qemu/bswap.h"
 #include "qemu/help_option.h"
+#include "qemu/sockets.h"
+#include "qemu/systemd.h"
 #ifdef _WIN32
 #include "qga/service-win32.h"
 #include "qga/vss-win32.h"
@@ -93,6 +94,7 @@ struct GAState {
 };
 
 struct GAState *ga_state;
+QmpCommandList ga_commands;
 
 /* commands that are safe to issue while filesystems are frozen */
 static const char *ga_freeze_whitelist[] = {
@@ -191,8 +193,8 @@ static void usage(const char *cmd)
 "Usage: %s [-m <method> -p <path>] [<options>]\n"
 "QEMU Guest Agent %s\n"
 "\n"
-"  -m, --method      transport method: one of unix-listen, virtio-serial, or\n"
-"                    isa-serial (virtio-serial is the default)\n"
+"  -m, --method      transport method: one of unix-listen, virtio-serial,\n"
+"                    isa-serial, or vsock-listen (virtio-serial is the default)\n"
 "  -p, --path        device/socket path (the default for virtio-serial is:\n"
 "                    %s,\n"
 "                    the default for isa-serial is:\n"
@@ -371,7 +373,7 @@ static void ga_disable_non_whitelisted(QmpCommand *cmd, void *opaque)
     }
     if (!whitelisted) {
         g_debug("disabling command: %s", name);
-        qmp_disable_command(name);
+        qmp_disable_command(&ga_commands, name);
     }
 }
 
@@ -384,7 +386,7 @@ static void ga_enable_non_blacklisted(QmpCommand *cmd, void *opaque)
     if (g_list_find_custom(blacklist, name, ga_strcmp) == NULL &&
         !qmp_command_is_enabled(cmd)) {
         g_debug("enabling command: %s", name);
-        qmp_enable_command(name);
+        qmp_enable_command(&ga_commands, name);
     }
 }
 
@@ -421,7 +423,7 @@ void ga_set_frozen(GAState *s)
         return;
     }
     /* disable all non-whitelisted (for frozen state) commands */
-    qmp_for_each_command(ga_disable_non_whitelisted, NULL);
+    qmp_for_each_command(&ga_commands, ga_disable_non_whitelisted, NULL);
     g_warning("disabling logging due to filesystem freeze");
     ga_disable_logging(s);
     s->frozen = true;
@@ -457,7 +459,7 @@ void ga_unset_frozen(GAState *s)
     }
 
     /* enable all disabled, non-blacklisted commands */
-    qmp_for_each_command(ga_enable_non_blacklisted, s->blacklist);
+    qmp_for_each_command(&ga_commands, ga_enable_non_blacklisted, s->blacklist);
     s->frozen = false;
     if (!ga_delete_file(s->state_filepath_isfrozen)) {
         g_warning("unable to delete %s, fsfreeze may not function properly",
@@ -556,11 +558,11 @@ static void process_command(GAState *s, QDict *req)
 
     g_assert(req);
     g_debug("processing command");
-    rsp = qmp_dispatch(QOBJECT(req));
+    rsp = qmp_dispatch(&ga_commands, QOBJECT(req));
     if (rsp) {
         ret = send_response(s, rsp);
-        if (ret) {
-            g_warning("error sending response: %s", strerror(ret));
+        if (ret < 0) {
+            g_warning("error sending response: %s", strerror(-ret));
         }
         qobject_decref(rsp);
     }
@@ -649,7 +651,8 @@ static gboolean channel_event_cb(GIOCondition condition, gpointer data)
     return true;
 }
 
-static gboolean channel_init(GAState *s, const gchar *method, const gchar *path)
+static gboolean channel_init(GAState *s, const gchar *method, const gchar *path,
+                             int listen_fd)
 {
     GAChannelMethod channel_method;
 
@@ -660,12 +663,15 @@ static gboolean channel_init(GAState *s, const gchar *method, const gchar *path)
         channel_method = GA_CHANNEL_ISA_SERIAL;
     } else if (strcmp(method, "unix-listen") == 0) {
         channel_method = GA_CHANNEL_UNIX_LISTEN;
+    } else if (strcmp(method, "vsock-listen") == 0) {
+        channel_method = GA_CHANNEL_VSOCK_LISTEN;
     } else {
         g_critical("unsupported channel method/type: %s", method);
         return false;
     }
 
-    s->channel = ga_channel_new(channel_method, path, channel_event_cb, s);
+    s->channel = ga_channel_new(channel_method, path, listen_fd,
+                                channel_event_cb, s);
     if (!s->channel) {
         g_critical("failed to create guest agent channel");
         return false;
@@ -1024,7 +1030,9 @@ static void config_dump(GAConfig *config)
 
     g_key_file_set_boolean(keyfile, "general", "daemon", config->daemonize);
     g_key_file_set_string(keyfile, "general", "method", config->method);
-    g_key_file_set_string(keyfile, "general", "path", config->channel_path);
+    if (config->channel_path) {
+        g_key_file_set_string(keyfile, "general", "path", config->channel_path);
+    }
     if (config->log_filepath) {
         g_key_file_set_string(keyfile, "general", "logfile",
                               config->log_filepath);
@@ -1118,7 +1126,7 @@ static void config_parse(GAConfig *config, int argc, char **argv)
             break;
         case 'b': {
             if (is_help_option(optarg)) {
-                qmp_for_each_command(ga_print_cmd, NULL);
+                qmp_for_each_command(&ga_commands, ga_print_cmd, NULL);
                 exit(EXIT_SUCCESS);
             }
             config->blacklist = g_list_concat(config->blacklist,
@@ -1176,6 +1184,7 @@ static void config_free(GAConfig *config)
 #ifdef CONFIG_FSFREEZE
     g_free(config->fsfreeze_hook);
 #endif
+    g_list_free_full(config->blacklist, g_free);
     g_free(config);
 }
 
@@ -1212,7 +1221,7 @@ static bool check_is_frozen(GAState *s)
     return false;
 }
 
-static int run_agent(GAState *s, GAConfig *config)
+static int run_agent(GAState *s, GAConfig *config, int socket_activation)
 {
     ga_state = s;
 
@@ -1245,7 +1254,7 @@ static int run_agent(GAState *s, GAConfig *config)
             s->deferred_options.log_filepath = config->log_filepath;
         }
         ga_disable_logging(s);
-        qmp_for_each_command(ga_disable_non_whitelisted, NULL);
+        qmp_for_each_command(&ga_commands, ga_disable_non_whitelisted, NULL);
     } else {
         if (config->daemonize) {
             become_daemon(config->pid_filepath);
@@ -1275,7 +1284,7 @@ static int run_agent(GAState *s, GAConfig *config)
         s->blacklist = config->blacklist;
         do {
             g_debug("disabling command: %s", (char *)l->data);
-            qmp_disable_command(l->data);
+            qmp_disable_command(&ga_commands, l->data);
             l = g_list_next(l);
         } while (l);
     }
@@ -1292,7 +1301,9 @@ static int run_agent(GAState *s, GAConfig *config)
 #endif
 
     s->main_loop = g_main_loop_new(NULL, false);
-    if (!channel_init(ga_state, config->method, config->channel_path)) {
+
+    if (!channel_init(ga_state, config->method, config->channel_path,
+                      socket_activation ? FIRST_SOCKET_ACTIVATION_FD : -1)) {
         g_critical("failed to initialize guest agent channel");
         return EXIT_FAILURE;
     }
@@ -1311,20 +1322,16 @@ static int run_agent(GAState *s, GAConfig *config)
     return EXIT_SUCCESS;
 }
 
-static void free_blacklist_entry(gpointer entry, gpointer unused)
-{
-    g_free(entry);
-}
-
 int main(int argc, char **argv)
 {
     int ret = EXIT_SUCCESS;
     GAState *s = g_new0(GAState, 1);
     GAConfig *config = g_new0(GAConfig, 1);
+    int socket_activation;
 
     config->log_level = G_LOG_LEVEL_ERROR | G_LOG_LEVEL_CRITICAL;
 
-    module_call_init(MODULE_INIT_QAPI);
+    qga_qmp_init_marshal(&ga_commands);
 
     init_dfl_pathnames();
     config_load(config);
@@ -1342,7 +1349,37 @@ int main(int argc, char **argv)
         config->method = g_strdup("virtio-serial");
     }
 
-    if (config->channel_path == NULL) {
+    socket_activation = check_socket_activation();
+    if (socket_activation > 1) {
+        g_critical("qemu-ga only supports listening on one socket");
+        ret = EXIT_FAILURE;
+        goto end;
+    }
+    if (socket_activation) {
+        SocketAddress *addr;
+
+        g_free(config->method);
+        g_free(config->channel_path);
+        config->method = NULL;
+        config->channel_path = NULL;
+
+        addr = socket_local_address(FIRST_SOCKET_ACTIVATION_FD, NULL);
+        if (addr) {
+            if (addr->type == SOCKET_ADDRESS_KIND_UNIX) {
+                config->method = g_strdup("unix-listen");
+            } else if (addr->type == SOCKET_ADDRESS_KIND_VSOCK) {
+                config->method = g_strdup("vsock-listen");
+            }
+
+            qapi_free_SocketAddress(addr);
+        }
+
+        if (!config->method) {
+            g_critical("unsupported listen fd type");
+            ret = EXIT_FAILURE;
+            goto end;
+        }
+    } else if (config->channel_path == NULL) {
         if (strcmp(config->method, "virtio-serial") == 0) {
             /* try the default path for the virtio-serial port */
             config->channel_path = g_strdup(QGA_VIRTIO_PATH_DEFAULT);
@@ -1371,16 +1408,17 @@ int main(int argc, char **argv)
         goto end;
     }
 
-    ret = run_agent(s, config);
+    ret = run_agent(s, config, socket_activation);
 
 end:
     if (s->command_state) {
         ga_command_state_cleanup_all(s->command_state);
+        ga_command_state_free(s->command_state);
+        json_message_parser_destroy(&s->parser);
     }
     if (s->channel) {
         ga_channel_free(s->channel);
     }
-    g_list_foreach(config->blacklist, free_blacklist_entry, NULL);
     g_free(s->pstate_filepath);
     g_free(s->state_filepath_isfrozen);
 
@@ -1389,6 +1427,10 @@ end:
     }
 
     config_free(config);
+    if (s->main_loop) {
+        g_main_loop_unref(s->main_loop);
+    }
+    g_free(s);
 
     return ret;
 }

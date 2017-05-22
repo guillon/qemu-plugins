@@ -130,7 +130,6 @@ enum {
 
 typedef struct QEDAIOCB {
     BlockAIOCB common;
-    QEMUBH *bh;
     int bh_ret;                     /* final return status for completion bh */
     QSIMPLEQ_ENTRY(QEDAIOCB) next;  /* next request */
     int flags;                      /* QED_AIOCB_* bits ORed together */
@@ -198,6 +197,9 @@ enum {
  * table offset, respectively.  len is number of contiguous unallocated bytes.
  */
 typedef void QEDFindClusterFunc(void *opaque, int ret, uint64_t offset, size_t len);
+
+void qed_acquire(BDRVQEDState *s);
+void qed_release(BDRVQEDState *s);
 
 /**
  * Generic callback for chaining async callbacks

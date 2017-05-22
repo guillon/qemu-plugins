@@ -156,12 +156,11 @@ struct TestIOChannelData {
 };
 
 
-static void test_io_channel_complete(Object *src,
-                                     Error *err,
+static void test_io_channel_complete(QIOTask *task,
                                      gpointer opaque)
 {
     struct TestIOChannelData *data = opaque;
-    data->err = err != NULL;
+    data->err = qio_task_propagate_error(task, NULL);
     g_main_loop_quit(data->loop);
 }
 
@@ -235,6 +234,8 @@ static void test_io_channel(bool async,
                  qio_channel_has_feature(src, QIO_CHANNEL_FEATURE_FD_PASS));
         g_assert(!passFD ||
                  qio_channel_has_feature(dst, QIO_CHANNEL_FEATURE_FD_PASS));
+        g_assert(qio_channel_has_feature(src, QIO_CHANNEL_FEATURE_SHUTDOWN));
+        g_assert(qio_channel_has_feature(dst, QIO_CHANNEL_FEATURE_SHUTDOWN));
 
         test = qio_channel_test_new();
         qio_channel_test_run_threads(test, true, src, dst);
@@ -249,6 +250,8 @@ static void test_io_channel(bool async,
                  qio_channel_has_feature(src, QIO_CHANNEL_FEATURE_FD_PASS));
         g_assert(!passFD ||
                  qio_channel_has_feature(dst, QIO_CHANNEL_FEATURE_FD_PASS));
+        g_assert(qio_channel_has_feature(src, QIO_CHANNEL_FEATURE_SHUTDOWN));
+        g_assert(qio_channel_has_feature(dst, QIO_CHANNEL_FEATURE_SHUTDOWN));
 
         test = qio_channel_test_new();
         qio_channel_test_run_threads(test, false, src, dst);
@@ -263,6 +266,8 @@ static void test_io_channel(bool async,
                  qio_channel_has_feature(src, QIO_CHANNEL_FEATURE_FD_PASS));
         g_assert(!passFD ||
                  qio_channel_has_feature(dst, QIO_CHANNEL_FEATURE_FD_PASS));
+        g_assert(qio_channel_has_feature(src, QIO_CHANNEL_FEATURE_SHUTDOWN));
+        g_assert(qio_channel_has_feature(dst, QIO_CHANNEL_FEATURE_SHUTDOWN));
 
         test = qio_channel_test_new();
         qio_channel_test_run_threads(test, true, src, dst);
@@ -277,6 +282,8 @@ static void test_io_channel(bool async,
                  qio_channel_has_feature(src, QIO_CHANNEL_FEATURE_FD_PASS));
         g_assert(!passFD ||
                  qio_channel_has_feature(dst, QIO_CHANNEL_FEATURE_FD_PASS));
+        g_assert(qio_channel_has_feature(src, QIO_CHANNEL_FEATURE_SHUTDOWN));
+        g_assert(qio_channel_has_feature(dst, QIO_CHANNEL_FEATURE_SHUTDOWN));
 
         test = qio_channel_test_new();
         qio_channel_test_run_threads(test, false, src, dst);
@@ -383,7 +390,7 @@ static void test_io_channel_unix(bool async)
 
     qapi_free_SocketAddress(listen_addr);
     qapi_free_SocketAddress(connect_addr);
-    unlink(TEST_SOCKET);
+    g_assert(g_file_test(TEST_SOCKET, G_FILE_TEST_EXISTS) == FALSE);
 }
 
 
@@ -491,6 +498,37 @@ static void test_io_channel_unix_fd_pass(void)
     }
     g_free(fdrecv);
 }
+
+static void test_io_channel_unix_listen_cleanup(void)
+{
+    QIOChannelSocket *ioc;
+    struct sockaddr_un un;
+    int sock;
+
+#define TEST_SOCKET "test-io-channel-socket.sock"
+
+    ioc = qio_channel_socket_new();
+
+    /* Manually bind ioc without calling the qio api to avoid setting
+     * the LISTEN feature */
+    sock = qemu_socket(PF_UNIX, SOCK_STREAM, 0);
+    memset(&un, 0, sizeof(un));
+    un.sun_family = AF_UNIX;
+    snprintf(un.sun_path, sizeof(un.sun_path), "%s", TEST_SOCKET);
+    unlink(TEST_SOCKET);
+    bind(sock, (struct sockaddr *)&un, sizeof(un));
+    ioc->fd = sock;
+    ioc->localAddrLen = sizeof(ioc->localAddr);
+    getsockname(sock, (struct sockaddr *)&ioc->localAddr,
+                &ioc->localAddrLen);
+
+    g_assert(g_file_test(TEST_SOCKET, G_FILE_TEST_EXISTS));
+    object_unref(OBJECT(ioc));
+    g_assert(g_file_test(TEST_SOCKET, G_FILE_TEST_EXISTS));
+
+    unlink(TEST_SOCKET);
+}
+
 #endif /* _WIN32 */
 
 
@@ -562,6 +600,8 @@ int main(int argc, char **argv)
                     test_io_channel_unix_async);
     g_test_add_func("/io/channel/socket/unix-fd-pass",
                     test_io_channel_unix_fd_pass);
+    g_test_add_func("/io/channel/socket/unix-listen-cleanup",
+                    test_io_channel_unix_listen_cleanup);
 #endif /* _WIN32 */
 
     return g_test_run();
