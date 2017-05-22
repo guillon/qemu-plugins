@@ -1225,6 +1225,7 @@ static int gdb_handle_packet(GDBState *s, const char *line_buf)
             break;
         }
 #endif /* !CONFIG_USER_ONLY */
+#ifdef CONFIG_TCG_PLUGIN
         const char* plugins_prefix = "qemu.plugins";
         if (strncmp(p, plugins_prefix, strlen(plugins_prefix)) == 0) {
             char separator = p[strlen(plugins_prefix)];
@@ -1254,6 +1255,7 @@ static int gdb_handle_packet(GDBState *s, const char *line_buf)
             g_free(command_answer);
             break;
         }
+#endif /* CONFIG_TCG_PLUGIN */
         if (is_query_packet(p, "Supported", ':')) {
             snprintf(buf, sizeof(buf), "PacketSize=%x", MAX_PACKET_LENGTH);
             cc = CPU_GET_CLASS(first_cpu);
